@@ -35,8 +35,8 @@ use pyo3::types::PyType;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{
-    Engine, PerOpSolValue, PerOpValue, RuntimeConfig, StaticMode, StaticResult,
-    DEFAULT_STATIC_STRIDE,
+    Engine, PerOpSolValue, PerOpValue, PerOpValueWithMetadata, RuntimeConfig, StaticMode,
+    StaticResult, DEFAULT_STATIC_STRIDE,
 };
 use crate::{BackendKind, DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
@@ -58,6 +58,7 @@ fn _build_smoke() -> u32 {
 static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static MISSING_SYSTEM_FLOPS_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static SOL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 
 /// Resolve (and memoize) one sdk error class; `None` when the sdk is not
 /// importable, so the caller falls back to `PyValueError`.
@@ -92,6 +93,9 @@ fn sdk_error_type(
 /// * `AicError::MissingSystemFlops` raises
 ///   `aiconfigurator_core.sdk.errors.MissingSystemFlopsError` (strict per-dtype
 ///   `*_tc_flops` resolution — a `ValueError` subclass on the Python side);
+/// * `AicError::SolNotImplemented` raises
+///   `aiconfigurator_core.sdk.errors.SolNotImplementedError` (the analytic SOL
+///   path has no implementation for a required operator);
 /// * everything else stays `PyValueError`.
 ///
 /// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
@@ -107,6 +111,8 @@ fn aic_to_py(e: AicError) -> PyErr {
         ))
     } else if matches!(e, AicError::MissingSystemFlops(_)) {
         Some((&MISSING_SYSTEM_FLOPS_ERROR, "MissingSystemFlopsError"))
+    } else if matches!(e, AicError::SolNotImplemented(_)) {
+        Some((&SOL_NOT_IMPLEMENTED_ERROR, "SolNotImplementedError"))
     } else {
         None
     };
@@ -462,6 +468,52 @@ impl AicEngine {
             .map_err(aic_to_py)
     }
 
+    /// Internal metadata-bearing counterpart of `run_static_per_op`; each
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn _run_static_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
+    ) -> PyResult<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>)> {
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .run_static_per_op_with_metadata(&rt, mode, stride)
+        })
+        .map_err(aic_to_py)
+    }
+
     /// `mixed_step_breakdown` with the per-op values kept: returns
     /// ``(shared_non_attention, context_attention, decode_attention)`` lists
     /// of ``(name, latency_ms, energy_wms, source)`` tuples. The
@@ -497,6 +549,43 @@ impl AicEngine {
         .map_err(aic_to_py)
     }
 
+    /// Internal metadata-bearing counterpart of `mixed_step_breakdown_per_op`;
+    /// each fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn _mixed_step_breakdown_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(
+        Vec<PerOpValueWithMetadata>,
+        Vec<PerOpValueWithMetadata>,
+        Vec<PerOpValueWithMetadata>,
+    )> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown_per_op_with_metadata(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
     /// `decode_step_latency` with the per-op values kept: returns a list of
     /// ``(name, latency_ms, energy_wms, source)`` tuples for one
     /// generation-only step.
@@ -513,6 +602,30 @@ impl AicEngine {
         py.allow_threads(|| {
             self.inner
                 .decode_step_per_op(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `decode_step_per_op`; each
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn _decode_step_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<Vec<PerOpValueWithMetadata>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.decode_step_per_op_with_metadata(
+                gen_tokens,
+                isl,
+                osl,
+                gen_seq_imbalance_correction_scale,
+            )
         })
         .map_err(aic_to_py)
     }
@@ -1119,8 +1232,8 @@ pub(crate) fn compile_engine_to_engine(
 }
 
 /// `DataType` → `GEMMQuantMode` enum name. `None` (auto-infer) for DataTypes
-/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4;
-/// `int8`→`int8_wo`, `int4`→`int4_wo`.
+/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4
+/// and w4a16_nvfp4; `int8`→`int8_wo`, `int4`→`int4_wo`.
 fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
     match dtype? {
         DataType::Bfloat16 => Some("bfloat16"),
@@ -1130,6 +1243,7 @@ fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
         DataType::Nvfp4 => Some("nvfp4"),
         DataType::Int8 => Some("int8_wo"),
         DataType::Int4 => Some("int4_wo"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
         // float16, w4afp8, w4a16_mxfp4, w4a8_mxfp4_mxfp8 have no GEMM enum name.
         _ => None,
     }
@@ -1146,6 +1260,7 @@ fn moe_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
         DataType::W4afp8 => Some("w4afp8"),
         DataType::W4a16Mxfp4 => Some("w4a16_mxfp4"),
         DataType::W4a8Mxfp4Mxfp8 => Some("w4a8_mxfp4_mxfp8"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
         _ => None,
     }
 }
@@ -1350,9 +1465,29 @@ mod tests {
         pyo3::prepare_freethreaded_python();
     }
 
+    #[test]
+    fn w4a16_nvfp4_wire_dtype_maps_to_distinct_gemm_mode() {
+        assert_eq!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            gemm_quant_name(Some(&DataType::Int4))
+        );
+        assert_eq!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            moe_quant_name(Some(&DataType::Int4))
+        );
+    }
+
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
-    /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
+    /// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables.
     /// `Elementwise` is DB-free (pure mem-bandwidth SOL); `Gemm` and
     /// `ContextAttention` hit `gemm_perf` / `context_attention_perf`, both of
     /// which exist for this fixture. Mirrors a MiniMax-shaped context graph
@@ -1423,7 +1558,7 @@ mod tests {
             system_name: "b200_sxm".to_string(),
             systems_path: None,
             backend: BackendKind::Vllm,
-            backend_version: Some("0.19.0".to_string()),
+            backend_version: Some("0.24.0".to_string()),
             forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
@@ -1443,6 +1578,7 @@ mod tests {
             speculative: None,
             enable_shared_layer: None,
             strict_provenance: false,
+            tolerate_dirless_version: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
@@ -1450,7 +1586,7 @@ mod tests {
     }
 
     /// Build bincoded `EngineSpec` bytes from hand-built op lists. The lists
-    /// query the real b200_sxm/vllm/0.19.0 perf tables so the binding
+    /// query the real b200_sxm/vllm/0.24.0 perf tables so the binding
     /// pass-through numbers are real, not synthetic.
     fn fixture_spec_bytes() -> Vec<u8> {
         let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());
@@ -1668,6 +1804,14 @@ mod tests {
             check(
                 AicError::EmpiricalNotImplemented("no basis".to_string()),
                 "EmpiricalNotImplementedError",
+            );
+            check(
+                AicError::MissingSystemFlops("no fp4 throughput".to_string()),
+                "MissingSystemFlopsError",
+            );
+            check(
+                AicError::SolNotImplemented("no SOL decomposition".to_string()),
+                "SolNotImplementedError",
             );
 
             // Non-typed variants stay ValueError regardless of the sdk.

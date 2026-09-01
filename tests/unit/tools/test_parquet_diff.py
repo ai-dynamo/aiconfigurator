@@ -161,6 +161,45 @@ def test_measurement_only_columns_use_full_row_delta(parquet_diff_module, tmp_pa
     assert row_diff.note == "unavailable keys; exact full-row add/remove diff used"
 
 
+def test_power_limit_is_a_measurement_not_an_identity_column(parquet_diff_module):
+    columns = ["framework", "shape", "latency", "power", "power_limit"]
+
+    assert parquet_diff_module._select_key_columns(columns, columns) == ["framework", "shape"]
+
+
+def test_power_metric_contract_rejects_null_non_double_and_invalid_values(parquet_diff_module):
+    table = pa.table(
+        {
+            "power": pa.array([100.0, None, -1.0, float("inf")], type=pa.float64()),
+            "power_limit": pa.array(["1000", "1000", "1000", "1000"]),
+        }
+    )
+
+    assert parquet_diff_module._power_metric_issues(table) == [
+        "power contains 1 null cells",
+        "power contains 2 non-finite or negative values",
+        "power_limit must be double, found string",
+    ]
+
+
+def test_strict_mode_fails_on_invalid_power_metrics(parquet_diff_module):
+    comparison = parquet_diff_module.Comparison(
+        path="gemm_perf.parquet",
+        base_path="gemm_perf.parquet",
+        status="M",
+        base_rows=1,
+        head_rows=1,
+        columns_match=True,
+        content_match=False,
+        base_hash="base",
+        head_hash="head",
+        row_diff=None,
+        power_issues=["power contains 1 null cells"],
+    )
+
+    assert parquet_diff_module.should_fail_strict([comparison], [])
+
+
 def test_full_row_delta_preserves_original_nested_values(parquet_diff_module):
     row = {"latency": float("nan"), "power": {"rails": ["gpu", "soc"]}}
 

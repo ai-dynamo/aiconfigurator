@@ -19,9 +19,12 @@ from aiconfigurator.sdk.errors import (
     KVCacheCapacityError,
     NoFeasibleConfigError,
 )
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, MoECommFallback
 from aiconfigurator.sdk.sweep import (
     _DEFAULT_AGG_BATCH_SCHEDULE,
     _agg_ctx_tokens_list,
+    _preferred_sweep_exception,
     sweep_disagg,
 )
 
@@ -66,6 +69,16 @@ def test_default_agg_batch_schedule_is_monotonic_and_capped():
     assert sorted(_DEFAULT_AGG_BATCH_SCHEDULE) == _DEFAULT_AGG_BATCH_SCHEDULE
     assert _DEFAULT_AGG_BATCH_SCHEDULE[0] == 1
     assert _DEFAULT_AGG_BATCH_SCHEDULE[-1] == 1024
+
+
+def test_sweep_terminal_error_prefers_structured_perf_data_miss():
+    data_miss = RuntimeError("valid parallel config lacks measured data")
+    data_miss.__cause__ = PerfDataNotAvailableError("missing W4A16 lane")
+    invalid_tp = AssertionError("num_heads must be divisible by tp_size")
+    other_error = ValueError("other")
+
+    assert _preferred_sweep_exception([data_miss, invalid_tp]) is data_miss
+    assert _preferred_sweep_exception([invalid_tp, other_error]) is other_error
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +208,48 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         assert point_rt.seq_imbalance_correction_scale == 1.5
         assert point_rt.engine_step_backend == "rust"
         assert point_rt.batch_size == 1
+
+
+def test_sweep_agg_retains_fallbacks_and_dedupes_on_visible_columns(monkeypatch):
+    fallback = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+
+    def _predict(**_kwargs):
+        summary = MagicMock()
+        summary.check_oom.return_value = False
+        summary.check_kv_cache_oom.return_value = False
+        summary.get_result_dict.return_value = {"ttft": 1.0, "tpot": 1.0, "seq/s": 2.0}
+        summary.get_per_ops_source.return_value = {}
+        summary.get_moe_comm_fallbacks.return_value = (fallback, fallback)
+        return summary
+
+    monkeypatch.setattr(sweep, "predict_agg_worker", _predict)
+    point_df, *_ = sweep._sweep_one_parallel_agg(
+        model=MagicMock(),
+        backend=MagicMock(),
+        database=MagicMock(),
+        runtime_config=config.RuntimeConfig(isl=1024, osl=1, ttft=2.0, tpot=2.0),
+        top_k=0,
+        max_batch_size=1,
+        ctx_stride=1024,
+        enable_chunked_prefill=False,
+        free_gpu_memory_fraction=None,
+        max_seq_len=None,
+    )
+    assert point_df.iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (fallback,)
+
+    monkeypatch.setattr(sweep, "get_backend", lambda _name: MagicMock())
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "_sweep_one_parallel_agg", lambda **_kwargs: (point_df.copy(), True, True, 0))
+    result = sweep.sweep_agg(
+        model_path="m",
+        runtime_config=config.RuntimeConfig(isl=1024, osl=1, ttft=2.0, tpot=2.0),
+        database=MagicMock(),
+        backend_name="sglang",
+        model_config=config.ModelConfig(),
+        parallel_config_list=[(1, 1, 1, 1, 1, 1), (2, 1, 1, 1, 1, 1)],
+    )
+    assert len(result) == 1
+    assert result.iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (fallback,)
 
 
 def test_sweep_agg_disables_gen_dedup_for_speculative_schedules(monkeypatch):
@@ -336,6 +391,75 @@ def _worker_row(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def test_disagg_worker_candidates_stamp_canonical_fallback_provenance(monkeypatch):
+    fallback = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+    summary = MagicMock()
+    summary.check_oom.return_value = False
+    summary.check_kv_cache_oom.return_value = False
+    summary.get_summary_df.return_value = pd.DataFrame([_worker_row()])
+    summary.get_moe_comm_fallbacks.return_value = (fallback, fallback)
+    monkeypatch.setattr(sweep, "get_backend", lambda _name: MagicMock())
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "predict_disagg_worker", lambda **_kwargs: summary)
+
+    result = sweep._get_disagg_worker_candidates(
+        model_path="m",
+        model_config=config.ModelConfig(),
+        parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        b_list=[1],
+        runtime_config=config.RuntimeConfig(isl=1000, osl=100),
+        role="prefill",
+        database=MagicMock(),
+        backend_name="sglang",
+        latency_correction=1.0,
+    )
+
+    assert result.iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (fallback,)
+
+
+def test_sweep_disagg_retains_role_fallbacks_through_matching_and_dedupe(monkeypatch):
+    context = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+    generation = MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1)
+    prefill_df = pd.DataFrame([_worker_row(**{MOE_COMM_FALLBACKS_COLUMN: (context,)})])
+    decode_df = pd.DataFrame(
+        [
+            _worker_row(
+                bs=32,
+                global_bs=32,
+                concurrency=32,
+                ttft=0.0,
+                tpot=8.0,
+                **{"seq/s": 20.0, "tokens/s/user": 125.0, MOE_COMM_FALLBACKS_COLUMN: (generation, context)},
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        sweep,
+        "_get_disagg_worker_candidates",
+        lambda *, role, **_kwargs: (decode_df if role == "decode" else prefill_df).copy(),
+    )
+
+    result = sweep_disagg(
+        model_path="m",
+        runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=1000.0, tpot=[10.0, 10.0]),
+        prefill_database=MagicMock(),
+        prefill_backend_name="sglang",
+        prefill_model_config=config.ModelConfig(),
+        prefill_parallel_config_list=[(4, 1, 1, 1, 1, 1)],
+        prefill_latency_correction=1.0,
+        decode_database=MagicMock(),
+        decode_backend_name="sglang",
+        decode_model_config=config.ModelConfig(),
+        decode_parallel_config_list=[(4, 1, 1, 1, 1, 1)],
+        decode_latency_correction=1.0,
+        prefill_num_worker_list=[1],
+        decode_num_worker_list=[1],
+    )
+
+    assert len(result) == 1
+    assert result.iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (context, generation)
 
 
 def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):

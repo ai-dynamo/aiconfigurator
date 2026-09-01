@@ -47,6 +47,11 @@ from aiconfigurator_core.sdk.models import get_model
 from aiconfigurator_core.sdk.operations import FPMForwardOp
 from aiconfigurator_core.sdk.operations.base import Operation
 
+PerOpValue = tuple[str, float, float, str]
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
+
 # Reuse the exact quant-mode -> Rust ``DataType`` serde-string mappers the live
 # ctypes bridge uses, so the compiled ``EngineConfig`` decodes the same way.
 # The Python quant enum names (``int8_wo`` / ``int4_wo`` / ``sq`` / ``fp8_ootb``)
@@ -193,6 +198,39 @@ def _strict_provenance_flag(database: Any) -> bool:
     return bool(getattr(database, "strict_provenance", False)) if database is not None else False
 
 
+def _literal_backend_version(
+    system: str,
+    backend: str,
+    backend_version: str | None,
+    systems_path: str | None,
+    database: Any,
+) -> str | None:
+    """Resolve the version the ``EngineSpec`` carries to a LITERAL directory name.
+
+    The Rust side reloads the perf database from this string
+    (``AicEngine.from_spec`` and the native ``AicEngineBuilder`` path used by
+    the Dynamo Mocker) and resolves no slot aliases — slot semantics
+    (``current`` / ``previous`` / ``next``) live in the python layer only.
+    Preference order: the loaded database's own version (the ground truth for
+    what the spec was compiled against), then slot resolution of the request
+    (an omitted version means the ``current`` slot). Slot-policy errors
+    (unlisted versions, unpopulated aliases) PROPAGATE — the spec builder is
+    a user-level surface and must not smuggle ungated coordinates onto the
+    wire. Trees without a slots file (synthetic/external) keep the ungated
+    passthrough.
+    """
+    resolved = getattr(database, "version", None) if database is not None else None
+    if resolved:
+        return str(resolved)
+    from aiconfigurator_core.sdk import perf_database
+
+    slots = perf_database.get_version_slots(system, backend, systems_paths=systems_path)
+    if slots is None:
+        return backend_version
+    requested = "current" if backend_version is None else backend_version
+    return perf_database.resolve_query_version(system, backend, requested, systems_paths=systems_path)
+
+
 def _engine_config_dict(
     *,
     model: Any,
@@ -228,7 +266,9 @@ def _engine_config_dict(
         "system_name": system,
         "systems_path": systems_path,
         "backend": backend,
-        "backend_version": backend_version,
+        # Always a literal version directory name, never a slot alias — the
+        # Rust side reloads the perf database from this string verbatim.
+        "backend_version": _literal_backend_version(system, backend, backend_version, systems_path, database),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
@@ -254,6 +294,11 @@ def _engine_config_dict(
         # is always explicit kind tokens, ``None`` = the default ALL policy.
         "database_mode": _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Directory-less fleet-`next` marker (design §14): set only when the
+        # loaded database rode backward fill without a local version
+        # directory, so the Rust reload skips its missing-directory gate for
+        # exactly this identity.
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn at the top level
@@ -351,17 +396,19 @@ def compile_engine(
     apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
-    # The database supplies the shared-layer perf sources, the query mode and
-    # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
-    # and tolerate failure; the Rust core falls back to its own defaults.
-    database = _maybe_load_database(system, backend, backend_version, systems_path)
+    # Slot policy FIRST, tolerance second: resolve the requested version to a
+    # literal (raising on unlisted versions / unpopulated aliases) before the
+    # tolerant database load — `_maybe_load_database` forgives LOAD failures
+    # (the Rust core falls back to its own defaults), never policy violations.
+    literal_version = _literal_backend_version(system, backend, backend_version, systems_path, None)
+    database = _maybe_load_database(system, backend, literal_version, systems_path)
 
     spec_json = build_engine_spec_json(
         model,
         model_path=model_path,
         system=system,
         backend=backend,
-        backend_version=backend_version,
+        backend_version=literal_version,
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=model_config.nextn,
@@ -469,6 +516,10 @@ def build_database_probe_spec_json(
         "strict_provenance": _strict_provenance_flag(database),
         "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Same dir-less-next tolerance as the model spec builder: a database
+        # get_database returned as valid must stay valid through the probe
+        # handle (table views, ad-hoc op-list evaluation).
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     spec = {
@@ -744,13 +795,39 @@ class EngineHandle:
         gen_seq_imbalance_correction_scale: float = 1.0,
         mode: str = "static",
         stride: int = 32,
-    ) -> tuple[list[tuple[str, float, float, str]], list[tuple[str, float, float, str]]]:
+    ) -> tuple[list[PerOpValue], list[PerOpValue]]:
         """``run_static`` with the per-op values kept: ``(context, generation)``
         lists of ``(name, latency_ms, energy_wms, source)``, name-folded (each
         name appears once, accumulated with Python's phase-dict semantics;
         generation values are per-step-folded, then weighted by
         ``repeat_count``)."""
         return self._engine.run_static_per_op(
+            int(batch_size),
+            int(beam_width),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+            mode,
+            int(stride),
+        )
+
+    def _run_static_per_op_with_metadata(
+        self,
+        *,
+        batch_size: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        beam_width: int = 1,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+        mode: str = "static",
+        stride: int = 32,
+    ) -> tuple[list[_PerOpValueWithMetadata], list[_PerOpValueWithMetadata]]:
+        """Internal static per-op stream with inline-first fallback metadata."""
+        return self._engine._run_static_per_op_with_metadata(
             int(batch_size),
             int(beam_width),
             int(isl),
@@ -772,14 +849,39 @@ class EngineHandle:
         seq_imbalance_correction_scale: float = 1.0,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> tuple[
-        list[tuple[str, float, float, str]],
-        list[tuple[str, float, float, str]],
-        list[tuple[str, float, float, str]],
+        list[PerOpValue],
+        list[PerOpValue],
+        list[PerOpValue],
     ]:
         """``mixed_step_breakdown`` with the per-op values kept:
         ``(shared_non_attention, context_attention, decode_attention)`` lists;
         context-attention entries arrive already divided by ``ceil(isl/ctx)``."""
         return self._engine.mixed_step_breakdown_per_op(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
+
+    def _mixed_step_breakdown_per_op_with_metadata(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+    ]:
+        """Internal mixed-step per-op stream with inline-first fallback metadata."""
+        return self._engine._mixed_step_breakdown_per_op_with_metadata(
             int(ctx_tokens),
             int(gen_tokens),
             int(isl),
@@ -795,9 +897,21 @@ class EngineHandle:
         isl: int,
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """``decode_step_latency`` with the per-op values kept."""
         return self._engine.decode_step_per_op(
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )
+
+    def _decode_step_per_op_with_metadata(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> list[_PerOpValueWithMetadata]:
+        """Internal decode per-op stream with inline-first fallback metadata."""
+        return self._engine._decode_step_per_op_with_metadata(
             int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
         )
 
@@ -810,7 +924,7 @@ class EngineHandle:
         prefix: int = 0,
         seq_imbalance_correction_scale: float = 1.0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Thin op-list evaluation over the compiled CONTEXT op list: evaluate
         the ops at ``indices`` (positions in the spec's ``context_ops``, which
         mirror ``model.context_ops`` order) at the context-phase shape.
@@ -835,7 +949,7 @@ class EngineHandle:
         gen_seq_imbalance_correction_scale: float = 1.0,
         prefix: int = 0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Thin op-list evaluation over the compiled GENERATION op list at the
         decode-step shape (see :meth:`evaluate_context_ops`). The base decode
         walk carries no prefix; ``prefix`` exists for orchestrations that
@@ -859,7 +973,7 @@ class EngineHandle:
         prefix: int = 0,
         imbalance_correction_scale: float = 1.0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against
         this engine's database — serves op lists deliberately NOT in the
         compiled spec (the VL encoder phase); the caller keeps the shape math."""

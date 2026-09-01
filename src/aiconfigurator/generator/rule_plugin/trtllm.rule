@@ -53,3 +53,12 @@ when (ModelConfig.nextn or 0) > 0:
 # Guard: TRT-LLM rejects literal float16/bfloat16 as kv-cache dtype -> "auto".
 when kv_cache_dtype in ("float16", "bfloat16"):
     kv_cache_dtype = "auto"
+
+# MiniMax-M3 sparse attention (1.3.0rc23+): serving defaults to the Triton
+# reference path, but the SM100-family perf tables are collected with the
+# msa (fmha_sm100) implementation — prescribe it so deployments run exactly
+# the configuration the data represents (PR #1507 review). The bridge sets
+# ModelConfig.msa_sparse_implementation only for MSA-architecture models on
+# sm_version 100/103; byte-safe everywhere else.
+when (ModelConfig.msa_sparse_implementation or '') != '':
+    agg_prefill_decode msa_sparse_implementation = ModelConfig.msa_sparse_implementation

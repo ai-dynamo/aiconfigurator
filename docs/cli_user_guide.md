@@ -115,7 +115,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 **Optional arguments (shared):**
 - `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen`
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
-- `--backend-version`: Backend database version. Default: latest
+- `--backend-version`: Backend database version — a queryable slot version or the aliases `current` / `previous` / `next` (see `systems/query_versions.yaml`). Default: `current`.
 - `--database-mode`: Database mode (`SILICON`, `HYBRID`, `EMPIRICAL`, `SOL`). Default: `SILICON`
 - `--isl`: Input sequence length. Default: `1024`
 - `--osl`: Output sequence length. Default: `1024`
@@ -254,6 +254,16 @@ aiconfigurator cli estimate \
 
 `--detail` replaces the removed `--print-per-ops-latency` (the old flag still works as a deprecation alias).
 
+#### MoE communication topology provenance
+
+For SGLang DeepEP communication (`deepep_ht` or `deepep_ll`), AIConfigurator always uses silicon data collected at the exact requested EP size and node count when that topology is available. If a multi-node request has no exact all-to-all row but the same MoE shape has the canonical legacy EP8/node1 row, AIConfigurator may use that row as a substitute; all other frameworks, communication backends, single-node requests, and missing donor rows remain exact-topology only. A compatible MoE expert-compute row is still required at the requested EP size.
+
+A successfully executed EP8/node1 substitution keeps the generic per-op source as `estimated` and records separate requested-versus-measurement coordinates. The CLI emits a warning by default, for example `context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data`. Add `--detail source` to show the same executed provenance alongside the per-op source table. Exact hits and failed substitute lookups do not produce a fallback record.
+
+The Python `cli_estimate` API exposes the ordered, de-duplicated records through `EstimateResult.moe_comm_fallbacks`. Each `MoECommFallback` identifies the inference phase, communication backend, requested EP size and node count, and measurement EP size and node count.
+
+`Task.run_single_agg`, `Task.run_single_disagg`, and aggregate/disaggregate sweep result rows retain the records in the hidden object column `_moe_comm_fallbacks`, including through rate matching, Pareto selection, and visible-column deduplication. Saved `best_config_topn.csv` and `pareto.csv` files omit this object column; for every selected configuration that used a substitution, the corresponding `topN/moe_comm_fallbacks.json` sidecar contains the records and the CLI logs a warning naming that file.
+
 ```bash
 aiconfigurator cli estimate \
   --model-path Qwen/Qwen3-32B --system h200_sxm \
@@ -323,7 +333,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 
 **Optional arguments:**
 - `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.
-- `--backend-version`: Filter by a specific backend version. Defaults to the latest version found in the support matrix for the given model/architecture/system/backend combination.
+- `--backend-version`: Filter by a specific backend version (slot versions / `current` / `previous` / `next` aliases). Defaults to the current slot for the given system/backend.
 - `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 
 **Example output:**
@@ -420,7 +430,7 @@ If you want to specify your problem with more details, we allow to define `ttft`
 Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode accepts:
 
 - `--decode-system`: System (GPU type) for disagg decode workers. Defaults to `--system`. Use it for heterogeneous prefill/decode (e.g. B200 prefill + H200 decode).
-- `--backend-version`: Backend database version. Default: latest.
+- `--backend-version`: Backend database version — a queryable slot version or the aliases `current` / `previous` / `next`. Default: `current`.
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
@@ -718,7 +728,7 @@ artifacts/
 
 For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it contains a keepalive `LeaderWorkerSet` by default or a `PodCliqueSet` when `K8sConfig.fpm_orchestrator` is `grove`. Its size and per-node GPU limit come from the resolved topology. GB200/MNNVL output also includes its `ComputeDomain` in the same YAML file. All forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `fpm_env.sh` owns rank/leader discovery and exports the per-cell `FPM_*` collection facts; `run.sh` sources it, adds the engine environment exports, and execs the complete resolved `python3 -m dynamo.vllm ...` command.
 
-`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove.
+`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove. The Collector exposes the same choice as `--fpm-orchestrator`.
 
 For one node, apply the Pod, wait for it to become ready, and stream the script into it:
 
@@ -730,15 +740,15 @@ kubectl exec -i <pod> -- bash -s < artifacts/run.sh
 
 For multiple nodes, the collector stages inputs first and then starts its collection runtime concurrently on every workload Pod; the runtime sources `fpm_env.sh` — which derives rank and leader address from the controller-injected LWS or Grove values — before invoking `run.sh`, which adds the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
 
-With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v2 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. A terminal invalid result stops the script. A collection driver still owns staging its collection runtime on every Pod, strict result validation, result download/aggregation/evidence, exit coordination, and cleanup.
+With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v2 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. A terminal invalid result stops the script. The Collector still owns staging `run.sh`, `fpm_env.sh`, its collection runtime (`fpm_exec.sh`), and the runtime preflight on every Pod, plus the completion gate, strict result validation, result download/aggregation/evidence, exit coordination, and cleanup.
 
 Every execution starts a new engine and reloads the model. `run.sh` refuses to overwrite any expected benchmark output, so each run must use new paths. With the default `/results` `emptyDir`, results remain only for the lifetime of the Pod. FPM V1 does not keep the engine or GPU-resident model alive between executions. Selecting any other deployment target preserves the existing generator output and behavior.
 
-The current vLLM template matrix tops out at `0.20.1`. You may pass reference `0.24.0`-only flags through `extra_cli_args`, but the generator has not yet validated those flags against a `0.24.0` runtime image.
+The current vLLM versioned template tops out at `0.20.1`; newer vLLM versions (e.g. `0.24.0` from the Dynamo `1.3.0` entry) fall back to it, and all flags emitted by that template have been validated against the `0.24.0` runtime image. You may pass `0.24.0`-only flags through `extra_cli_args`.
 
 **Generator Dynamo version** (applies to Dynamo deployments only)
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-- If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.2.0`).
+- If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.3.0`).
 - If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the selected Dynamo version mapping.
 
 Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/DynConfig/WorkerConfig/Workers.<role> sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:

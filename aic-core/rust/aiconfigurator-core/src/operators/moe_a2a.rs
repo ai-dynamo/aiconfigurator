@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::enums::DatabaseMode;
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{MoeCommFallback, PerformanceResult, Source};
 use crate::perf_database::PerfDatabase;
 
 /// The `MOE_A2A_BACKENDS` registry knowledge the operator layer needs:
@@ -45,9 +45,13 @@ use crate::perf_database::PerfDatabase;
 /// is a config `ValueError`, failed where the intent is expressed rather than
 /// surfacing later as a data miss. Pinned by
 /// `undeclared_phase_is_a_config_error_not_a_data_miss`.
-const MOE_A2A_BACKENDS: [(&str, &[&str]); 4] = [
+const MOE_A2A_BACKENDS: [(&str, &[&str]); 8] = [
     ("deepep_ht", &["dispatch", "combine"]),
     ("deepep_ll", &["dispatch", "combine"]),
+    ("deepep_v2_context", &["dispatch", "combine"]),
+    ("deepep_v2_generation", &["dispatch", "combine"]),
+    ("trtllm_deepep_ht", &["dispatch", "combine"]),
+    ("trtllm_deepep_ll", &["dispatch", "combine"]),
     ("nvlink_two_sided", &["prepare", "dispatch", "combine"]),
     ("nvlink_one_sided", &["dispatch", "combine"]),
 ];
@@ -175,31 +179,85 @@ impl MoeAllToAllOp {
                 )))
             }
         }
-        let latency = self.silicon_latency(db, tokens).map_err(|err| {
-            if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
-                // moe_comm.py:639-643 — HYBRID's empirical fallback for this
-                // family is itself the typed not-implemented raise.
-                AicError::EmpiricalNotImplemented(format!(
-                    "HYBRID empirical fallback is not available for moe_a2a {}/{}: silicon data \
-                     required (estimation tier is a planned follow-up). Silicon miss: {err}",
-                    self.comm_backend, self.phase
-                ))
-            } else {
-                err
-            }
-        })?;
-        // Python: `PerformanceResult(float(result) * scale, source=...)` — no
-        // clamp (nothing is subtracted on this path).
-        Ok(PerformanceResult::new(latency, Source::Silicon).scaled(self.scale_factor))
-    }
-
-    fn silicon_latency(&self, db: &PerfDatabase, tokens: u32) -> Result<f64, AicError> {
-        db.moe_a2a.query(
+        let exact_shape = db.moe_a2a.has_shape(
             &self.comm_backend,
             &self.phase,
             &self.comm_dtype,
             self.moe_ep_size,
             self.node_num,
+            self.hidden_size,
+            self.topk,
+            self.num_experts,
+        )?;
+        let use_node1_fallback = matches!(
+            self.comm_backend.as_str(),
+            "deepep_ht" | "deepep_ll" | "trtllm_deepep_ht" | "trtllm_deepep_ll"
+        ) && self.node_num > 1
+            && !exact_shape;
+        let (lookup_ep_size, lookup_node_num, source) = if use_node1_fallback {
+            // Preserve SGLang's legacy adapter coordinate from PR #1314.
+            // New vLLM/TRT-LLM tables use the system's physical full-node EP
+            // (EP4 on NVL4, EP8 on HGX). Every substitution is estimated.
+            let donor_ep = if db.backend == "sglang" {
+                crate::perf_database::moe_a2a::legacy_deepep_ep_size(1)
+            } else {
+                db.system_spec.node.num_gpus_per_node
+            };
+            (donor_ep, 1, Source::Estimated)
+        } else {
+            (self.moe_ep_size, self.node_num, Source::Silicon)
+        };
+        let latency = self
+            .silicon_latency_at(db, tokens, lookup_ep_size, lookup_node_num)
+            .map_err(|err| {
+                if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
+                    // moe_comm.py:639-643 — HYBRID's empirical fallback for this
+                    // family is itself the typed not-implemented raise.
+                    AicError::EmpiricalNotImplemented(format!(
+                    "HYBRID empirical fallback is not available for moe_a2a {}/{}: silicon data \
+                     required (estimation tier is a planned follow-up). Silicon miss: {err}",
+                    self.comm_backend, self.phase
+                ))
+                } else {
+                    err
+                }
+            })?;
+        // Python: `PerformanceResult(float(result) * scale, source=...)` — no
+        // clamp (nothing is subtracted on this path).
+        let result = PerformanceResult::new(latency, source).scaled(self.scale_factor);
+        if use_node1_fallback {
+            let comm_backend = match self.comm_backend.as_str() {
+                "deepep_ht" => "deepep_ht",
+                "deepep_ll" => "deepep_ll",
+                "trtllm_deepep_ht" => "trtllm_deepep_ht",
+                "trtllm_deepep_ll" => "trtllm_deepep_ll",
+                _ => unreachable!("node-1 fallback is restricted to DeepEP HT/LL backends"),
+            };
+            Ok(result.with_moe_comm_fallback(MoeCommFallback {
+                comm_backend,
+                requested_ep_size: self.moe_ep_size,
+                requested_node_num: self.node_num,
+                measurement_ep_size: lookup_ep_size,
+                measurement_node_num: lookup_node_num,
+            }))
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn silicon_latency_at(
+        &self,
+        db: &PerfDatabase,
+        tokens: u32,
+        ep_size: u32,
+        node_num: u32,
+    ) -> Result<f64, AicError> {
+        db.moe_a2a.query(
+            &self.comm_backend,
+            &self.phase,
+            &self.comm_dtype,
+            ep_size,
+            node_num,
             self.hidden_size,
             self.topk,
             self.num_experts,
@@ -213,6 +271,7 @@ impl MoeAllToAllOp {
 mod tests {
     use super::*;
     use crate::common::enums::TransferPolicy;
+    use crate::operators::{FallbackOp, Op, OverlapOp, RuntimeContext};
     use crate::perf_database::MoeA2aTable;
     use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
     use parquet::file::properties::WriterProperties;
@@ -242,6 +301,9 @@ mod tests {
     struct A2aRow {
         comm_backend: &'static str,
         phase: &'static str,
+        ep_size: i64,
+        node_num: i64,
+        sms: i64,
         num_tokens: i64,
         /// MICROseconds — the new-schema collector unit the loader /1000s.
         latency_us: f64,
@@ -256,6 +318,29 @@ mod tests {
         A2aRow {
             comm_backend,
             phase,
+            ep_size: 16,
+            node_num: 2,
+            sms: 0,
+            num_tokens,
+            latency_us,
+        }
+    }
+
+    fn a2a_row_at(
+        comm_backend: &'static str,
+        phase: &'static str,
+        ep_size: i64,
+        node_num: i64,
+        sms: i64,
+        num_tokens: i64,
+        latency_us: f64,
+    ) -> A2aRow {
+        A2aRow {
+            comm_backend,
+            phase,
+            ep_size,
+            node_num,
+            sms,
             num_tokens,
             latency_us,
         }
@@ -301,12 +386,15 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("default"); n]);
-        write_column::<Int64Type>(&mut rg, &vec![16_i64; n]);
-        write_column::<Int64Type>(&mut rg, &vec![2_i64; n]);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.ep_size).collect::<Vec<_>>());
+        write_column::<Int64Type>(
+            &mut rg,
+            &rows.iter().map(|r| r.node_num).collect::<Vec<_>>(),
+        );
         write_column::<Int64Type>(&mut rg, &vec![7168_i64; n]);
         write_column::<Int64Type>(&mut rg, &vec![8_i64; n]);
         write_column::<Int64Type>(&mut rg, &vec![256_i64; n]);
-        write_column::<Int64Type>(&mut rg, &vec![0_i64; n]);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.sms).collect::<Vec<_>>());
         write_column::<Int64Type>(
             &mut rg,
             &rows.iter().map(|r| r.num_tokens).collect::<Vec<_>>(),
@@ -341,6 +429,13 @@ mod tests {
                 // an LL (generation) backend carrying the same token points.
                 a2a_row("deepep_ll", "dispatch", 63, 63000.0),
                 a2a_row("deepep_ll", "dispatch", 64, 64000.0),
+                // Legacy node-1 DeepEP substitute (the unified adapter stores
+                // these rows at EP=8 regardless of the requested target EP).
+                a2a_row_at("deepep_ht", "dispatch", 8, 1, 20, 64, 1280.0),
+                a2a_row_at("deepep_ht", "combine", 8, 1, 20, 64, 2560.0),
+                a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 64, 12800.0),
+                a2a_row_at("trtllm_deepep_ht", "dispatch", 8, 1, 20, 64, 5120.0),
+                a2a_row_at("trtllm_deepep_ll", "dispatch", 8, 1, 0, 64, 25600.0),
             ],
         );
         let mut db = PerfDatabase::load(&systems_root(), "h200_sxm", "sglang", "0.5.6.post2")
@@ -463,6 +558,166 @@ mod tests {
         let got = scaled.query(&db, 64).expect("combine");
         assert!((got.latency_ms - 6.400 * 61.0).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Silicon);
+        assert!(got.moe_comm_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn sglang_deepep_node1_substitutes_for_missing_multi_node_scale_as_estimated() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut fallback = op("dispatch", "deepep_ht", 1);
+        fallback.moe_ep_size = 128;
+        fallback.node_num = 32;
+        fallback.sms = 20;
+        let got = fallback.query(&db, 64).expect("node-1 fallback");
+        assert!((got.latency_ms - 1.280).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "deepep_ht",
+                requested_ep_size: 128,
+                requested_node_num: 32,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn trtllm_deepep_node1_substitutes_for_missing_multi_node_scale_as_estimated() {
+        let (_tmp, mut db) = synthetic_db(DatabaseMode::Silicon);
+        db.tables_mut().backend = "trtllm".to_string();
+        let mut fallback = op("dispatch", "trtllm_deepep_ht", 1);
+        fallback.moe_ep_size = 64;
+        fallback.node_num = 8;
+        fallback.sms = 20;
+        let got = fallback.query(&db, 64).expect("node-1 fallback");
+        assert!((got.latency_ms - 5.120).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "trtllm_deepep_ht",
+                requested_ep_size: 64,
+                requested_node_num: 8,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn vllm_deepep_node1_substitutes_for_missing_multi_node_scale_as_estimated() {
+        let (_tmp, mut db) = synthetic_db(DatabaseMode::Silicon);
+        db.tables_mut().backend = "vllm".to_string();
+        let mut fallback = op("dispatch", "deepep_ll", 1);
+        fallback.moe_ep_size = 64;
+        fallback.node_num = 8;
+        fallback.sms = 0;
+        let got = fallback.query(&db, 64).expect("node-1 fallback");
+        assert!((got.latency_ms - 12.800).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "deepep_ll",
+                requested_ep_size: 64,
+                requested_node_num: 8,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn exact_requested_topology_wins_over_available_node1_donor() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        // `op` requests EP16/node2, and `synthetic_db` also contains the
+        // legacy EP8/node1 donor for this same shape. The exact 640us point
+        // must win over the donor's 1280us point.
+        let got = op("dispatch", "deepep_ht", 1)
+            .query(&db, 64)
+            .expect("exact requested topology");
+        assert!((got.latency_ms - 0.640).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Silicon);
+        assert!(got.moe_comm_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn missing_node1_donor_remains_a_data_error() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut missing = op("dispatch", "deepep_ht", 1);
+        missing.moe_ep_size = 128;
+        missing.node_num = 32;
+        missing.hidden_size = 9999;
+        missing.sms = 20;
+
+        let result = missing.query(&db, 64);
+
+        assert!(
+            matches!(result, Err(AicError::PerfDatabase(_))),
+            "an unavailable donor must remain a typed data miss, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn overlap_and_fallback_composites_preserve_every_executed_a2a_substitution() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut context = op("dispatch", "deepep_ht", 1);
+        context.moe_ep_size = 128;
+        context.node_num = 32;
+        context.sms = 20;
+        let mut generation = op("dispatch", "deepep_ll", 1);
+        generation.moe_ep_size = 128;
+        generation.node_num = 32;
+
+        let overlap = Op::Overlap(OverlapOp::new(
+            "a2a_overlap",
+            vec![Op::MoeAllToAll(context.clone())],
+            vec![Op::MoeAllToAll(generation.clone())],
+        ));
+        let overlap_result = overlap
+            .query(
+                &db,
+                &RuntimeContext {
+                    num_tokens: 64,
+                    ..RuntimeContext::default()
+                },
+            )
+            .expect("overlap query");
+        assert_eq!(
+            overlap_result
+                .moe_comm_fallbacks
+                .iter()
+                .map(|fallback| fallback.comm_backend)
+                .collect::<Vec<_>>(),
+            vec!["deepep_ht", "deepep_ll"]
+        );
+
+        let mut missing_primary = context.clone();
+        missing_primary.hidden_size = 9999;
+        let fallback = Op::Fallback(FallbackOp::new(
+            "a2a_fallback",
+            Op::MoeAllToAll(missing_primary),
+            vec![Op::MoeAllToAll(context), Op::MoeAllToAll(generation)],
+        ));
+        let fallback_result = fallback
+            .query(
+                &db,
+                &RuntimeContext {
+                    num_tokens: 64,
+                    ..RuntimeContext::default()
+                },
+            )
+            .expect("fallback query");
+        assert_eq!(
+            fallback_result
+                .moe_comm_fallbacks
+                .iter()
+                .map(|record| record.comm_backend)
+                .collect::<Vec<_>>(),
+            vec!["deepep_ht", "deepep_ll"]
+        );
     }
 
     // -----------------------------------------------------------------
@@ -541,6 +796,36 @@ mod tests {
                     "{backend} declares an unvalidatable phase {phase:?}"
                 );
             }
+        }
+    }
+
+    /// Keep the Rust constructor's validation registry in exact identity
+    /// parity with Python's public `MOE_A2A_BACKENDS` registry. A missing
+    /// identity here turns a valid Python request into a Rust config error.
+    #[test]
+    fn registry_contains_every_python_backend_identity() {
+        let names = MOE_A2A_BACKENDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "deepep_ht",
+                "deepep_ll",
+                "deepep_v2_context",
+                "deepep_v2_generation",
+                "trtllm_deepep_ht",
+                "trtllm_deepep_ll",
+                "nvlink_two_sided",
+                "nvlink_one_sided",
+            ]
+        );
+        for backend in names {
+            validate_a2a_request(backend, "dispatch")
+                .unwrap_or_else(|error| panic!("{backend} rejected: {error}"));
+            validate_a2a_request(backend, "combine")
+                .unwrap_or_else(|error| panic!("{backend} rejected: {error}"));
         }
     }
 

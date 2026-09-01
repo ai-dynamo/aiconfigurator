@@ -9,6 +9,7 @@ worker combinations whose tensor-parallel sizes match should survive the
 rate-matching step inside find_best_disagg_result_under_constraints.
 """
 
+from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -19,9 +20,25 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.performance_result import MoECommFallback
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
 
 pytestmark = pytest.mark.unit
+
+
+def test_step_estimate_preserves_existing_positional_field_order() -> None:
+    assert [field.name for field in fields(StepEstimate)][:-1] == [
+        "latency_ms",
+        "energy_wms",
+        "component_latency_ms",
+        "component_energy_wms",
+        "per_op_latency_ms",
+        "per_op_source",
+        "context_tokens",
+        "num_decode_requests",
+        "num_decode_query_tokens",
+    ]
+    assert fields(StepEstimate)[-1].name == "moe_comm_fallbacks"
 
 
 def test_inference_session_exposes_structured_mixed_step() -> None:
@@ -148,10 +165,12 @@ def _build_mock_backend():
             summary.set_context_latency_dict({"context_attention": 1.0})
             summary.set_context_energy_wms_dict({"context_attention": 200.0})
             summary.set_context_source_dict({"context_attention": "silicon"})
+            summary.set_moe_comm_fallbacks((MoECommFallback("context", "deepep_ht", 32, 8, 8, 1),))
         elif mode == "static_gen":
             summary.set_generation_latency_dict({"generation_attention": 2.0})
             summary.set_generation_energy_wms_dict({"generation_attention": 300.0})
             summary.set_generation_source_dict({"generation_attention": "empirical"})
+            summary.set_moe_comm_fallbacks((MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1),))
         return summary
 
     backend.run_static = _run_static
@@ -261,6 +280,23 @@ class TestRequireSameTPFiltering:
         }
         assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
         assert result.get_power_data_coverage() == 1.0
+
+    def test_run_disagg_carries_executed_moe_fallbacks(self, disagg_session, runtime_config, model_config):
+        result = disagg_session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+        )
+
+        assert result.get_moe_comm_fallbacks() == (
+            MoECommFallback("context", "deepep_ht", 32, 8, 8, 1),
+            MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1),
+        )
 
     def test_run_disagg_uses_role_specific_memory_fractions(self, disagg_session, runtime_config, model_config):
         disagg_session.run_disagg(

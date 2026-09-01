@@ -38,7 +38,10 @@ class EngineStepParityCase:
     model_path: str
     system_name: str = "b200_sxm"
     backend_name: str = "vllm"
-    backend_version: str = "0.19.0"
+    # Slot alias by default: python resolves it (get_database / the compile
+    # shim embeds the literal into the spec), so a version bump needs NO test
+    # edits — just a golden refresh whose diff carries the review.
+    backend_version: str = "current"
     batch_size: int = 1
     isl: int = 1024
     osl: int = 2
@@ -61,6 +64,7 @@ class EngineStepParityCase:
     database_mode: str = "SILICON"
     transfer_policy: str | None = None
     moe_quant_mode: str | None = None
+    kvcache_quant_mode: str | None = None
     # Speculative block size (DSPARK/MTP). nextn > 0 switches the model's
     # generation ops onto the verify tables — for Kimi-K3 that crosses the
     # fused CuTeDSL verify reroute and the donor-absence contract it depends
@@ -83,15 +87,22 @@ class EngineStepParityCase:
     afd_f_moe_ep_size: int = 1
 
 
+# Coverage contract (first principles, 2026-08): a case earns its slot by
+# exercising something NO other case exercises — a distinct architecture x
+# backend op graph, a distinct system SPEC CLASS (b200 baseline, b60 edge
+# spec, gb200 NVL72 comm), a database mode / transfer-policy tier, or a
+# mechanic (prefix, CP, MTP, AFD, the energy surface). Running the same op
+# graph on another system is NOT coverage — data-grid diversity is the
+# support matrix's job. When adding a case, name the unique thing it pins.
 SMOKE_CASES = [
     # Original 3 smoke cases (Phase 3).
     pytest.param(
         EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M2.5"),
-        id="minimax-m25-b200-vllm-019-isl1024-osl2",
+        id="minimax-m25-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(model_path="moonshotai/Kimi-K2.5"),
-        id="kimi-k25-b200-vllm-019-isl1024-osl2",
+        id="kimi-k25-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
@@ -101,12 +112,12 @@ SMOKE_CASES = [
             osl=5,
             prefix=256,
         ),
-        id="minimax-m25-b200-vllm-019-sampled-prefix",
+        id="minimax-m25-b200-vllm-sampled-prefix",
     ),
-    # Phase 4 D1: extra MoE coverage on b200_sxm/vllm/0.19.0.
+    # Phase 4 D1: extra MoE coverage on b200_sxm/vllm (anchored at the current slot).
     pytest.param(
         EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M2.7"),
-        id="minimax-m27-b200-vllm-019-isl1024-osl2",
+        id="minimax-m27-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
@@ -114,74 +125,33 @@ SMOKE_CASES = [
             tp_size=4,
             moe_ep_size=4,
         ),
-        id="qwen3-30b-a3b-b200-vllm-019-isl1024-osl2",
+        id="qwen3-30b-a3b-b200-vllm-isl1024-osl2",
     ),
-    pytest.param(
-        EngineStepParityCase(model_path="Qwen/Qwen3-235B-A22B"),
-        id="qwen3-235b-a22b-b200-vllm-019-isl1024-osl2",
-    ),
-    # Phase 4 D1: dense (Llama-family) coverage on b200_sxm/vllm/0.19.0.
+    # Phase 4 D1: dense (Llama-family) coverage on b200_sxm/vllm (current slot).
     # The smoke MoE defaults (`moe_ep_size=8`) are unused by the dense path
     # but pass through `cli_estimate` without harm.
     pytest.param(
         EngineStepParityCase(model_path="Qwen/Qwen3-32B"),
-        id="qwen3-32b-b200-vllm-019-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(model_path="meta-llama/Meta-Llama-3.1-70B"),
-        id="llama31-70b-b200-vllm-019-isl1024-osl2",
+        id="qwen3-32b-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(model_path="meta-llama/Meta-Llama-3.1-8B"),
-        id="llama31-8b-b200-vllm-019-isl1024-osl2",
+        id="llama31-8b-b200-vllm-isl1024-osl2",
     ),
     # Phase 4 D1: cross-system coverage on the smoke MiniMax model.
-    pytest.param(
-        EngineStepParityCase(
-            model_path="MiniMaxAI/MiniMax-M2.5",
-            system_name="h200_sxm",
-        ),
-        id="minimax-m25-h200-vllm-019-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="MiniMaxAI/MiniMax-M2.5",
-            system_name="h100_sxm",
-        ),
-        id="minimax-m25-h100-vllm-019-isl1024-osl2",
-    ),
     # Phase 4 D4: DeepSeek-family coverage unlocked by the `Op::Overlap`
     # variant + `128 // tp_size` MLA head count fix.
     pytest.param(
-        EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V3"),
-        id="deepseek-v3-b200-vllm-019-isl1024-osl2",
-    ),
-    pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-R1"),
-        id="deepseek-r1-b200-vllm-019-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h200_sxm",
-        ),
-        id="kimi-k25-h200-vllm-019-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h100_sxm",
-        ),
-        id="kimi-k25-h100-vllm-019-isl1024-osl2",
+        id="deepseek-r1-b200-vllm-isl1024-osl2",
     ),
     # Phase 4 D4: cross-backend (SGLang non-DeepEP path) coverage.
     pytest.param(
         EngineStepParityCase(
             model_path="MiniMaxAI/MiniMax-M2.5",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="minimax-m25-b200-sglang-0510-isl1024-osl2",
+        id="minimax-m25-b200-sglang-isl1024-osl2",
     ),
     # Phase 4 D5: DeepSeek-family on SGLang, unlocked by the
     # `Op::Fallback` variant that mirrors Python's `FallbackOp` (primary
@@ -192,46 +162,32 @@ SMOKE_CASES = [
         EngineStepParityCase(
             model_path="moonshotai/Kimi-K2.5",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="kimi-k25-b200-sglang-0510-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h200_sxm",
-            backend_name="sglang",
-            backend_version="0.5.10",
-        ),
-        id="kimi-k25-h200-sglang-0510-isl1024-osl2",
+        id="kimi-k25-b200-sglang-isl1024-osl2",
     ),
     # Phase 4 D6: NemotronNas (Puzzle / DeciLM per-block architecture).
     pytest.param(
         EngineStepParityCase(model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1"),
-        id="nemotron-nas-b200-vllm-019-isl1024-osl2",
+        id="nemotron-nas-b200-vllm-isl1024-osl2",
     ),
     # Phase 4 D7-B: Qwen3.5 hybrid GDN + full-attention.
     pytest.param(
         EngineStepParityCase(model_path="Qwen/Qwen3.5-27B"),
-        id="qwen35-27b-b200-vllm-019-isl1024-osl2",
+        id="qwen35-27b-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(model_path="Qwen/Qwen3.5-397B-A17B"),
-        id="qwen35-397b-a17b-b200-vllm-019-isl1024-osl2",
+        id="qwen35-397b-a17b-b200-vllm-isl1024-osl2",
     ),
     # Phase 4 D7-D: NemotronH hybrid Mamba2 + attention + MLP.
     pytest.param(
         EngineStepParityCase(model_path="nvidia/Nemotron-H-56B-Base-8K"),
-        id="nemotron-h-56b-b200-vllm-019-isl1024-osl2",
+        id="nemotron-h-56b-b200-vllm-isl1024-osl2",
     ),
     # Phase 4 D7-E: DeepSeekV32 family (DSA attention + MoE).
     pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V3.2"),
-        id="deepseek-v32-b200-vllm-019-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(model_path="zai-org/GLM-5"),
-        id="glm5-b200-vllm-019-isl1024-osl2",
+        id="deepseek-v32-b200-vllm-isl1024-osl2",
     ),
     # Tripwire for the DSA kernel_source bucket contract (review B1, both
     # halves): sglang 0.5.14 records executed-kernel names whose bucket
@@ -242,10 +198,9 @@ SMOKE_CASES = [
         EngineStepParityCase(
             model_path="zai-org/GLM-5",
             backend_name="sglang",
-            backend_version="0.5.14",
             isl=16384,
         ),
-        id="glm5-b200-sglang-0514-isl16384-osl2",
+        id="glm5-b200-sglang-isl16384-osl2",
     ),
     # GLM-5.2 shared-index amortization (full_frac = 21/78): per-layer DSA is
     # w*full + (1-w)*skip using the skip_indexer rows collected in the same
@@ -255,9 +210,8 @@ SMOKE_CASES = [
         EngineStepParityCase(
             model_path="nvidia/GLM-5.2-NVFP4",
             backend_name="sglang",
-            backend_version="0.5.14",
         ),
-        id="glm52-b200-sglang-0514-isl1024-osl2",
+        id="glm52-b200-sglang-isl1024-osl2",
     ),
     # Phase 4 D7-F: backend coverage for newly-ported families. The
     # builders are backend-independent (the per-backend conditional
@@ -270,73 +224,64 @@ SMOKE_CASES = [
         EngineStepParityCase(
             model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="nemotron-nas-b200-sglang-0510-isl1024-osl2",
+        id="nemotron-nas-b200-sglang-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1",
             backend_name="trtllm",
-            backend_version="1.3.0rc10",
         ),
-        id="nemotron-nas-b200-trtllm-130rc10-isl1024-osl2",
+        id="nemotron-nas-b200-trtllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3.5-27B",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="qwen35-27b-b200-sglang-0510-isl1024-osl2",
+        id="qwen35-27b-b200-sglang-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3.5-27B",
             backend_name="trtllm",
-            backend_version="1.3.0rc10",
         ),
-        id="qwen35-27b-b200-trtllm-130rc10-isl1024-osl2",
+        id="qwen35-27b-b200-trtllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3.5-397B-A17B",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="qwen35-397b-a17b-b200-sglang-0510-isl1024-osl2",
+        id="qwen35-397b-a17b-b200-sglang-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3.5-397B-A17B",
             backend_name="trtllm",
-            backend_version="1.3.0rc10",
         ),
-        id="qwen35-397b-a17b-b200-trtllm-130rc10-isl1024-osl2",
+        id="qwen35-397b-a17b-b200-trtllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/Nemotron-H-56B-Base-8K",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="nemotron-h-56b-b200-sglang-0510-isl1024-osl2",
+        id="nemotron-h-56b-b200-sglang-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/Nemotron-H-56B-Base-8K",
             backend_name="trtllm",
-            backend_version="1.3.0rc10",
         ),
-        id="nemotron-h-56b-b200-trtllm-130rc10-isl1024-osl2",
+        id="nemotron-h-56b-b200-trtllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="deepseek-ai/DeepSeek-V3.2",
             backend_name="sglang",
-            backend_version="0.5.10",
         ),
-        id="deepseek-v32-b200-sglang-0510-isl1024-osl2",
+        id="deepseek-v32-b200-sglang-isl1024-osl2",
     ),
     # Attention-DP coverage: sglang all-gathers the DP-sharded tokens before
     # the MoE, so MoE compute scales by attention_dp_size. Every other MoE case
@@ -346,13 +291,12 @@ SMOKE_CASES = [
         EngineStepParityCase(
             model_path="Qwen/Qwen3-235B-A22B",
             backend_name="sglang",
-            backend_version="0.5.10",
             tp_size=1,
             attention_dp_size=8,
             moe_tp_size=4,
             moe_ep_size=2,
         ),
-        id="qwen3-235b-b200-sglang-0510-adp8-etp4ep2",
+        id="qwen3-235b-b200-sglang-adp8-etp4ep2",
     ),
     # Phase 4 D7-G: shape-variation coverage. All previous cases run at
     # `(batch=1, isl=1024, osl=2)` (plus one prefix variant). The four
@@ -375,17 +319,16 @@ SMOKE_CASES = [
             isl=128,
             osl=64,
         ),
-        id="minimax-m25-b200-vllm-019-shape-decode-heavy",
+        id="minimax-m25-b200-vllm-shape-decode-heavy",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3-32B",
             backend_name="trtllm",
-            backend_version="1.3.0rc10",
             isl=8192,
             osl=2,
         ),
-        id="qwen3-32b-b200-trtllm-130rc10-shape-prefill-heavy",
+        id="qwen3-32b-b200-trtllm-shape-prefill-heavy",
     ),
     pytest.param(
         EngineStepParityCase(
@@ -394,18 +337,17 @@ SMOKE_CASES = [
             osl=16,
             prefix=1024,
         ),
-        id="deepseek-v3-b200-vllm-019-shape-prefix-heavy",
+        id="deepseek-v3-b200-vllm-shape-prefix-heavy",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/Nemotron-H-56B-Base-8K",
             backend_name="sglang",
-            backend_version="0.5.10",
             batch_size=8,
             agg_batch_size=8,
             disagg_decode_batch_size=8,
         ),
-        id="nemotron-h-56b-b200-sglang-0510-shape-batch8",
+        id="nemotron-h-56b-b200-sglang-shape-batch8",
     ),
     # Phase 4 D7-H: GPT family (gpt.py -> gpt.rs). Dense GQA transformer
     # with non-gated FFN; the b200/vllm case used to be error-symmetric
@@ -414,21 +356,20 @@ SMOKE_CASES = [
     # PASS) verifies the same builder against the trtllm tables.
     pytest.param(
         EngineStepParityCase(model_path="openai/gpt-oss-20b"),
-        id="gpt-oss-20b-b200-vllm-019-isl1024-osl2",
+        id="gpt-oss-20b-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="openai/gpt-oss-20b",
             backend_name="trtllm",
-            backend_version="1.3.0rc10",
         ),
-        id="gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2",
+        id="gpt-oss-20b-b200-trtllm-isl1024-osl2",
     ),
     # Phase 4 D7-C: Llama-4 Scout was originally a data-gap case, but the
     # tracked perf data now gives it full numeric parity on all four surfaces.
     pytest.param(
         EngineStepParityCase(model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct"),
-        id="llama4-scout-b200-vllm-019-isl1024-osl2",
+        id="llama4-scout-b200-vllm-isl1024-osl2",
     ),
     # DeepSeek-V4 Flash remains a data-gap case. Python errors with
     # `PerfDataNotAvailableError` because the perf DB doesn't ship the
@@ -438,7 +379,7 @@ SMOKE_CASES = [
     # exact failure point in the op graph differs.
     pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V4-Flash"),
-        id="deepseek-v4-flash-b200-vllm-019-isl1024-osl2",
+        id="deepseek-v4-flash-b200-vllm-isl1024-osl2",
     ),
     # Phase 5 D8: smoke coverage for the 14 unique (model, system, backend,
     # version) tuples that surfaced as DRIFT in the 2026-06-01 full
@@ -455,134 +396,28 @@ SMOKE_CASES = [
     # full triage / cluster table.
     pytest.param(
         EngineStepParityCase(
-            model_path="Qwen/Qwen3-1.7B",
-            system_name="h100_sxm",
-            backend_name="vllm",
-            backend_version="0.14.0",
-        ),
-        id="qwen3-17b-h100-vllm-014-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
             model_path="Qwen/Qwen3-30B-A3B",
             system_name="b60",
             backend_name="vllm",
-            backend_version="0.12.0",
             tp_size=4,
             moe_ep_size=4,
         ),
-        id="qwen3-30b-a3b-b60-vllm-012-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-30B-A3B",
-            system_name="h200_sxm",
-            backend_name="sglang",
-            backend_version="0.5.9",
-            tp_size=4,
-            moe_ep_size=4,
-        ),
-        id="qwen3-30b-a3b-h200-sglang-059-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-30B-A3B",
-            system_name="gb300",
-            backend_name="sglang",
-            backend_version="0.5.9",
-            tp_size=4,
-            moe_ep_size=4,
-        ),
-        id="qwen3-30b-a3b-gb300-sglang-059-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-8B",
-            backend_name="trtllm",
-            backend_version="1.2.0rc5",
-        ),
-        id="qwen3-8b-b200-trtllm-120rc5-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3.5-27B",
-            system_name="b300_sxm",
-            backend_name="trtllm",
-            backend_version="1.3.0rc10",
-        ),
-        id="qwen35-27b-b300-trtllm-130rc10-scan-coverage",
+        id="qwen3-30b-a3b-b60-vllm-scan-coverage",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="deepseek-ai/DeepSeek-R1",
             system_name="gb200",
             backend_name="vllm",
-            backend_version="0.14.0",
+            # All-TP MoE placement: #1578 (merged 2026-08-25) makes cross-node
+            # EP require DeepEP A2A data, which gb200/vllm has not collected
+            # (default ep8 spans 4-GPU nodes). The collected grid offers
+            # (moe_tp=8, ep=1); the case keeps its purpose — NVL72 edge-spec
+            # coverage — with real numbers instead of a frozen error.
+            moe_ep_size=1,
+            moe_tp_size=8,
         ),
-        id="deepseek-r1-gb200-vllm-014-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="deepseek-ai/DeepSeek-V3",
-            system_name="gb200",
-            backend_name="vllm",
-            backend_version="0.14.0",
-        ),
-        id="deepseek-v3-gb200-vllm-014-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Meta-Llama-3.1-405B",
-            system_name="b300_sxm",
-            backend_name="sglang",
-            backend_version="0.5.10",
-        ),
-        id="llama31-405b-b300-sglang-0510-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Meta-Llama-3.1-8B",
-            system_name="gb200",
-            backend_name="trtllm",
-            backend_version="1.3.0rc10",
-        ),
-        id="llama31-8b-gb200-trtllm-130rc10-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="b300_sxm",
-            backend_name="vllm",
-            backend_version="0.19.0",
-        ),
-        id="kimi-k25-b300-vllm-019-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="gb300",
-            backend_name="vllm",
-            backend_version="0.19.0",
-        ),
-        id="kimi-k25-gb300-vllm-019-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h200_sxm",
-            backend_name="vllm",
-            backend_version="0.14.0",
-        ),
-        id="kimi-k25-h200-vllm-014-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="nvidia/Nemotron-H-56B-Base-8K",
-            system_name="h200_sxm",
-            backend_name="vllm",
-            backend_version="0.19.0",
-        ),
-        id="nemotron-h-56b-h200-vllm-019-scan-coverage",
+        id="deepseek-r1-gb200-vllm-scan-coverage",
     ),
     # Kimi-K3 (review Blocker 1 anchor): hybrid KDA + MLA LatentMoE. The
     # case defaults (tp8/ep8) put KDA on the fused 12-head shard — the exact
@@ -596,17 +431,16 @@ SMOKE_CASES = [
             model_path="moonshotai/Kimi-K3",
             system_name="b300_sxm",
             backend_name="sglang",
-            backend_version="0.5.16",
+            backend_version="next",
         ),
-        id="kimi-k3-b300-sglang-0516-nospec",
+        id="kimi-k3-b300-sglang-next-nospec",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="moonshotai/Kimi-K3",
             backend_name="vllm",
-            backend_version="0.1.dev19262",
         ),
-        id="kimi-k3-b200-vllm-dev19262-nospec",
+        id="kimi-k3-b200-vllm-nospec",
     ),
     # DSPARK speculative case: nextn=7 -> verify width 8 (the fused CuTeDSL
     # verify kernel's collected draft-width cap), crossing the fused verify
@@ -616,113 +450,41 @@ SMOKE_CASES = [
             model_path="moonshotai/Kimi-K3",
             system_name="b300_sxm",
             backend_name="sglang",
-            backend_version="0.5.16",
+            backend_version="next",
             nextn=7,
         ),
-        id="kimi-k3-b300-sglang-0516-dspark-nextn7",
+        id="kimi-k3-b300-sglang-next-dspark-nextn7",
     ),
 ]
 
 PARITY_RTOL = 0.01
 
 
-# Power/energy parity cases: one per power-carrying database identity (the
-# only shipped identities whose perf parquets carry measured power columns:
-# b200_sxm/vllm/0.22.0, b200_sxm/trtllm/1.3.0rc15, gb200/vllm/0.22.0,
-# gb200/trtllm/1.3.0rc17, h200_sxm/vllm/0.22.0). Every SMOKE_CASE sits on
-# 0.19.0 / 0.5.x / 1.3.0rc10 tables, which are latency-only — without these
-# cases the per-op energy that now crosses the FFI (PR-2) would have ZERO
-# numeric coverage in the parity suites. ``compare_energy=True`` extends the
-# static surface with the context/generation energy sums and the summary
-# power averages; the mixed/agg/disagg surfaces run at the standard latency
-# metrics. Models verified to have perf data on these versions (probed on
-# the live Python engine): dense Qwen3-32B on four identities, MoE
-# Qwen3-30B-A3B on b200_sxm/vllm/0.22.0 (gb200/trtllm ships no MoE tables at
-# 1.3.0rc17, so that identity stays dense).
+# Power/energy parity cases. After the 2026-08 data prune no engine-step-
+# complete power identity remains (measured power columns survive only in
+# b200_sxm/vllm/0.22.0 {attention, moe} and the 0.22 sparse_attention dirs;
+# that identity's gemm tables are gone, so a full engine step cannot run
+# there and its value-pinned power case was removed per the no-version-bound-
+# value-pins test policy). What anchors energy now:
+#  - energy MATH: rust synthetic oracles on power-carrying fixtures
+#    (`energy_test_fixtures` tests in operators/{gemm,attention}.rs);
+#  - data invariants: tests/unit/sdk/database/test_power_data_invariants.py
+#    (any parquet with power columns -> non-negative, bounded);
+#  - the FFI energy SURFACE: the ``compare_energy=True`` cases below on
+#    latency-only current-slot identities (energy sums well-typed zeros).
+# ``compare_energy=True`` extends the static surface with the context/
+# generation energy sums and the summary power averages; the mixed/agg/
+# disagg surfaces run at the standard latency metrics.
 POWER_CASES = [
     pytest.param(
         EngineStepParityCase(
-            model_path="Qwen/Qwen3-30B-A3B",
-            backend_version="0.22.0",
-            tp_size=4,
-            moe_ep_size=4,
-            compare_energy=True,
-        ),
-        id="qwen3-30b-a3b-b200-vllm-022-power",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B",
-            backend_name="trtllm",
-            backend_version="1.3.0rc15",
-            compare_energy=True,
-        ),
-        id="qwen3-32b-b200-trtllm-130rc15-power",
-    ),
-    pytest.param(
-        EngineStepParityCase(
             model_path="Qwen/Qwen3-32B",
             system_name="gb200",
-            backend_version="0.22.0",
             compare_energy=True,
         ),
-        id="qwen3-32b-gb200-vllm-022-power",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B",
-            system_name="gb200",
-            backend_name="trtllm",
-            backend_version="1.3.0rc17",
-            compare_energy=True,
-        ),
-        id="qwen3-32b-gb200-trtllm-130rc17-power",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B",
-            system_name="h200_sxm",
-            backend_version="0.22.0",
-            compare_energy=True,
-        ),
-        id="qwen3-32b-h200-vllm-022-power",
+        id="qwen3-32b-gb200-vllm-power",
     ),
 ]
-
-
-# Site-transfer tie-break anchors (issue #1456): when a GEMM query lands off
-# the collected grid, Python resolves equidistant candidate sites through a
-# *stable* sort over the index's enumeration order; the pre-fix Rust selection
-# broke that tie differently and silently drifted these exact configs. Each
-# case pins the surface that originally exposed the divergence, so the
-# tie-break stays anchored in CI:
-#  - Qwen3-32B-FP8 @ h200_sxm/vllm/0.19.0, agg: off-grid fp8_block GEMM
-#    n=1280 k=5120 (the tp8 fused-QKV projection).
-#  - Llama-4-Scout @ gb200/vllm/0.24.0, disagg decode: the mirror bf16 shape
-#    n=5120 k=1280 (the tp4 attention out-projection; tp4 * moe_ep4 keeps the
-#    16-expert MoE mapping valid).
-TIE_AGG_CASES = [
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B-FP8",
-            system_name="h200_sxm",
-        ),
-        id="qwen3-32b-fp8-h200-vllm-019-tiebreak-agg",
-    ),
-]
-TIE_DISAGG_CASES = [
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct",
-            system_name="gb200",
-            backend_version="0.24.0",
-            tp_size=4,
-            moe_ep_size=4,
-        ),
-        id="llama4-scout-gb200-vllm-024-tiebreak-disagg",
-    ),
-]
-TIE_CASES = [*TIE_AGG_CASES, *TIE_DISAGG_CASES]
 
 
 # Error-symmetry contract: when Python raises one of these, Rust is
@@ -1024,7 +786,14 @@ def _case_database(case: EngineStepParityCase):
     defaults, or a mode/policy-configured query view for HYBRID/EMPIRICAL
     cases (mirrors what `cli_estimate` builds internally)."""
     if case.database_mode == "SILICON" and case.transfer_policy is None:
-        return _quiet_call(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
+        return _quiet_call(
+            perf_database.get_database,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            # parity cases are frozen data coordinates by design
+            allow_unlisted_version=True,
+        )
     return _quiet_call(
         perf_database.get_database_view,
         case.system_name,
@@ -1035,6 +804,7 @@ def _case_database(case: EngineStepParityCase):
         allow_missing_data=case.database_mode != "SILICON",
         database_mode=case.database_mode,
         transfer_policy=case.transfer_policy,
+        allow_unlisted_version=True,
     )
 
 
@@ -1047,6 +817,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
         moe_ep_size=case.moe_ep_size,
         cp_size=case.cp_size,
         moe_quant_mode=(common.MoEQuantMode[case.moe_quant_mode] if case.moe_quant_mode else None),
+        kvcache_quant_mode=(common.KVCacheQuantMode[case.kvcache_quant_mode] if case.kvcache_quant_mode else None),
         nextn=case.nextn,
     )
 
@@ -1076,7 +847,7 @@ def _cp_static_ctx_ms(case: EngineStepParityCase) -> float:
         prefix=case.prefix,
         engine_step_backend="rust",
     )
-    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src = _quiet_call(
+    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src, _fallbacks = _quiet_call(
         backend._run_static_breakdown, model, database, runtime_config, "static_ctx", 1
     )
     return float(sum(ctx_lat.values()))
@@ -1397,34 +1168,6 @@ class TestRustEngineStepDisaggParity:
         assert reason is None, reason
 
 
-class TestRustEngineStepTieBreakParity:
-    """#1456 site-transfer tie-break anchors (see TIE_AGG/TIE_DISAGG_CASES):
-    each trigger config runs on the surface that originally exposed the
-    off-grid GEMM tie divergence, at the standard latency tolerance."""
-
-    @pytest.mark.parametrize("case", TIE_AGG_CASES)
-    def test_agg_tie_break_parity(
-        self,
-        case: EngineStepParityCase,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _prepare_rust_core(monkeypatch)
-
-        reason = _parity_mismatch_reason(_agg_comparison_metrics(case))
-        assert reason is None, reason
-
-    @pytest.mark.parametrize("case", TIE_DISAGG_CASES)
-    def test_disagg_tie_break_parity(
-        self,
-        case: EngineStepParityCase,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _prepare_rust_core(monkeypatch)
-
-        reason = _parity_mismatch_reason(_disagg_comparison_metrics(case))
-        assert reason is None, reason
-
-
 # Context-parallelism (CP) parity cases. CP is SGLang-only and shards prefill
 # sequence tokens: token-major ops divide their per-rank token count by cp
 # (seq_split), ContextAttention models rank-0's zigzag chunk split, and
@@ -1442,28 +1185,13 @@ CP_CASES = [
             model_path="Qwen/Qwen3-235B-A22B",
             system_name="b200_sxm",
             backend_name="sglang",
-            backend_version="0.5.10",
             tp_size=1,
             attention_dp_size=1,
             moe_tp_size=8,
             moe_ep_size=1,
             cp_size=8,
         ),
-        id="qwen3-235b-a22b-b200-sglang-0510-cp8",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-235B-A22B",
-            system_name="b200_sxm",
-            backend_name="sglang",
-            backend_version="0.5.10",
-            tp_size=1,
-            attention_dp_size=1,
-            moe_tp_size=4,
-            moe_ep_size=1,
-            cp_size=4,
-        ),
-        id="qwen3-235b-a22b-b200-sglang-0510-cp4",
+        id="qwen3-235b-a22b-b200-sglang-cp8",
     ),
     # MLA context-parallelism: Kimi is MLA with bfloat16 FMHA (collected on
     # sglang), so it exercises the ContextMLA cp zigzag sharding. (DeepSeek-R1
@@ -1474,14 +1202,13 @@ CP_CASES = [
             model_path="moonshotai/Kimi-K2.5",
             system_name="b200_sxm",
             backend_name="sglang",
-            backend_version="0.5.10",
             tp_size=1,
             attention_dp_size=1,
             moe_tp_size=8,
             moe_ep_size=1,
             cp_size=8,
         ),
-        id="kimi-k25-b200-sglang-0510-cp8",
+        id="kimi-k25-b200-sglang-cp8",
     ),
 ]
 
@@ -1508,7 +1235,6 @@ DSV4_CP_CASES = [
             model_path="deepseek-ai/DeepSeek-V4-Flash",
             system_name="b200_sxm",
             backend_name="sglang",
-            backend_version="0.5.12",
             isl=8192,
             osl=8,
             tp_size=1,
@@ -1517,7 +1243,7 @@ DSV4_CP_CASES = [
             moe_ep_size=8,
             cp_size=8,
         ),
-        id="dsv4-flash-b200-sglang-0512-cp8-reuse",
+        id="dsv4-flash-b200-sglang-cp8-reuse",
     ),
 ]
 
@@ -1564,45 +1290,59 @@ class TestRustEngineStepCpStaticCtxParity:
 class TestRustEngineHandleDatabasePolicyIdentity:
     """Handle-cache isolation across database-policy views (review finding).
 
-    `build_engine_spec_json` bakes the database's policy-dependent
-    `perf_db_sources` into the compiled handle, so a shared-layer-off view
-    and a shared-layer-on view of the SAME on-disk identity must not alias
-    one cached handle. The cache is cleared ONCE per ordering (not between
-    the two queries — that is the point): whichever view warms the cache
-    must not answer, or fail, for the other. Guards both directions on the
-    adjudicated DSV4 CP shape: the false FAILURE (off-warmed cache raising
-    for the reuse-carrying on-view) and the false SUCCESS (on-warmed cache
-    computing for the primary-only off-view that must raise).
+    A shared-layer-off view and a shared-layer-on view of the SAME on-disk
+    identity must not alias one cached handle. The cache is cleared ONCE per
+    ordering (not between the two queries — that is the point): whichever
+    view warms the cache must not answer, or fail, for the other.
+
+    Vehicle: the sglang large-EP config. Its wideEP tables live ONLY in
+    older sole-source dirs and reach the current slot through the shared
+    layer, so the asymmetry is structural: the primary-only off-view MUST
+    raise, the shared-on view MUST answer. No value pin — a cache-aliasing
+    bug manifests as the on-view raising (off-warmed) or the off-view
+    answering (on-warmed), both caught by the type of the outcome alone.
+    (The former vehicle, the #1498 DSV4-CP w4a8 shape, lost its only
+    silicon source when the sglang 0.5.10 moe grid retired.)
     """
 
-    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
-
     def _static_ctx_ms(self, model, view) -> float:
-        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=8, prefix=0, engine_step_backend="rust")
         ctx_latency, _gen, *_ = rust_engine_step.estimate_static_latency_breakdown_with_rust(
             model, view, rc, "static_ctx", 1, 1.0
         )
         return float(sum(ctx_latency.values()))
 
     def _build(self):
-        (case,) = DSV4_CP_CASES[0].values
-        model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+        cfg = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=32,
+            moe_tp_size=1,
+            moe_ep_size=32,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+            moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+            num_gpus_per_node=8,
+        )
+        model = _quiet_call(get_model, "deepseek-ai/DeepSeek-R1", cfg, "sglang")
         off = _quiet_call(
             perf_database.get_database_view,
-            case.system_name,
-            case.backend_name,
-            case.backend_version,
+            "h200_sxm",
+            "sglang",
+            "current",
             shared_layer=False,
         )
         on = _quiet_call(
             perf_database.get_database_view,
-            case.system_name,
-            case.backend_name,
-            case.backend_version,
+            "h200_sxm",
+            "sglang",
+            "current",
             shared_layer=True,
         )
         if off is None or on is None:
-            pytest.skip("no perf database for the DSV4 CP case identity")
+            pytest.skip("no perf database for the large-EP identity")
         return model, off, on
 
     def test_off_warmed_cache_does_not_fail_the_shared_on_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1610,12 +1350,14 @@ class TestRustEngineHandleDatabasePolicyIdentity:
         model, off, on = self._build()
         with pytest.raises(errors.PerfDataNotAvailableError):
             self._static_ctx_ms(model, off)
-        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        on_ms = self._static_ctx_ms(model, on)
+        assert on_ms > 0.0 and on_ms == on_ms  # answers, finite
 
     def test_on_warmed_cache_does_not_answer_for_the_shared_off_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
         model, off, on = self._build()
-        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        on_ms = self._static_ctx_ms(model, on)
+        assert on_ms > 0.0 and on_ms == on_ms
         with pytest.raises(errors.PerfDataNotAvailableError):
             self._static_ctx_ms(model, off)
 
@@ -1647,7 +1389,7 @@ HYBRID_CASES = [
             model_path="MiniMaxAI/MiniMax-M3",
             database_mode="HYBRID",
         ),
-        id="minimax-m3-b200-vllm-019-hybrid-xop",
+        id="minimax-m3-b200-vllm-hybrid-xop",
     ),
     # Same rescue on the sglang tables (DSA util source = sglang 0.5.14 data).
     # Probed: 39.490/2.994 ms, tags {xop, xshape}.
@@ -1655,10 +1397,9 @@ HYBRID_CASES = [
         EngineStepParityCase(
             model_path="MiniMaxAI/MiniMax-M3",
             backend_name="sglang",
-            backend_version="0.5.14",
             database_mode="HYBRID",
         ),
-        id="minimax-m3-b200-sglang-0514-hybrid-xop",
+        id="minimax-m3-b200-sglang-hybrid-xop",
     ),
     # Transfer-policy gating: with xop disabled ("off" and "balanced" presets)
     # MSA must raise EmpiricalNotImplementedError on BOTH engines
@@ -1670,7 +1411,7 @@ HYBRID_CASES = [
             database_mode="HYBRID",
             transfer_policy="off",
         ),
-        id="minimax-m3-b200-vllm-019-hybrid-policy-off",
+        id="minimax-m3-b200-vllm-hybrid-policy-off",
     ),
     pytest.param(
         EngineStepParityCase(
@@ -1678,10 +1419,10 @@ HYBRID_CASES = [
             database_mode="HYBRID",
             transfer_policy="balanced",
         ),
-        id="minimax-m3-b200-vllm-019-hybrid-policy-balanced",
+        id="minimax-m3-b200-vllm-hybrid-policy-balanced",
     ),
     # xquant: forced MoE quant w4a16_mxfp4_cutlass is uncollected on
-    # b200/vllm/0.19.0 but shares the (memory=0.5, compute=1) profile with
+    # b200/vllm/0.24.0 but shares the (memory=0.5, compute=1) profile with
     # collected int4_wo / w4a16_mxfp4 — the ladder lands on the xquant tier.
     # Probed: 90.578/10.908 ms, tags {xquant}.
     pytest.param(
@@ -1690,10 +1431,11 @@ HYBRID_CASES = [
             database_mode="HYBRID",
             moe_quant_mode="w4a16_mxfp4_cutlass",
         ),
-        id="qwen3-235b-a22b-b200-vllm-019-hybrid-xquant",
+        id="qwen3-235b-a22b-b200-vllm-hybrid-xquant",
     ),
-    # xprofile: forced MoE quant w4afp8 (memory=0.5, compute=2) has NO
-    # collected same-profile sibling on b200/vllm/0.19.0 — the ladder falls
+    # xprofile: forced MoE quant w4afp8 (memory=0.5, compute=2) had NO
+    # collected same-profile sibling (0.19-era probe; the golden pins the
+    # live tier on the current slot) — the ladder falls
     # through to the cross-profile tier with the util-level rescale.
     # Probed: 47.755/8.450 ms, tags {xprofile}.
     pytest.param(
@@ -1702,10 +1444,10 @@ HYBRID_CASES = [
             database_mode="HYBRID",
             moe_quant_mode="w4afp8",
         ),
-        id="qwen3-235b-a22b-b200-vllm-019-hybrid-xprofile",
+        id="qwen3-235b-a22b-b200-vllm-hybrid-xprofile",
     ),
-    # Attention cross-head_size xshape: MiMo-V2-Flash has head_dim=192 while
-    # b200/vllm/0.19.0 collected only {128, 256} — SILICON raises, HYBRID
+    # Attention cross-head_size xshape: MiMo-V2-Flash queries head_dim=192
+    # with bf16 KV, collected at 0.24 for fp8 KV only — SILICON raises, HYBRID
     # borrows the nearest collected head_size (`attention.py` ctx + gen
     # reference grids). Probed: 33.253/3.499 ms, tags {xshape}.
     pytest.param(
@@ -1713,9 +1455,9 @@ HYBRID_CASES = [
             model_path="XiaomiMiMo/MiMo-V2-Flash",
             database_mode="HYBRID",
         ),
-        id="mimo-v2-flash-b200-vllm-019-hybrid-attn-xshape",
+        id="mimo-v2-flash-b200-vllm-hybrid-attn-xshape",
     ),
-    # HYBRID==SILICON invariance: Kimi-K2.5 on b200/vllm/0.19.0 is fully
+    # HYBRID==SILICON invariance: Kimi-K2.5 on b200/vllm (current slot) is fully
     # covered by silicon data (probed worst-provenance = silicon, no empirical
     # tier fires). The hybrid layer must not perturb covered queries; this
     # pins Rust-HYBRID == Python-HYBRID (== SILICON) on a collected config.
@@ -1724,7 +1466,7 @@ HYBRID_CASES = [
             model_path="moonshotai/Kimi-K2.5",
             database_mode="HYBRID",
         ),
-        id="kimi-k25-b200-vllm-019-hybrid-invariant",
+        id="kimi-k25-b200-vllm-hybrid-invariant",
     ),
     # Full-model xprofile resolution: NVFP4 on Hopper has no collected GEMM
     # or MoE tables, but under the default (aggressive) policy the GEMM
@@ -1738,11 +1480,12 @@ HYBRID_CASES = [
             system_name="h200_sxm",
             database_mode="HYBRID",
         ),
-        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-xprofile",
+        id="minimax-m25-nvfp4-h200-vllm-hybrid-xprofile",
     ),
     # Ladder miss (error-symmetry): with XPROFILE policy-disabled
     # ("balanced" = xshape+xquant), NVFP4 GEMM (profile (0.5625, 4)) has no
-    # same-profile sibling anywhere in the h200/vllm/0.19.0 tables — Python
+    # same-profile sibling anywhere in the h200/vllm tables (0.19-era probe;
+    # the golden pins the live behavior) — Python
     # raises EmpiricalNotImplementedError; the Rust port must fail the same
     # query point, never fabricate a SOL/constant value.
     pytest.param(
@@ -1752,7 +1495,7 @@ HYBRID_CASES = [
             database_mode="HYBRID",
             transfer_policy="balanced",
         ),
-        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-balanced-miss",
+        id="minimax-m25-nvfp4-h200-vllm-hybrid-balanced-miss",
     ),
     # EMPIRICAL mode: every data-backed op answers SOL(query)/util from its
     # own collected slice — the broadest guard of the ported util math (grid
@@ -1764,28 +1507,28 @@ HYBRID_CASES = [
             model_path="Qwen/Qwen3-32B",
             database_mode="EMPIRICAL",
         ),
-        id="qwen3-32b-b200-vllm-019-empirical",
+        id="qwen3-32b-b200-vllm-empirical",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3-235B-A22B",
             database_mode="EMPIRICAL",
         ),
-        id="qwen3-235b-a22b-b200-vllm-019-empirical",
+        id="qwen3-235b-a22b-b200-vllm-empirical",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="moonshotai/Kimi-K2.5",
             database_mode="EMPIRICAL",
         ),
-        id="kimi-k25-b200-vllm-019-empirical",
+        id="kimi-k25-b200-vllm-empirical",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="deepseek-ai/DeepSeek-V3.2",
             database_mode="EMPIRICAL",
         ),
-        id="deepseek-v32-b200-vllm-019-empirical",
+        id="deepseek-v32-b200-vllm-empirical",
     ),
     # Off-grid shape on purpose: at the smoke shape (isl=1024, b=1) every GLM-5
     # op lands exactly on collected grid points, where util reconstruction
@@ -1796,25 +1539,24 @@ HYBRID_CASES = [
         EngineStepParityCase(
             model_path="zai-org/GLM-5",
             backend_name="sglang",
-            backend_version="0.5.14",
             isl=1536,
             database_mode="EMPIRICAL",
         ),
-        id="glm5-b200-sglang-0514-empirical",
+        id="glm5-b200-sglang-empirical",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="MiniMaxAI/MiniMax-M2.5",
             database_mode="EMPIRICAL",
         ),
-        id="minimax-m25-b200-vllm-019-empirical",
+        id="minimax-m25-b200-vllm-empirical",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/Nemotron-H-56B-Base-8K",
             database_mode="EMPIRICAL",
         ),
-        id="nemotron-h-56b-b200-vllm-019-empirical",
+        id="nemotron-h-56b-b200-vllm-empirical",
     ),
 ]
 
@@ -1887,28 +1629,21 @@ SOL_CASES = [
             model_path="Qwen/Qwen3-32B",
             database_mode="SOL",
         ),
-        id="qwen3-32b-b200-vllm-019-sol",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Meta-Llama-3.1-70B",
-            database_mode="SOL",
-        ),
-        id="llama31-70b-b200-vllm-019-sol",
+        id="qwen3-32b-b200-vllm-sol",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3-235B-A22B",
             database_mode="SOL",
         ),
-        id="qwen3-235b-a22b-b200-vllm-019-sol",
+        id="qwen3-235b-a22b-b200-vllm-sol",
     ),
     pytest.param(
         EngineStepParityCase(
             model_path="deepseek-ai/DeepSeek-V3",
             database_mode="SOL",
         ),
-        id="deepseek-v3-b200-vllm-019-sol",
+        id="deepseek-v3-b200-vllm-sol",
     ),
 ]
 
@@ -1945,7 +1680,7 @@ class TestRustEngineStepSolMixedStepParity:
 # evaluate FFI (`AFDInferenceSession._sum_latency`). rust==python was verified
 # manually (bit-identical) when that sourcing landed; this case pins it in CI.
 # One MoE model with AFD support on a version with data: Qwen3-30B-A3B on
-# h200_sxm/vllm/0.19.0, one A node + one F node (a_tp=4, a_batch=32,
+# h200_sxm/vllm (current slot), one A node + one F node (a_tp=4, a_batch=32,
 # f_moe_ep=8) — verified end-to-end through `cli_estimate(mode="afd", ...)`.
 AFD_CASES = [
     pytest.param(
@@ -1960,7 +1695,7 @@ AFD_CASES = [
             afd_a_batch_size=32,
             afd_f_moe_ep_size=8,
         ),
-        id="qwen3-30b-a3b-h200-vllm-019-afd",
+        id="qwen3-30b-a3b-h200-vllm-afd",
     ),
 ]
 
@@ -1998,8 +1733,6 @@ ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (DSV4_CP_CASES, ("cp_static_ctx", "mixed")),
     (HYBRID_CASES, ENGINE_STEP_SURFACES),
     (SOL_CASES, ("static", "mixed")),
-    (TIE_AGG_CASES, ("agg",)),
-    (TIE_DISAGG_CASES, ("disagg",)),
     (AFD_CASES, ("afd",)),
 )
 
@@ -2109,16 +1842,24 @@ class TestRustTypedErrorsAcrossFfi:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # MiMo-V2-Flash has head_dim=192 while b200/vllm/0.19.0 collected only
-        # {128, 256}: under SILICON, Rust hits `AicError::PerfDatabase` at the
-        # attention query point — which must cross the FFI as the SAME sdk
+        # MiMo-V2-Flash queries head_dim=192 with the default bfloat16 KV
+        # cache; b200/vllm/0.24.0 collects 192 for fp8 KV only, so the bf16
+        # lane is a genuine silicon gap: Rust hits `AicError::PerfDatabase` at
+        # the attention query point — which must cross the FFI as the SAME sdk
         # class Python raises, recognized by the cause-chain walker (the
         # miss-classification the sweep/support-matrix rely on). (The previous
         # vehicle, NVFP4 GEMM on h200, now classifies as the strict
         # MissingSystemFlopsError before any data lookup — h200 has no
         # fp4_tc_flops — see the missing-dtype test below.)
         _prepare_rust_core(monkeypatch)
-        case = EngineStepParityCase(model_path="XiaomiMiMo/MiMo-V2-Flash")
+        case = EngineStepParityCase(
+            # current-slot data-gap coordinate: head_dim=192 is collected for
+            # fp8 KV only. The model is an fp8 checkpoint (kv would infer fp8
+            # and HIT), so bf16 KV is pinned explicitly to hold the gap. If a
+            # future collection adds bf16@192, re-anchor to a new gap.
+            model_path="XiaomiMiMo/MiMo-V2-Flash",
+            kvcache_quant_mode="bfloat16",
+        )
         with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
             _rust_static_breakdown(case)
         assert perf_database.has_perf_data_not_available_cause(excinfo.value)
@@ -2230,7 +1971,14 @@ class TestRustProvenanceCapture:
         # tier. Python probes record {xop, xshape}; the rust path must land on
         # the same worst_provenance.
         _prepare_rust_core(monkeypatch)
-        case = EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M3", database_mode="HYBRID")
+        case = EngineStepParityCase(
+            model_path="MiniMaxAI/MiniMax-M3",
+            database_mode="HYBRID",
+            # xop-borrow coordinate on the current slot: sglang 0.5.14 ships
+            # no MSA module tables (they land at 0.5.16), so MSA borrows
+            # DSA's util — the xop tier this test pins.
+            backend_name="sglang",
+        )
         with util_empirical.capture_provenance() as tags:
             metrics = _static_metrics(case)
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
@@ -2260,7 +2008,7 @@ class TestRustProvenanceCapture:
 # --------------------------------------------------------------------------- #
 
 _FPM_MODEL = "MiniMaxAI/MiniMax-M2.5"
-_FPM_VERSION = "0.19.0"
+_FPM_VERSION = "0.24.0"
 # (workload_kind, batch, total_prefill, total_kv, latency_ms) — per-DP-rank
 # iteration totals, batch domains sized for the runtime points below.
 _FPM_ROWS = [

@@ -426,8 +426,13 @@ def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
         "fp8": "fp8",
         "e4m3": "fp8",
         "e5m2": "fp8",
+        # Kept distinct from "fp8": MXFP8 is 32-element block-scaled FP8, so
+        # it must land on the fp8_block SDK modes, not the per-tensor
+        # fp8_static/fp8 pair the "fp8" branch resolves to.
+        "mxfp8": "mxfp8",
         "nvfp4": "nvfp4",
         "fp4": "nvfp4",
+        "w4a16_nvfp4": "w4a16_nvfp4",
     }
     return aliases.get(algo, algo)
 
@@ -449,6 +454,15 @@ def _infer_mixed_precision_group_algo(group: dict) -> str | None:
     if not isinstance(num_bits, int):
         return None
     if num_bits == 8 and "float" in weight_type:
+        # An 8-bit float group carrying 32-element block scales is MXFP8
+        # (OCP MX block size), not per-tensor FP8 — without this check the
+        # num_bits fallback would route such groups onto the fp8_static/fp8
+        # per-tensor modes. Real ModelOpt MXFP8 exports seen so far
+        # (nvidia/MiniMax-M3-NVFP4) declare the algo string per layer in
+        # quantized_layers instead of config_groups, so this branch is a
+        # guard for config_groups-style exports.
+        if weights.get("group_size") == 32:
+            return "mxfp8"
         return "fp8"
     if num_bits == 4 and "float" in weight_type:
         return "nvfp4"
@@ -460,7 +474,7 @@ def _is_routing_expert_target(target: object) -> bool:
     target_name = str(target).lower()
     if "shared_expert" in target_name:
         return False
-    return ".experts." in target_name or "routing_expert" in target_name
+    return ".experts." in target_name or target_name.endswith(".experts") or "routing_expert" in target_name
 
 
 def _collect_mixed_precision_layer_algos(raw_config: dict) -> tuple[set[str], set[str]]:
@@ -515,16 +529,52 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
     gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
     overrides: dict[str, object] = {}
 
-    if "fp8" in gemm_algos:
+    # Some expert-only requants retain the base checkpoint's non-expert lane
+    # in the mixed-precision header. Prefer that explicit base description to
+    # broad config-group targets such as ``Linear``: the latter are filtered
+    # by ``ignore`` at runtime and must not reclassify attention/shared GEMMs.
+    quant_cfg = raw_config.get("quantization_config")
+    base_quant_method = str(quant_cfg.get("quant_method", "")).lower() if isinstance(quant_cfg, dict) else ""
+    weight_block_size = quant_cfg.get("weight_block_size") if isinstance(quant_cfg, dict) else None
+    if base_quant_method == "fp8" and weight_block_size:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
+    elif base_quant_method == "fp8":
+        overrides["gemm_quant_mode"] = (
+            common.GEMMQuantMode.fp8 if quant_dynamic is True else common.GEMMQuantMode.fp8_static
+        )
+    # MXFP8 -> fp8_block approximation (owner decision 2026-08-09): MXFP8 is
+    # 32-element block-scaled FP8, i.e. the same 1 B/elem weights and the same
+    # FP8 tensor-core throughput class as fp8_block; only the scale
+    # granularity differs (32 vs 128), which is an accepted approximation.
+    # Precedent: DeepSeek-V4's MXFP8-activation attention projections are
+    # priced under gemm=fp8_block in the dsv4 module tables, and the shipped
+    # MiniMax-M3 MSA tables carry the fp8_block gemm tier this lane resolves
+    # to (a plain-fp8 mapping would miss that silicon). Checked before plain
+    # fp8 so a checkpoint mixing per-tensor-FP8 and MXFP8 dense layers keeps
+    # the conservative block-scaled lane. First seen on
+    # nvidia/MiniMax-M3-NVFP4 (attention/dense-MLP/shared-expert projections
+    # MXFP8, routed experts NVFP4).
+    elif "mxfp8" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
+    elif "fp8" in gemm_algos:
         if quant_dynamic is not True:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
         else:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "w4a16_nvfp4" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.w4a16_nvfp4
     elif "nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
 
-    if "nvfp4" in moe_algos:
+    # nvfp4-class stays first: routed experts are the artifact's headline
+    # dtype when mixed with fp8-class expert layers. mxfp8 takes the same
+    # fp8_block approximation as the GEMM side, ahead of per-tensor fp8.
+    if "w4a16_nvfp4" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_nvfp4
+    elif "nvfp4" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
+    elif "mxfp8" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.fp8_block
     elif "fp8" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.fp8
 
@@ -584,7 +634,11 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
 
     # DeepSeek-V4 native checkpoints use MXFP4 routed-expert weights with MXFP8
     # activations, while non-expert weights remain FP8 block quantized.
-    if architecture == "DeepseekV4ForCausalLM" and str(raw_config.get("expert_dtype", "")).lower() == "fp4":
+    if (
+        architecture == "DeepseekV4ForCausalLM"
+        and str(raw_config.get("expert_dtype", "")).lower() == "fp4"
+        and overrides.get("moe_quant_mode") != common.MoEQuantMode.nvfp4
+    ):
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a8_mxfp4_mxfp8
 
     # KVCache quant mode
@@ -609,6 +663,44 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
     return overrides
 
 
+# Architectures whose vLLM MoE dispatch is PROVEN w4a4 for W4A16_NVFP4-labeled
+# checkpoints: the collected kernel_source is
+# ``vllm_compressedtensorsw4a4nvfp4moe_*`` (activations quantized at run time,
+# FP4 tensor cores), so the storage label misdescribes the execution lane.
+# Scoped per-architecture deliberately: Qwen3.6-style checkpoints stay on the
+# weight-only ``w4a16_nvfp4`` profile, which vLLM reaches through HYBRID's
+# calibrated XPROFILE relation by design (see
+# test_validate_w4a16_nvfp4_moe_xprofile_reachable_in_hybrid).
+_VLLM_W4A4_MOE_ARCHITECTURES = frozenset({"NemotronHForCausalLM"})
+
+
+def resolve_vllm_moe_execution_mode(
+    moe_quant_mode: common.MoEQuantMode | None,
+    backend_name: str | None,
+    architecture: str | None,
+) -> common.MoEQuantMode | None:
+    """Map an HF/label-derived MoE mode to the lane vLLM actually executes.
+
+    For NemotronH checkpoints, vLLM's compressed-tensors dispatch quantizes
+    activations at run time and serves the FP4-tensor-core (w4a4) kernels
+    regardless of the ``W4A16_NVFP4`` ModelOpt storage label (the collected
+    kernel_source proves it), so the mode remaps to ``nvfp4`` — the lane the
+    silicon rows live in. trtllm/sglang keep the label mode (their
+    weight-only dequant-to-BF16 MoE path is real), and non-NemotronH
+    architectures keep it on vLLM too (Qwen3.6's profile is served via the
+    HYBRID XPROFILE relation by design). Callers apply this to HF-DERIVED
+    modes only — a truly explicit user mode must bypass it
+    (AIC-1748/AIC-1743).
+    """
+    if (
+        backend_name == "vllm"
+        and architecture in _VLLM_W4A4_MOE_ARCHITECTURES
+        and moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4
+    ):
+        return common.MoEQuantMode.nvfp4
+    return moe_quant_mode
+
+
 def _apply_model_quant_defaults(
     model_config: config.ModelConfig,
     raw_config: dict,
@@ -619,6 +711,7 @@ def _apply_model_quant_defaults(
     # Clone original model_config to track if any modifications were made
     original_config = dataclasses.replace(model_config)
     fmha_was_unset = model_config.fmha_quant_mode is None
+    moe_was_unset = model_config.moe_quant_mode is None
 
     inferred = _infer_quant_modes_from_raw_config(raw_config, architecture)
     applied: list[str] = []
@@ -666,6 +759,14 @@ def _apply_model_quant_defaults(
         if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
             model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
+    # Inferred-mode-only remap (see resolve_vllm_moe_execution_mode): an
+    # explicit user mode wins, and validate fails fast on it — the
+    # explicit-is-the-user's-contract doctrine.
+    if moe_was_unset:
+        model_config.moe_quant_mode = resolve_vllm_moe_execution_mode(
+            model_config.moe_quant_mode, backend_name, architecture
+        )
+
     # Only log if model_config was modified
     if original_config != model_config:
         logger.info(
@@ -684,13 +785,19 @@ def _is_dsv4_fp4_expert_model(model_path: str) -> bool:
 
     Checks ``expert_dtype == "fp4"`` in the HF config rather than hardcoded
     paths, so third-party requant artifacts (e.g. RedHatAI NVFP4-FP8) are
-    recognized. FP8-only requants (sgl-project) have no ``expert_dtype`` and
-    return False.
+    recognized. Checkpoints with explicit NVFP4 routed-expert metadata are not
+    native MXFP4 checkpoints even when the base config retains
+    ``expert_dtype == "fp4"``. FP8-only requants (sgl-project) have no
+    ``expert_dtype`` and return False.
     """
     info = _get_model_info(model_path)
     if info.get("architecture") != "DeepseekV4ForCausalLM":
         return False
-    return str(info.get("raw_config", {}).get("expert_dtype") or "").lower() == "fp4"
+    raw_config = info.get("raw_config", {})
+    if str(raw_config.get("expert_dtype") or "").lower() != "fp4":
+        return False
+    _gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
+    return "nvfp4" not in moe_algos
 
 
 def resolve_dsv4_moe_arch_mode(
@@ -779,6 +886,8 @@ def resolve_nvfp4_for_system(
     model_config: config.ModelConfig,
     system_name: str | None,
     model_path: str | None = None,
+    *,
+    backend_name: str | None = None,
 ) -> None:
     """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
 
@@ -788,8 +897,10 @@ def resolve_nvfp4_for_system(
     transfer ladder then models the Marlin-class memory savings via the
     (0.5625, 1) util-level entry — no direct bfloat16 table aliasing needed.
 
-    Deployability (whether a runtime can load the checkpoint at a given
-    version) is a separate question handled by the support matrix.
+    When the mode is inferred from a checkpoint label, resolve its backend
+    execution lane before applying the hardware fallback. Deployability
+    (whether a runtime can load the checkpoint at a given version) is a
+    separate question handled by the support matrix.
     """
     from aiconfigurator_core.sdk.perf_database import is_blackwell_system
 
@@ -800,14 +911,15 @@ def resolve_nvfp4_for_system(
     moe_q = model_config.moe_quant_mode
     if (gemm_q is None or moe_q is None) and model_path:
         info = _get_model_info(model_path)
+        architecture = info.get("architecture", "")
         inferred = _infer_quant_modes_from_raw_config(
             info.get("raw_config", {}),
-            info.get("architecture", ""),
+            architecture,
         )
         if gemm_q is None:
             gemm_q = inferred.get("gemm_quant_mode")
         if moe_q is None:
-            moe_q = inferred.get("moe_quant_mode")
+            moe_q = resolve_vllm_moe_execution_mode(inferred.get("moe_quant_mode"), backend_name, architecture)
 
     if gemm_q == common.GEMMQuantMode.nvfp4:
         model_config.gemm_quant_mode = common.GEMMQuantMode.nvfp4_wo

@@ -1,0 +1,541 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Build an immutable cell matrix for Dynamo-native FPM self-benchmarks."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .capabilities import ModelCapabilityProfile, ResolvedDTypeProfile, resolve_model_capability
+from .config import FPMCollectionOptions
+from .memory_admission import TopologyMemoryDecision, filter_memory_infeasible_topologies
+from .topology import enumerate_fpm_topologies, topology_strategy
+from .types import ParallelTopology
+
+logger = logging.getLogger(__name__)
+
+
+def _canonical_hash(payload: object) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _git_revision() -> str:
+    # Hermetic environments (CI containers, wheel installs) run the collector
+    # outside a git checkout; an explicit revision keeps plan identity honest
+    # there while the default below stays fail-closed.
+    override = os.environ.get("FPM_COLLECTOR_SOURCE_REVISION", "").strip()
+    if override:
+        return override
+
+    root = Path(__file__).resolve().parents[2]
+
+    def _git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return completed.stdout
+
+    try:
+        head = _git("rev-parse", "HEAD").strip()
+        # Uncommitted tracked changes alter collector behavior without moving
+        # HEAD; fold their digest into the revision so plan identity — and
+        # with it checkpoint resume — distinguishes measurements taken under
+        # different working trees. An unchanged dirty tree keeps resuming.
+        # Untracked files are excluded: campaign artifact and checkpoint dirs
+        # live inside the checkout and would spuriously invalidate every
+        # resume.
+        status = _git("status", "--porcelain", "--untracked-files=no")
+        if not status.strip():
+            return head
+        # Plumbing diff-index, not porcelain diff: external diff drivers
+        # (diff.external / .gitattributes diff=lfs|parquet in this very repo)
+        # embed per-invocation temp paths that would change the digest on
+        # every call, and host diff config (mnemonicPrefix, abbrev) would make
+        # it host-dependent. --full-index keeps binary edits distinguishable
+        # via full blob hashes without dumping content.
+        diff = _git("diff-index", "--no-ext-diff", "--full-index", "-p", "HEAD")
+        dirty_digest = hashlib.sha256((status + diff).encode()).hexdigest()[:12]
+        return f"{head}-dirty-{dirty_digest}"
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        detail = getattr(error, "stderr", "") or str(error)
+        raise ValueError(
+            "FPM plan identity requires the collector source revision, but git "
+            f"failed under {root}: {detail.strip()}. Run the collector from a git checkout"
+        ) from error
+
+
+def _hash_stable_admission(decision: TopologyMemoryDecision) -> dict[str, object]:
+    """Admission facts for the plan hash: dispositions and envelopes only.
+
+    The free-text ``reason`` fields embed exception text (transient network
+    errors, host-dependent paths) that varies across runs and hosts without
+    changing behavior; hashing them would spuriously invalidate resume — and
+    move the artifact root — for a plan whose actual cell population is
+    identical. The full reasons stay in the persisted collection-plan.json.
+    """
+
+    payload = decision.to_dict()
+    payload.pop("reason", None)
+    for estimate in payload.get("estimates", []):
+        if isinstance(estimate, dict):
+            estimate.pop("reason", None)
+    return payload
+
+
+def _canonical_mapping(payload: dict[str, Any], *, field_name: str) -> str:
+    if not isinstance(payload, dict):
+        raise TypeError(f"BackendPolicy.{field_name} must be a mapping")
+    try:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"BackendPolicy.{field_name} must be JSON serializable") from error
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class BackendPolicy:
+    policy_id: str
+    _generator_overrides_json: str
+    _expected_markers_json: str
+    _aic_fields_json: str
+    admission_reason: str
+
+    def __init__(
+        self,
+        policy_id: str,
+        generator_overrides: dict[str, Any],
+        expected_markers: dict[str, str],
+        aic_fields: dict[str, object] | None = None,
+        admission_reason: str = "",
+    ) -> None:
+        object.__setattr__(self, "policy_id", policy_id)
+        object.__setattr__(
+            self,
+            "_generator_overrides_json",
+            _canonical_mapping(generator_overrides, field_name="generator_overrides"),
+        )
+        object.__setattr__(
+            self,
+            "_expected_markers_json",
+            _canonical_mapping(expected_markers, field_name="expected_markers"),
+        )
+        object.__setattr__(
+            self,
+            "_aic_fields_json",
+            _canonical_mapping(aic_fields or {}, field_name="aic_fields"),
+        )
+        object.__setattr__(self, "admission_reason", admission_reason)
+
+    @property
+    def generator_overrides(self) -> dict[str, Any]:
+        """Return a detached copy so callers cannot mutate the frozen policy."""
+
+        return json.loads(self._generator_overrides_json)
+
+    @property
+    def expected_markers(self) -> dict[str, str]:
+        """Return a detached copy so validation cannot alter plan identity."""
+
+        return json.loads(self._expected_markers_json)
+
+    @property
+    def aic_fields(self) -> dict[str, object]:
+        """Return a detached copy of the structured AIC capability fields."""
+
+        return json.loads(self._aic_fields_json)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "policy_id": self.policy_id,
+            "generator_overrides": self.generator_overrides,
+            "expected_markers": self.expected_markers,
+            "aic_fields": self.aic_fields,
+            "admission_reason": self.admission_reason,
+        }
+
+
+def backend_identity_columns(policy: BackendPolicy) -> dict[str, str | bool]:
+    """The four explicit backend identity columns (schema v6).
+
+    Unspecified string knobs record "auto" (the engine decided); specified
+    knobs record the pinned value. The boolean knobs stay real booleans
+    (default False): the parquet column stays boolean and the modeling-side
+    str() normalization yields "False"/"True".
+    """
+    fields = policy.aic_fields
+
+    def _norm_backend(value: object) -> str:
+        return "auto" if value is None else str(value)
+
+    return {
+        "moe_backend": _norm_backend(fields.get("moe_backend")),
+        "attention_backend": _norm_backend(fields.get("attention_backend")),
+        # Real booleans: the parquet column stays boolean and the
+        # modeling-side str() normalization yields "False"/"True",
+        # matching ModelConfig's Python bool defaults.
+        "enable_wideep": bool(fields.get("enable_wideep")),
+        "enable_eplb": bool(fields.get("enable_eplb")),
+    }
+
+
+def _backend_policies(
+    options: FPMCollectionOptions,
+    collector_config: dict[str, Any],
+    *,
+    backend: str,
+) -> tuple[BackendPolicy, ...]:
+    declarations = collector_config.get("backend_variants", {})
+    if not isinstance(declarations, dict):
+        raise TypeError("FpmCollector.backend_variants must be a mapping")
+    if declarations:
+        raise ValueError(
+            "FpmCollector.backend_variants is no longer an admission mechanism; backend policies must come from "
+            "AIC structured capabilities"
+        )
+    moe = options.moe_backend
+    attention = options.attention_backend
+    wideep = options.enable_wideep
+    eplb = options.enable_eplb
+    specified = {
+        name: value
+        for name, value in (
+            ("moe_backend", moe),
+            ("attention_backend", attention),
+            ("enable_wideep", wideep),
+            ("enable_eplb", eplb),
+        )
+        if value not in ("auto", "false")
+    }
+
+    # Fail closed on anything the collector cannot deliver to the engine and
+    # verify: a row claiming a backend the engine never ran is worse than no
+    # row. vLLM plumbing exists for moe_backend (--kernel-config) and eplb
+    # (--enable-eplb); wide-EP is an SGLang concept; pinning the attention
+    # backend has no verified vLLM plumbing yet.
+    if specified and backend != "vllm":
+        raise ValueError(
+            f"explicit FPM backend identity is only plumbed for the vllm backend; got {backend} with "
+            f"{sorted(specified)} specified"
+        )
+    if wideep == "true":
+        raise ValueError("enable_wideep=true is not collectable on vllm (wide-EP is SGLang-only)")
+    if attention != "auto":
+        raise ValueError(
+            "attention_backend pinning has no verified vllm plumbing yet; collect with auto or add the "
+            "engine flag and its resolved-config marker first"
+        )
+
+    extra_cli_args: list[str] = []
+    expected_markers: dict[str, str] = {}
+    if moe != "auto":
+        extra_cli_args += ["--kernel-config", json.dumps({"moe_backend": moe})]
+        expected_markers["config.engine_args.kernel_config.moe_backend"] = moe
+    if eplb == "true":
+        extra_cli_args += ["--enable-eplb"]
+        expected_markers["config.engine_args.enable_eplb"] = "True"
+
+    generator_overrides: dict[str, Any] = (
+        {"params": {"agg": {"extra_cli_args": extra_cli_args}}} if extra_cli_args else {}
+    )
+    policy_id = (
+        "baseline_auto"
+        if not specified
+        else "explicit-" + "-".join(f"{name}={value}" for name, value in sorted(specified.items()))
+    )
+    return (
+        BackendPolicy(
+            policy_id,
+            generator_overrides,
+            expected_markers,
+            {
+                "moe_backend": None if moe == "auto" else moe,
+                "attention_backend": None if attention == "auto" else attention,
+                "enable_wideep": wideep == "true",
+                "enable_eplb": eplb == "true",
+            },
+            "AIC automatic baseline for the selected model/backend"
+            if not specified
+            else "explicitly pinned backend identity",
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FPMCell:
+    cell_id: str
+    workload_kind: str
+    topology: ParallelTopology
+    weight_quantization: str
+    kv_cache_dtype: str
+    backend_policy: BackendPolicy
+    gemm_quant_mode: str
+    parallel_strategy: str = "unspecified"
+    moe_quant_mode: str | None = None
+    fmha_quant_mode: str | None = None
+    comm_quant_mode: str | None = None
+    fmha_resolution: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cell_id": self.cell_id,
+            "workload_kind": self.workload_kind,
+            "point_source": "dynamo_native_self_benchmark",
+            "topology": self.topology.to_dict(),
+            "parallel_strategy": self.parallel_strategy,
+            "weight_quantization": self.weight_quantization,
+            "kv_cache_dtype": self.kv_cache_dtype,
+            "resolved_dtypes": {
+                "gemm_quant_mode": self.gemm_quant_mode,
+                "moe_quant_mode": self.moe_quant_mode,
+                "fmha_quant_mode": self.fmha_quant_mode,
+                "comm_quant_mode": self.comm_quant_mode,
+                "kvcache_quant_mode": self.kv_cache_dtype,
+                "fmha_resolution": self.fmha_resolution,
+            },
+            "backend_policy": self.backend_policy.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FPMCollectionPlan:
+    backend: str
+    model_path: str
+    system: str
+    aic_revision: str
+    generator_config_sha256: str
+    options: FPMCollectionOptions
+    capability: ModelCapabilityProfile
+    dtype_profile: ResolvedDTypeProfile
+    topologies: tuple[ParallelTopology, ...]
+    topology_memory_admission: tuple[TopologyMemoryDecision, ...]
+    backend_policies: tuple[BackendPolicy, ...]
+    cells: tuple[FPMCell, ...]
+    sha256: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_name": "aic_fpm_collection_plan",
+            "schema_version": 10,
+            "backend": self.backend,
+            "model_path": self.model_path,
+            "system": self.system,
+            "aic_revision": self.aic_revision,
+            "generator_config_sha256": self.generator_config_sha256,
+            "options": self.options.to_dict(),
+            "capability": self.capability.to_dict(),
+            "dtype_profile": self.dtype_profile.to_dict(),
+            "point_generation": {
+                "owner": "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler",
+                "method": "native_self_benchmark",
+                "coordinates": [
+                    "batch_size",
+                    "total_prefill_tokens",
+                    "total_kv_read_tokens",
+                ],
+                "partition_policy": "balanced_v1",
+                "point_admission": "dynamo_live_scheduler",
+                "precondition": "vllm_engine_initialized",
+                "prefill_sampling": self.options.prefill_sampling.to_dict(),
+                "planned_point_count": None,
+            },
+            "topologies": [
+                {
+                    **topology.to_dict(),
+                    "strategy": topology_strategy(topology, is_moe=self.capability.is_moe),
+                }
+                for topology in self.topologies
+            ],
+            "topology_memory_admission": [decision.to_dict() for decision in self.topology_memory_admission],
+            "backend_policies": [policy.to_dict() for policy in self.backend_policies],
+            "cells": [cell.to_dict() for cell in self.cells],
+            "counts": {
+                "candidate_topologies": len(self.topology_memory_admission),
+                "topologies": len(self.topologies),
+                "memory_rejected_topologies": sum(
+                    decision.disposition == "rejected" for decision in self.topology_memory_admission
+                ),
+                "memory_unknown_topologies": sum(
+                    decision.disposition == "unknown" for decision in self.topology_memory_admission
+                ),
+                "backend_policies": len(self.backend_policies),
+                "cells": len(self.cells),
+                "prefill_cudagraph_capture_sizes": len(self.options.prefill_sampling.cudagraph_capture_sizes),
+                "prefill_new_token_axis_points": len(self.options.prefill_sampling.new_token_axis_points),
+                "points": "runtime-determined",
+            },
+            "sha256": self.sha256,
+        }
+
+
+def _cell_id(
+    *,
+    backend: str,
+    model_path: str,
+    system: str,
+    phase: str,
+    topology: ParallelTopology,
+    weight_quantization: str,
+    kv_cache_dtype: str,
+    policy: BackendPolicy,
+) -> str:
+    payload = {
+        "backend": backend,
+        "model_path": model_path,
+        "system": system,
+        "phase": phase,
+        "topology": topology.to_dict(),
+        "weight_quantization": weight_quantization,
+        "kv_cache_dtype": kv_cache_dtype,
+        **backend_identity_columns(policy),
+        "point_source": "dynamo_native_self_benchmark",
+    }
+    return f"fpm-{_canonical_hash(payload)[:16]}"
+
+
+def build_collection_plan(
+    *,
+    backend: str,
+    model_path: str,
+    system: str,
+    selected_ops: set[str],
+    options: FPMCollectionOptions,
+    model_architecture: str | None = None,
+    has_model_cases: bool = True,
+    model_config_path: str | None = None,
+    collector_config: dict[str, Any] | None = None,
+    generator_overrides: dict[str, Any] | None = None,
+) -> FPMCollectionPlan:
+    if backend != "vllm":
+        raise ValueError("FPM Generator V1 currently supports only backend=vllm")
+    collector_config = collector_config or {}
+    generator_config_sha256 = _canonical_hash(generator_overrides or {})
+    capability = resolve_model_capability(
+        backend=backend,
+        model_path=model_path,
+        model_architecture=model_architecture,
+        selected_ops=selected_ops,
+        has_model_cases=has_model_cases,
+        system=system,
+        requested_weight_quantizations=options.weight_quantizations,
+        requested_kv_cache_dtypes=options.kv_cache_dtypes,
+        model_config_path=model_config_path,
+        database_version=(
+            str(collector_config["aic_database_version"]) if "aic_database_version" in collector_config else None
+        ),
+    )
+    candidate_topologies = enumerate_fpm_topologies(
+        backend=backend,
+        is_moe=capability.is_moe,
+        options=options,
+        allow_pure_tp=capability.allow_pure_tp,
+    )
+    topologies, topology_memory_admission = filter_memory_infeasible_topologies(
+        backend=backend,
+        model_path=model_path,
+        system=system,
+        capability=capability,
+        topologies=candidate_topologies,
+        max_new_tokens=options.prefill_sampling.max_total_prefill_tokens,
+    )
+    policies = _backend_policies(options, collector_config, backend=backend)
+    weight_quantization = capability.dtype.gemm_quant_mode
+    runnable_dtype_pairs = {
+        (decision.topology, estimate.kv_cache_dtype)
+        for decision in topology_memory_admission
+        for estimate in decision.estimates
+        if estimate.disposition != "rejected"
+    }
+    # An admitted topology can still lose individual KV dtypes to the memory
+    # budget; those cells silently vanish from the plan unless counted here
+    # (the memory filter itself only logs fully rejected topologies).
+    kept_topologies = set(topologies)
+    dropped_dtype_pairs = [
+        (decision.topology, estimate.kv_cache_dtype)
+        for decision in topology_memory_admission
+        if decision.topology in kept_topologies
+        for estimate in decision.estimates
+        if estimate.disposition == "rejected"
+    ]
+    if dropped_dtype_pairs:
+        details = "; ".join(f"{topology.to_dict()}/kv={dtype}" for topology, dtype in dropped_dtype_pairs)
+        logger.warning(
+            "fpm_forward: dropped %d/%d (topology, kv_dtype) cell groups (memory budget, system=%s): %s",
+            len(dropped_dtype_pairs),
+            len(kept_topologies) * len(capability.dtype.kv_cache_dtypes),
+            system,
+            details,
+        )
+    cells = tuple(
+        FPMCell(
+            cell_id=_cell_id(
+                backend=backend,
+                model_path=model_path,
+                system=system,
+                phase=phase,
+                topology=topology,
+                weight_quantization=weight_quantization,
+                kv_cache_dtype=kv_cache_dtype,
+                policy=policy,
+            ),
+            workload_kind=phase,
+            topology=topology,
+            weight_quantization=weight_quantization,
+            kv_cache_dtype=kv_cache_dtype,
+            backend_policy=policy,
+            parallel_strategy=topology_strategy(topology, is_moe=capability.is_moe),
+            gemm_quant_mode=capability.dtype.gemm_quant_mode,
+            moe_quant_mode=capability.dtype.moe_quant_mode,
+            fmha_quant_mode=capability.dtype.fmha_by_kv_dtype[kv_cache_dtype],
+            comm_quant_mode=capability.dtype.comm_quant_mode,
+            fmha_resolution=capability.dtype.fmha_resolution_by_kv_dtype[kv_cache_dtype],
+        )
+        for phase in ("prefill", "decode")
+        for topology in topologies
+        for kv_cache_dtype in capability.dtype.kv_cache_dtypes
+        if (topology, kv_cache_dtype) in runnable_dtype_pairs
+        for policy in policies
+    )
+    revision = _git_revision()
+    canonical = {
+        "backend": backend,
+        "model_path": model_path,
+        "system": system,
+        "aic_revision": revision,
+        "generator_config_sha256": generator_config_sha256,
+        "options": options.to_dict(),
+        "capability": capability.to_dict(),
+        "dtype_profile": capability.dtype.to_dict(),
+        "point_generation": "dynamo_native_self_benchmark",
+        "topology_memory_admission": [_hash_stable_admission(decision) for decision in topology_memory_admission],
+        "topologies": [topology.to_dict() for topology in topologies],
+        "policies": [policy.to_dict() for policy in policies],
+        "cells": [cell.to_dict() for cell in cells],
+    }
+    return FPMCollectionPlan(
+        backend=backend,
+        model_path=model_path,
+        system=system,
+        aic_revision=revision,
+        generator_config_sha256=generator_config_sha256,
+        options=options,
+        capability=capability,
+        dtype_profile=capability.dtype,
+        topologies=topologies,
+        topology_memory_admission=topology_memory_admission,
+        backend_policies=policies,
+        cells=cells,
+        sha256=_canonical_hash(canonical),
+    )

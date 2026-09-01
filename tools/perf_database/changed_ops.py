@@ -51,17 +51,10 @@ small fixture trees that do not need to replicate all five real registries.
 
 Known gaps
 ----------
-- ``REGISTRY_XPU`` (`collector/vllm/registry.py`, selected by `collect_vllm`
-  on Intel XPU — collect.py:1165-1170) is a second, XPU-only registry list
-  that neither this tool nor `provenance.enumerate_registry_modules` ever
-  reads (both resolve only the CUDA-path `.REGISTRY`). XPU-only collector
-  edits are therefore invisible to change tracking today. Tracked as a
-  follow-up (Linear issue to be filed: "Collector V3 follow-up: XPU registry
-  tracking").
 - VersionRoute-versioned registry entries (`OpEntry(..., versions=(...))`,
   no literal `module=`) are not parsed: `_parse_registry_entries` raises
   `NotImplementedError` rather than silently dropping them (fail-closed, not
-  a silent gap like the XPU one above). No registry uses this shape today.
+    a silent gap). No registry uses this shape today.
 
 Exit codes
 ----------
@@ -296,25 +289,28 @@ def _assigns_name(node: ast.stmt, name: str) -> bool:
     return False
 
 
-def _assigns_registry(node: ast.stmt) -> bool:
-    return _assigns_name(node, "REGISTRY")
+def _registry_names_for_framework(framework: str) -> tuple[str, ...]:
+    if framework == "vllm":
+        return ("REGISTRY", "REGISTRY_XPU")
+    return ("REGISTRY",)
 
 
-def _find_registry_list(tree: ast.Module) -> ast.List | ast.Tuple | None:
-    """The module-level `REGISTRY: list[OpEntry] = [...]` (or unannotated
-    `REGISTRY = [...]`) assignment's list, module-top-level statements only.
+def _find_registry_lists(tree: ast.Module, registry_names: tuple[str, ...]) -> list[ast.List | ast.Tuple]:
+    """Module-level active registry list assignments, module-top-level
+    statements only.
 
     Deliberately does NOT walk the whole file: some registries also define an
-    inactive sibling list (e.g. `REGISTRY_XPU` in collector/vllm/registry.py)
-    that the real loader (`importlib.import_module(...).REGISTRY`, both
-    `framework_manifest._registry_entries` and
-    `provenance.enumerate_registry_modules`) never reads either.
+    inactive sibling list (e.g. fixture-only `REGISTRY_INACTIVE`) that the real
+    loader never reads either. vLLM's `REGISTRY_XPU` is an explicit active
+    sibling selected by collect.py on Intel XPU, so it is included by name.
     """
+    registry_lists: list[ast.List | ast.Tuple] = []
     for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and _assigns_registry(node):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(_assigns_name(node, name) for name in registry_names):
             value = node.value
-            return value if isinstance(value, (ast.List, ast.Tuple)) else None
-    return None
+            if isinstance(value, (ast.List, ast.Tuple)):
+                registry_lists.append(value)
+    return registry_lists
 
 
 def _parse_registry_entries(repo_root: Path, rev: str, manifest: dict[str, Any], framework: str) -> list[RegistryEntry]:
@@ -327,28 +323,32 @@ def _parse_registry_entries(repo_root: Path, rev: str, manifest: dict[str, Any],
 
     perf_file_map = _perf_file_map_at_rev(repo_root, rev)
     tree = ast.parse(_read_git_text(repo_root, rev, registry_path))
-    registry_list = _find_registry_list(tree)
-    if registry_list is None:
+    registry_lists = _find_registry_lists(tree, _registry_names_for_framework(framework))
+    if not registry_lists:
         return []
 
     entries: list[RegistryEntry] = []
-    for element in registry_list.elts:
-        if not (isinstance(element, ast.Call) and isinstance(element.func, ast.Name) and element.func.id == "OpEntry"):
-            continue
-        kwargs = {kw.arg: kw.value for kw in element.keywords if kw.arg}
-        op = _ast_str(kwargs.get("op"))
-        module = _ast_str(kwargs.get("module"))
-        if module is None and "versions" in kwargs:
-            # Versioned entries (module=None, versions=(VersionRoute(...), ...))
-            # are not parsed — fail closed rather than silently omitting the
-            # op from its family's module set (see "Known gaps" above).
-            raise NotImplementedError(
-                f"changed_ops does not support VersionRoute-versioned registry entries; extend the parser (op: {op})"
-            )
-        perf_filename = _resolve_perf_filename(kwargs.get("perf_filename"), perf_file_map)
-        if not (op and module and perf_filename):
-            continue
-        entries.append(RegistryEntry(op=op, module=module, table_stem=Path(perf_filename).stem))
+    for registry_list in registry_lists:
+        for element in registry_list.elts:
+            if not (
+                isinstance(element, ast.Call) and isinstance(element.func, ast.Name) and element.func.id == "OpEntry"
+            ):
+                continue
+            kwargs = {kw.arg: kw.value for kw in element.keywords if kw.arg}
+            op = _ast_str(kwargs.get("op"))
+            module = _ast_str(kwargs.get("module"))
+            if module is None and "versions" in kwargs:
+                # Versioned entries (module=None, versions=(VersionRoute(...), ...))
+                # are not parsed — fail closed rather than silently omitting the
+                # op from its family's module set (see "Known gaps" above).
+                raise NotImplementedError(
+                    "changed_ops does not support VersionRoute-versioned registry entries; "
+                    f"extend the parser (op: {op})"
+                )
+            perf_filename = _resolve_perf_filename(kwargs.get("perf_filename"), perf_file_map)
+            if not (op and module and perf_filename):
+                continue
+            entries.append(RegistryEntry(op=op, module=module, table_stem=Path(perf_filename).stem))
     return entries
 
 
@@ -487,6 +487,14 @@ def _collector_code_differs(
     base_modules: set[str],
     head_modules: set[str],
 ) -> bool:
+    missing_head_closures = head_modules - head_ctx.closures.keys()
+    if missing_head_closures:
+        raise KeyError(
+            f"{head_ctx.rev}: missing hash_closures.yaml entries for {sorted(missing_head_closures)} (fail-closed)"
+        )
+    if base_modules - base_ctx.closures.keys():
+        return True
+
     for module in sorted(base_modules | head_modules):
         base_hash = None
         if module in base_modules:
@@ -521,7 +529,9 @@ def _diff_framework(
             reasons.append(REASON_PIN_VERSION)
         if _collector_code_differs(repo_root, base_ctx, head_ctx, base_modules, head_modules):
             reasons.append(REASON_COLLECTOR_CODE)
-        base_case_hash = _case_plan_hash_at_rev(repo_root, base_ctx.rev, base_modules, base_ctx.closures)
+        base_case_hash = None
+        if not (base_modules - base_ctx.closures.keys()):
+            base_case_hash = _case_plan_hash_at_rev(repo_root, base_ctx.rev, base_modules, base_ctx.closures)
         head_case_hash = _case_plan_hash_at_rev(repo_root, head_ctx.rev, head_modules, head_ctx.closures)
         if base_case_hash != head_case_hash:
             reasons.append(REASON_CASE_PLAN)

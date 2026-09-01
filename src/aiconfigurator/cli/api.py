@@ -26,6 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
+from aiconfigurator.sdk.config_builders import resolve_dspark_nextn as _resolve_dspark_nextn
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
 from aiconfigurator.sdk.errors import ExperimentOutcome, NoFeasibleConfigError, is_gpu_retriable
 from aiconfigurator.sdk.models import (
@@ -34,6 +35,8 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch,
     resolve_nvfp4_for_system,
 )
+from aiconfigurator.sdk.moe_comm_resolver import resolve_model_config_moe_comm
+from aiconfigurator.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -373,6 +376,13 @@ def cli_default(
 
 _MAX_GPUS_PER_WORKER = 64
 
+# Conservative nextn_accepted fraction used when recommend auto-enables DSPARK.
+# nextn_accepted has no backend equivalent — it is AIC's throughput modeling
+# assumption (accepted tokens per step as a fraction of the block size).
+# Users who have empirical acceptance data can override via cli_recommend's
+# nextn_accepted parameter. 0.8 is conservative for a well-aligned draft model.
+_DSPARK_DEFAULT_ACCEPTANCE = 0.8
+
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
     """Scale GPU candidates for recommend mode."""
@@ -514,6 +524,17 @@ def cli_recommend(
     # nextn="auto" resolves the draft depth from the checkpoint first.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
+
+    # DSPARK architectures (e.g. Kimi-K3) always run with a standalone draft
+    # model in production. Their block size is an architectural constant absent
+    # from the checkpoint, so nextn="auto" returns 0. Auto-enable here so that
+    # recommend produces accurate throughput estimates without requiring callers
+    # to know about DSPARK internals.
+    if nextn == 0 and (dspark := _resolve_dspark_nextn(model_path)):
+        nextn, dspark_accepted = dspark
+        if nextn_accepted is None:
+            nextn_accepted = dspark_accepted
+
     nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
     base_tasks = build_default_tasks(
@@ -821,6 +842,13 @@ class EstimateResult:
 
     kv_cache_warning: str | None = None
     """Warning message for non-fatal memory capacity issues."""
+
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = ()
+    """Executed MoE communication topology substitutions.
+
+    Populated only when the Rust operator successfully used a measured
+    topology in place of the requested topology.
+    """
 
     @property
     def request_latency(self) -> float:
@@ -1562,7 +1590,7 @@ def _run_agg_estimate(
         model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1629,6 +1657,7 @@ def _run_agg_estimate(
         summary=summary,
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
         kv_cache_warning=kv_warning,
     )
 
@@ -1699,17 +1728,35 @@ def _run_static_estimate(
         enable_encoder_dp=enable_encoder_dp,
     )
     _apply_nextn(model_config, nextn)
+    database = load_database(system_name)
+
+    if check_is_moe(model_path):
+        required_phases = ("context",) if static_mode == "static_ctx" else ("context", "generation")
+        resolve_model_config_moe_comm(
+            model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=database,
+            required_phases=required_phases,
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+
     # static / static_ctx run context attention; static_gen is generation-only
-    # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
-    resolve_context_fmha_by_data(
-        model_config,
-        model_path,
-        load_database(system_name),
-        backend_name,
-        is_context_role=static_mode != "static_gen",
-    )
+    # and legitimately keeps fp8 FMHA. A resolved large-EP tuple already owns
+    # its WideEP MLA quant labels; the generic narrow-attention guard must not
+    # reinterpret those labels as an explicit user request.
+    if model_config.moe_comm_backend is None:
+        resolve_context_fmha_by_data(
+            model_config,
+            model_path,
+            database,
+            backend_name,
+            is_context_role=static_mode != "static_gen",
+        )
+
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name)
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1723,7 +1770,6 @@ def _run_static_estimate(
     )
 
     model = get_model(model_path, model_config, backend_name)
-    database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
     summary = session.run_static(
@@ -1771,6 +1817,7 @@ def _run_static_estimate(
         summary=summary,
         per_ops_data=None,
         per_ops_source=None,
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
         kv_cache_warning=static_warning,
     )
 
@@ -1875,20 +1922,51 @@ def _run_disagg_estimate(
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
     _apply_nextn(prefill_model_config, nextn)
     _apply_nextn(decode_model_config, nextn)
+
+    prefill_database = load_database(system_name)
+    decode_database = load_database(decode_system_name)
+    if check_is_moe(model_path):
+        resolve_model_config_moe_comm(
+            prefill_model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=prefill_database,
+            required_phases=("context",),
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+        resolve_model_config_moe_comm(
+            decode_model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=decode_database,
+            required_phases=("generation",),
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+
     # Prefill runs context attention → resolve fmha against the perf data. Decode
-    # is generation-only and keeps fp8, so it needs no adjustment.
-    resolve_context_fmha_by_data(
-        prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
-    )
+    # is generation-only and keeps fp8, so it needs no adjustment. A resolved
+    # large-EP tuple owns its WideEP attention labels and must not be rewritten
+    # by the generic narrow-attention fallback.
+    if prefill_model_config.moe_comm_backend is None:
+        resolve_context_fmha_by_data(
+            prefill_model_config, model_path, prefill_database, backend_name, is_context_role=True
+        )
     resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path, backend_name=backend_name)
     resolve_dsv4_moe_arch(
         decode_model_config,
         model_path,
         system_name=decode_system_name or system_name,
         backend_name=backend_name,
     )
-    resolve_nvfp4_for_system(decode_model_config, decode_system_name or system_name, model_path)
+    resolve_nvfp4_for_system(
+        decode_model_config,
+        decode_system_name or system_name,
+        model_path,
+        backend_name=backend_name,
+    )
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -1900,8 +1978,6 @@ def _run_disagg_estimate(
         engine_step_backend=engine_step_backend,
     )
 
-    prefill_database = load_database(system_name)
-    decode_database = load_database(decode_system_name)
     prefill_backend = get_backend(backend_name)
     decode_backend = get_backend(backend_name)
 
@@ -1970,6 +2046,7 @@ def _run_disagg_estimate(
         mode="disagg",
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
     )
 
 
@@ -2083,6 +2160,10 @@ def _combine_afd_static_estimate_results(
         mode="afd",
         per_ops_data=per_ops_data,
         per_ops_source=per_ops_source,
+        moe_comm_fallbacks=merge_moe_comm_fallbacks(
+            afd_result.moe_comm_fallbacks,
+            static_result.moe_comm_fallbacks,
+        ),
         kv_cache_warning=static_result.kv_cache_warning,
     )
 
@@ -2198,9 +2279,9 @@ def _run_afd_estimate(
         a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
     )
     resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(a_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(a_model_config, system_name, model_path, backend_name=backend_name)
     resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(f_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(f_model_config, system_name, model_path, backend_name=backend_name)
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

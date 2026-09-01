@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from aiconfigurator.sdk.performance_result import MoECommFallback
+
 if TYPE_CHECKING:
     from aiconfigurator.cli.api import EstimateResult
     from aiconfigurator.sdk.inference_summary import InferenceSummary
@@ -103,6 +105,11 @@ def format_estimate_detail_report(
         elif section == "summary":
             section_lines = _format_raw_summary(result)
 
+        if section == "source" and result.moe_comm_fallbacks:
+            if section_lines:
+                section_lines.append("")
+            section_lines.extend(_format_moe_comm_fallbacks(result.moe_comm_fallbacks))
+
         if not section_lines:
             continue
         if out:
@@ -110,6 +117,21 @@ def format_estimate_detail_report(
         out.extend(section_lines)
 
     return "\n".join(out)
+
+
+def format_moe_comm_fallback(fallback: MoECommFallback) -> str:
+    """Format one executed topology substitution for CLI output."""
+    return (
+        f"{fallback.inference_phase}/{fallback.comm_backend}: "
+        f"requested EP{fallback.requested_ep_size}/node{fallback.requested_node_num}; "
+        f"using EP{fallback.measurement_ep_size}/node{fallback.measurement_node_num} silicon data"
+    )
+
+
+def _format_moe_comm_fallbacks(fallbacks: tuple[MoECommFallback, ...]) -> list[str]:
+    lines = ["MoE communication fallback provenance (executed)"]
+    lines.extend(f"  {format_moe_comm_fallback(fallback)}" for fallback in fallbacks)
+    return lines
 
 
 def _format_raw_summary(result: EstimateResult) -> list[str]:

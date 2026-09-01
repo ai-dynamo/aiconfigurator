@@ -23,6 +23,7 @@ from aiconfigurator.sdk.errors import (
     KVCacheCapacityError,
     NoFeasibleConfigError,
     NoResultsError,
+    SolNotImplementedError,
     is_expected_cli_error,
     is_expected_no_result_cause,
     is_gpu_retriable,
@@ -128,6 +129,7 @@ def test_recognizer_avoids_cycles() -> None:
         KVCacheCapacityError("kv"),
         PerfDataNotAvailableError("missing silicon data"),
         EmpiricalNotImplementedError("no basis"),
+        SolNotImplementedError("no SOL implementation"),
         ValueError("Unsupported gemm quant mode 'fp8_static'"),
     ],
 )
@@ -191,6 +193,7 @@ def test_gpu_retriable_accepts_memory_errors(exc) -> None:
         NoFeasibleConfigError("SLA impossible"),
         PerfDataNotAvailableError("no data"),
         EmpiricalNotImplementedError("no basis"),
+        SolNotImplementedError("no SOL implementation"),
         ValueError("unsupported quant mode"),
     ],
 )

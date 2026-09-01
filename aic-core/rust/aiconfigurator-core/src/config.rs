@@ -128,6 +128,16 @@ pub struct EngineConfig {
     #[serde(default)]
     pub database_mode: crate::common::enums::DatabaseMode,
 
+    /// Directory-less `next` load (design §14). Set by the Python spec
+    /// builder ONLY after it resolved the requested version to the
+    /// fleet-advertised `next` slot and loaded it without a local version
+    /// directory (every op rides channel-1 backward fill). Tells the engine
+    /// reload to skip the missing-directory gate for THIS spec; raw-version
+    /// and provenance gates are untouched, and native builders never set it
+    /// (additive-optional: absent in older payloads -> false).
+    #[serde(default)]
+    pub tolerate_dirless_version: bool,
+
     /// Enabled empirical transfer kinds as explicit tokens (`xshape` /
     /// `xquant` / `xprofile` / `xop`). Python resolves preset names before
     /// serialising, so no preset vocabulary exists on the wire. `None` =
@@ -253,6 +263,9 @@ pub enum DataType {
     W4a8Mxfp4Mxfp8Trtllm,
     #[serde(rename = "w4a16_mxfp4_cutlass")]
     W4a16Mxfp4Cutlass,
+    // Append-only wire extension: keep existing bincode discriminants stable.
+    #[serde(rename = "w4a16_nvfp4")]
+    W4a16Nvfp4,
 }
 
 #[cfg(test)]

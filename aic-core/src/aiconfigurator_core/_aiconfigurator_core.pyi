@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
+
 class AicEngine:
     @staticmethod
     def from_spec(bytes: bytes, systems_path: str | None = None) -> AicEngine: ...  # noqa: A002
@@ -62,6 +66,21 @@ class AicEngine:
         list[tuple[str, float, float, str]],
         list[tuple[str, float, float, str]],
     ]: ...
+    def _run_static_per_op_with_metadata(
+        self,
+        batch_size: int,
+        beam_width: int,
+        isl: int,
+        osl: int,
+        prefix: int,
+        seq_imbalance_correction_scale: float,
+        gen_seq_imbalance_correction_scale: float,
+        mode: str = "static",
+        stride: int = 32,
+    ) -> tuple[
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+    ]: ...
     def mixed_step_breakdown_per_op(
         self,
         ctx_tokens: int,
@@ -76,6 +95,20 @@ class AicEngine:
         list[tuple[str, float, float, str]],
         list[tuple[str, float, float, str]],
     ]: ...
+    def _mixed_step_breakdown_per_op_with_metadata(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+    ]: ...
     def decode_step_per_op(
         self,
         gen_tokens: int,
@@ -83,6 +116,13 @@ class AicEngine:
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> list[tuple[str, float, float, str]]: ...
+    def _decode_step_per_op_with_metadata(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> list[_PerOpValueWithMetadata]: ...
     def evaluate_context_ops(
         self,
         indices: list[int],

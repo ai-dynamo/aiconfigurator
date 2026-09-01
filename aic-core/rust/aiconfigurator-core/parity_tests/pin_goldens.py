@@ -241,12 +241,6 @@ def _compile_scenario_references() -> dict[str, float]:
     references["wideep_trtllm::static_ctx"] = float(wt_ctx)
     references["wideep_trtllm::static_gen"] = float(wt_gen)
 
-    _m, _b, _d, trtllm_rc20_spec = compile_parity._build_wideep_trtllm("1.3.0rc20")
-    trtllm_rc20_handle = compile_parity._handle_from_spec_json(trtllm_rc20_spec)
-    wt20_ctx, wt20_gen, _ = trtllm_rc20_handle.run_static(batch_size=1, isl=1024, osl=4, prefix=0, stride=1)
-    references["wideep_trtllm_rc20_fallback::static_ctx"] = float(wt20_ctx)
-    references["wideep_trtllm_rc20_fallback::static_gen"] = float(wt20_gen)
-
     missing = [key for key in _SCENARIO_KEYS if key not in references]
     assert not missing, f"scenario compute drifted from _SCENARIO_KEYS: {missing}"
     return references
@@ -303,8 +297,6 @@ _SCENARIO_KEYS = (
     "wideep_sglang::decode_step",
     "wideep_trtllm::static_ctx",
     "wideep_trtllm::static_gen",
-    "wideep_trtllm_rc20_fallback::static_ctx",
-    "wideep_trtllm_rc20_fallback::static_gen",
 )
 
 

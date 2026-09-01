@@ -9,13 +9,18 @@ are selected, and full attention runs over only the selected tokens. Versus DSA
 the main attention is standard GQA (not MLA-compressed), and the indexer scores
 per *block* (block_size tokens) rather than per token.
 
-There is no collected MSA silicon data. These ops therefore run in HYBRID /
-EMPIRICAL only: the SOL is derived below (same three-group split as DSA/DSV4 --
-GEMM projections, FP8 indexer, sparse attention), and the empirical value is a
-CROSS-OP TRANSFER from DSA's measured utilisation at the same workload, scaled
-by a manual ``dsa_scale_k`` (util_scale hook): ``latency = SOL_msa /
-(util_dsa * k)``. SOL only needs to capture the (b, s, prefix) shape trend; k
-pulls the absolute level. Falls back to a constant when DSA data is absent.
+MSA has its own module-level silicon tables (``msa_context_module_perf`` /
+``msa_generation_module_perf``, DSA-module row schema; collected on the
+serving path for trtllm/vllm/sglang across the mainstream systems). SILICON
+queries resolve on those tables through the engine's interpolation with the
+analytic MSA SOL (same three-group split as DSA/DSV4 — GEMM projections,
+indexer, sparse attention) as the anchor. HYBRID / EMPIRICAL try the silicon
+path first; on a typed data miss they fall back to the legacy CROSS-OP
+TRANSFER from DSA's measured utilisation at the same workload, scaled by a
+manual ``dsa_scale_k`` (util_scale hook): ``latency = SOL_msa /
+(util_dsa * k)`` — the pre-silicon behaviour, kept for (backend, version)
+tuples with no MSA tables (measured 15-28x below silicon on SM90; prefer
+versions with collected data).
 """
 
 from __future__ import annotations

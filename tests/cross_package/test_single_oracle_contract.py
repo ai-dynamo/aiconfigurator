@@ -17,9 +17,9 @@ accidental.
 If you are here because this test failed: per-op performance math belongs in
 ``aic-core/rust/aiconfigurator-core`` (one oracle, cross-checked by the
 frozen parity goldens). Python owns model/topology composition and data
-loading, not per-op latency values. See
-``aic-core/rust/aiconfigurator-core/docs/python-dedup-plan.md``
-(post-PR-5 invariant section).
+loading, not per-op latency values. The policy, including where the correct
+home is for what you were trying to add, is ``.claude/rules/rust-core/parity.md``
+Rule 2 (the single-oracle invariant).
 """
 
 from __future__ import annotations
@@ -258,6 +258,7 @@ OPERATIONS_DEF_INVENTORY = {
             "MoEExpertCompute.clear_cache",
             "MoEExpertCompute.load_data",
             "_cache_key",
+            "communication_dtype_for",
             "_validate_a2a_request",
             "_validate_ep_phase",
             "nodes_for",

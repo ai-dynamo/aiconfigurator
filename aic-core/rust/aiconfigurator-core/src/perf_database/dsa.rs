@@ -106,9 +106,9 @@ pub fn dsa_sparse_file_prefix(architecture: &str) -> &'static str {
     }
 }
 
-struct NodeCache {
+pub(crate) struct NodeCache {
     /// (arch, fmha, kv, gemm) → dsa_backend → engine table.
-    by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>>,
+    pub(crate) by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>>,
 }
 
 /// num_heads → step → isl → batch → measured leaf
@@ -128,7 +128,7 @@ pub struct DsaGrids {
 /// resolve). The derived backend values are only ever `trtllm` /
 /// `flashmla_kv`, so the final arm is a defensive mirror of Python's
 /// `next(iter(arch_dict.values()))`.
-fn select_dsa_backend<'a, T>(
+pub(crate) fn select_dsa_backend<'a, T>(
     by_backend: &'a BTreeMap<String, T>,
     dsa_backend: &str,
 ) -> Option<&'a T> {
@@ -642,7 +642,7 @@ impl DsaTable {
 /// Materialise the per-`(DsaKey, dsa_backend)` engine table for
 /// `query_context` with the raw nesting `[num_heads][step][isl][batch]` (the
 /// 4-axis grid Python v2 resolves on).
-fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
+pub(crate) fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
     for (key, by_backend) in &grids.by_keys {
         let backends = by_keys.entry(key.clone()).or_default();
@@ -669,7 +669,7 @@ fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
 /// (`load_dsa_parquet` with `collapse_isl_step_to_seq`), mirroring Python's
 /// per-row overwrite; the grids reaching here carry `step = 0, isl = seq`,
 /// so `seq = isl + step` below is the identity and no tie remains to break.
-fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
+pub(crate) fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
     for (key, by_backend) in &grids.by_keys {
         let backends = by_keys.entry(key.clone()).or_default();
@@ -1010,7 +1010,8 @@ pub(crate) fn dsa_generation_sol_ms(
 /// skip data exists.
 const NO_DSA_ROWS_PREFIX: &str = "no DSA module rows loaded";
 
-fn load_dsa_parquet(
+// pub(crate): the MSA tables reuse this loader verbatim (perf_database/msa.rs).
+pub(crate) fn load_dsa_parquet(
     sources: &[PerfSource],
     collapse_isl_step_to_seq: bool,
     want_skip_rows: bool,
@@ -1293,14 +1294,14 @@ pub fn lookup_2d(
     ))
 }
 
-fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
+pub(crate) fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
     AicError::PerfDatabase(format!(
         "{table} data missing for {descriptor} at {}",
         data_root.display()
     ))
 }
 
-fn clone_err(err: &AicError) -> AicError {
+pub(crate) fn clone_err(err: &AicError) -> AicError {
     AicError::PerfDatabase(err.to_string())
 }
 
@@ -1309,12 +1310,6 @@ mod tests {
     use super::*;
 
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
-
-    fn b200_vllm_data_root() -> PathBuf {
-        PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0")
-    }
 
     fn b200_sxm_spec() -> SystemSpec {
         let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
@@ -1332,20 +1327,27 @@ mod tests {
         );
     }
 
+    /// Within-file duplicate policy: LAST row wins (Python two-phase loader,
+    /// `operations/dsa.py:1461-1502`); the pre-fix per-row `or_insert` kept
+    /// the FIRST row instead. Synthetic vehicle: two rows at the same
+    /// coordinate, different latencies — no data-version anchoring.
     #[test]
-    fn dsa_context_module_exact_hit() {
-        // First row of dsa_context_module_perf.parquet:
-        // arch=DeepseekV32ForCausalLM mla=bfloat16 kv=bfloat16 gemm=bfloat16
-        // n=128 b=1 isl=1 step=0 latency=1.0972. Exact 4-axis hit — the
-        // engine returns the measured leaf verbatim.
-        // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
-        let table = DsaTable::new(b200_vllm_data_root());
+    fn dsa_within_file_duplicates_last_row_wins() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet(
+            &tmp.path().join("dsa_context_module_perf.parquet"),
+            &[
+                ("dsa_context_module", "default", 1.0),
+                ("dsa_context_module", "default", 2.0),
+            ],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
         let spec = b200_sxm_spec();
         let latency = table
             .query_context(
                 &spec,
                 1,
-                1,
+                1024,
                 128,
                 KvCacheQuantMode::Bfloat16,
                 FmhaQuantMode::Bfloat16,
@@ -1359,68 +1361,19 @@ mod tests {
             .expect("DSA context query must succeed")
             .latency;
         assert!(
-            (latency - 1.0972).abs() < 1e-6,
-            "expected recorded latency, got {latency}"
+            (latency - 2.0).abs() < 1e-12,
+            "within-file duplicates must resolve last-row-wins, got {latency}"
         );
-    }
-
-    /// Within-file duplicate policy: LAST row wins (Python two-phase loader,
-    /// `operations/dsa.py:1461-1502`). The real b300_sxm/vllm/0.19.0
-    /// `dsa_context_module_perf.parquet` carries 16k+ within-file duplicate
-    /// coordinates; at (arch=DeepseekV32ForCausalLM, bf16/bf16/bf16, n=128,
-    /// step=0, isl=8192, b=1) the first occurrence records 7.7643 and the
-    /// last records 7.7560. Python oracle (7.756) generated with:
-    ///
-    /// ```text
-    /// PYTHONPATH=src python3 -c "
-    /// from aiconfigurator.sdk.perf_database import get_database
-    /// from aiconfigurator.sdk import common
-    /// db = get_database('b300_sxm', 'vllm', '0.19.0')
-    /// r = db.query_context_dsa_module(
-    ///     b=1, s=8192, num_heads=128,
-    ///     kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-    ///     fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-    ///     gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-    ///     database_mode=common.DatabaseMode.SILICON,
-    ///     prefix=0, architecture='DeepseekV32ForCausalLM',
-    ///     dsa_backend='flashmla_kv')
-    /// print(float(r))"
-    /// ```
-    ///
-    /// The pre-fix per-row `or_insert` (first-row-wins) returned 7.7643 here.
-    #[test]
-    fn dsa_within_file_duplicates_last_row_wins() {
-        let data_root = PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/data/b300_sxm/vllm/0.19.0");
-        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/b300_sxm.yaml");
-        let spec = SystemSpec::load(&systems_yaml).expect("b300_sxm.yaml must parse");
-        let table = DsaTable::new(data_root);
-        let latency = table
-            .query_context(
-                &spec,
-                1,
-                8192,
-                128,
-                KvCacheQuantMode::Bfloat16,
-                FmhaQuantMode::Bfloat16,
-                GemmQuantMode::Bfloat16,
-                "DeepseekV32ForCausalLM",
-                0,
-                INDEX_TOPK,
-                "trtllm",
-                false,
-            )
-            .expect("DSA context query must succeed")
-            .latency;
-        approx_rel(latency, 7.756);
     }
 
     #[test]
     fn dsa_unknown_architecture_errors() {
-        let table = DsaTable::new(b200_vllm_data_root());
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet(
+            &tmp.path().join("dsa_context_module_perf.parquet"),
+            &[("dsa_context_module", "default", 1.0)],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
         let spec = b200_sxm_spec();
         let err = table
             .query_context(
@@ -1439,53 +1392,6 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, AicError::PerfDatabase(_)));
-    }
-
-    /// Cross-language parity with the Python v2 engine on the real
-    /// b200_sxm/vllm/0.19.0 tables. Oracle values generated with
-    /// `PYTHONPATH=src python3` via
-    /// `PerfDatabase.query_context_dsa_module(..., DatabaseMode.SILICON)`
-    /// (shared layer off so both sides read the same single parquet):
-    /// exact hit / interior seq / interior batch / interior prefix (GLM) /
-    /// seq util-hold / prefix util-hold.
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
-    #[test]
-    fn dsa_context_matches_python_v2_engine() {
-        let table = DsaTable::new(b200_vllm_data_root());
-        let spec = b200_sxm_spec();
-        let q = |b: u32, s: u32, prefix: u32, heads: u32, arch: &str| {
-            table
-                .query_context(
-                    &spec,
-                    b,
-                    s,
-                    heads,
-                    KvCacheQuantMode::Bfloat16,
-                    FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Bfloat16,
-                    arch,
-                    prefix,
-                    INDEX_TOPK,
-                    "trtllm",
-                    false,
-                )
-                .unwrap()
-                .latency
-        };
-        let dsv32 = "DeepseekV32ForCausalLM";
-        let glm = "GlmMoeDsaForCausalLM";
-        // exact 4-axis hit
-        approx_rel(q(4, 2048, 0, 128, dsv32), 7.6471);
-        // interior seq blend (2048 < 2560 < 3072)
-        approx_rel(q(2, 2560, 0, 128, dsv32), 4.9806);
-        // interior batch blend (2 < 3 < 4)
-        approx_rel(q(3, 1024, 0, 128, dsv32), 3.0913);
-        // interior prefix blend on the GLM step axis (0 < 64 < 128)
-        approx_rel(q(1, 128, 64, 16, glm), 1.2492999999999999);
-        // seq tapered util-hold beyond the 32768 frontier (validates the context SOL)
-        approx_rel(q(1, 65536, 0, 128, dsv32), 93.51797494885695);
-        // prefix tapered util-hold beyond the 128 step frontier
-        approx_rel(q(1, 2048, 4096, 128, dsv32), 3.270467722991338);
     }
 
     // ------------------------------------------------------------------
@@ -1693,41 +1599,6 @@ mod tests {
         );
         assert_eq!(sparse.topk_flat, grid(&[(1, 2048, 0, 100.0)]));
         assert!(sparse.dsa_attn.is_empty());
-    }
-
-    /// Generation parity: exact / interior seq / interior batch / seq
-    /// util-hold against Python
-    /// `PerfDatabase.query_generation_dsa_module(..., DatabaseMode.SILICON)`.
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
-    #[test]
-    fn dsa_generation_matches_python_v2_engine() {
-        let table = DsaTable::new(b200_vllm_data_root());
-        let spec = b200_sxm_spec();
-        let q = |b: u32, s: u32| {
-            table
-                .query_generation(
-                    &spec,
-                    b,
-                    s,
-                    128,
-                    KvCacheQuantMode::Bfloat16,
-                    FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Bfloat16,
-                    "DeepseekV32ForCausalLM",
-                    "trtllm",
-                    false,
-                )
-                .unwrap()
-                .latency
-        };
-        // exact hit
-        approx_rel(q(16, 4097), 0.2698);
-        // interior seq blend (2049 < 3000 < 4097)
-        approx_rel(q(16, 3000), 0.261390380859375);
-        // interior batch blend (16 < 24 < 32)
-        approx_rel(q(24, 4097), 0.27545);
-        // seq tapered util-hold beyond the frontier (validates the decode SOL)
-        approx_rel(q(16, 300000), 0.5491372293318538);
     }
 
     /// Write one synthetic DSA module parquet with the collector's column set

@@ -17,6 +17,7 @@ from aiconfigurator_core.sdk.config import RuntimeConfig
 from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
+from aiconfigurator_core.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 from aiconfigurator_core.sdk.rust_engine_step import (
     estimate_decode_step_breakdown_with_rust,
     estimate_mixed_step_breakdown_with_rust,
@@ -444,7 +445,7 @@ class BaseBackend:
         memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
         return raw_latency * latency_correction_scale, power_w, memory, power_coverage
 
-    # TODO: refactor this 6-tuple return into a NamedTuple (or @dataclass) for
+    # TODO: refactor this seven-tuple return into a NamedTuple (or @dataclass) for
     # readability; current call sites unpack positionally and the signature is
     # hard to scan.
     def _run_static_breakdown(
@@ -464,6 +465,7 @@ class BaseBackend:
         dict[str, float],
         dict[str, str],
         dict[str, str],
+        tuple[MoECommFallback, ...],
     ]:
         isl_eff = runtime_config.isl + img_ctx_tokens
 
@@ -479,6 +481,7 @@ class BaseBackend:
             generation_energy_wms_dict,
             context_source_dict,
             generation_source_dict,
+            moe_comm_fallbacks,
         ) = estimate_static_latency_breakdown_with_rust(
             model,
             database,
@@ -500,6 +503,7 @@ class BaseBackend:
             generation_energy_wms_dict,
             context_source_dict,
             generation_source_dict,
+            moe_comm_fallbacks,
         )
 
     def run_static_latency_only(
@@ -539,6 +543,7 @@ class BaseBackend:
             context_latency_dict,
             _,
             generation_latency_dict,
+            _,
             _,
             _,
             _,
@@ -626,6 +631,7 @@ class BaseBackend:
             generation_energy_wms_dict,
             context_source_dict,
             generation_source_dict,
+            moe_comm_fallbacks,
         ) = self._run_static_breakdown(
             model,
             database,
@@ -798,6 +804,7 @@ class BaseBackend:
         summary.set_encoder_source_dict(encoder_source_dict)
         summary.set_context_source_dict(context_source_dict)
         summary.set_generation_source_dict(generation_source_dict)
+        summary.set_moe_comm_fallbacks(moe_comm_fallbacks)
         summary.set_encoder_power_avg(encoder_power_avg)
         summary.set_context_power_avg(context_power_avg)
         summary.set_generation_power_avg(generation_power_avg)
@@ -1090,6 +1097,7 @@ class BaseBackend:
             component_energy_wms=components["component_energy_wms"],
             per_op_latency_ms=components["per_op_latency_ms"],
             per_op_source=components["per_op_source"],
+            moe_comm_fallbacks=components["moe_comm_fallbacks"],
             context_tokens=step.context_tokens,
             num_decode_requests=step.num_decode_requests,
             num_decode_query_tokens=decode_query_tokens,
@@ -1103,14 +1111,15 @@ class BaseBackend:
         gen_tokens: int,
         isl: int,
         osl: int,
-    ) -> tuple[float, float, dict, dict]:
+    ) -> tuple[float, float, dict, dict, tuple[MoECommFallback, ...]]:
         """Latency / energy for one generation-only step.
 
-        Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source)``.
-        When ``gen_tokens <= 0`` both totals are 0 and the per-op dicts are empty.
+        Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source,
+        moe_comm_fallbacks)``. When ``gen_tokens <= 0`` both totals are 0 and
+        the per-op dicts and fallback records are empty.
         """
         if gen_tokens <= 0:
-            return 0.0, 0.0, {}, {}
+            return 0.0, 0.0, {}, {}, ()
         self._require_rust_engine_step(runtime_config, database, surface="decode")
         return estimate_decode_step_breakdown_with_rust(
             model,
@@ -1266,7 +1275,7 @@ class BaseBackend:
             num_genonly_tokens = 1
             num_mix_steps_for_tpot_calc = 0
 
-        # Step-latency helpers (return (latency_ms, energy_wms, per_op_data, per_op_source)).
+        # Step-latency helpers also return executed MoE fallback records.
         per_ops_data: dict[str, dict] = {}
         per_ops_source: dict[str, dict] = {}
 
@@ -1299,6 +1308,7 @@ class BaseBackend:
             genonly_step_energy_wms,
             genonly_per_ops,
             genonly_per_ops_src,
+            genonly_moe_comm_fallbacks,
         ) = self._get_genonly_step_latency(model, database, runtime_config, num_genonly_tokens, isl, osl)
         if genonly_per_ops:
             per_ops_data["genonly_step"] = genonly_per_ops
@@ -1520,6 +1530,12 @@ class BaseBackend:
             per_ops_source["encoder"] = dict(encoder_source_dict)
         summary.set_per_ops_data(per_ops_data)
         summary.set_per_ops_source(per_ops_source)
+        summary.set_moe_comm_fallbacks(
+            merge_moe_comm_fallbacks(
+                mix_step_estimate.moe_comm_fallbacks,
+                genonly_moe_comm_fallbacks if num_genonly_steps > 0 else (),
+            )
+        )
         summary.set_step_estimates(
             {
                 # Raw run_mixed output (pre-mix_efficiency); the authoritative

@@ -16,6 +16,9 @@ class ModelConfig:
     tp_size: int = 1
     pp_size: int = 1
     gemm_quant_mode: common.GEMMQuantMode | None = None
+    # Internal provenance carried through dataclasses.replace() during sweeps.
+    # None preserves the legacy direct-caller rule (non-None mode is explicit).
+    _gemm_quant_mode_is_explicit: bool | None = field(default=None, repr=False, compare=False, kw_only=True)
     moe_quant_mode: common.MoEQuantMode | None = None
     kvcache_quant_mode: common.KVCacheQuantMode | None = None
     fmha_quant_mode: common.FMHAQuantMode | None = None
@@ -65,6 +68,9 @@ class ModelConfig:
     # No default: a wrong node width silently mis-prices cross-node all-to-all, so
     # large-EP construction raises when it is missing (models.helpers.large_ep_gpus_per_node).
     num_gpus_per_node: int | None = None
+    # Internal system identity used by phase/quantization-specific communication
+    # dtype selection.  It travels with ModelConfig through sweep replacements.
+    system: str | None = None
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.

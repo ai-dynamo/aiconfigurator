@@ -664,7 +664,7 @@ class TestHFModelSupport:
         )
 
         with pytest.raises(ValueError, match="Blackwell"):
-            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
+            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(
@@ -1838,6 +1838,38 @@ class TestBundledModelConfigsOffline:
         assert raw.get("hf_quant_config"), "bundled hf_quant_config not attached"
         sdk_utils._load_model_config_from_model_path.cache_clear()
 
+    def test_minimax_m3_nvfp4_bundle_resolves_mixed_precision_modes(self, monkeypatch):
+        """nvidia/MiniMax-M3-NVFP4 end-to-end: bundled MIXED_PRECISION metadata
+        resolves gemm=fp8_block (MXFP8 approximation, owner decision 2026-08-09),
+        moe=nvfp4 (routed experts), kv=bfloat16 (kv_cache_quant_algo null)."""
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
+        cfg = sdk_utils.get_model_config_from_model_path("nvidia/MiniMax-M3-NVFP4")
+        raw = cfg["raw_config"]
+        # The bundled NVFP4 config is the raw hub (VL-wrapper) form since
+        # upstream 90f7fc0f; the parser keeps the top-level architecture and
+        # unwraps the text fields.
+        assert cfg["architecture"] == "MiniMaxM3SparseForConditionalGeneration"
+        assert raw["quant_algo"] == "mixed_precision"
+        assert raw.get("kv_cache_quant_algo") is None
+
+        model_config = config.ModelConfig(tp_size=1, attention_dp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model = get_model("nvidia/MiniMax-M3-NVFP4", model_config, backend_name="trtllm")
+
+        assert model.model_family == "MINIMAXM3"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
 
 class TestWideEPAttentionExclusions:
     """TRT-LLM large-EP must inherit the checkpoint's per-projection attention
@@ -1875,3 +1907,75 @@ class TestWideEPAttentionExclusions:
         assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
         # fused q_a+kv_a downscale: BF16 iff both groups excluded.
         assert by_name["context_downscale_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+
+
+class TestDSV4NVFP4QuantResolution:
+    """AIC-1749: quant resolution for the nvidia/DeepSeek-V4-*-NVFP4 exports.
+
+    Their ModelOpt sidecars name the expert stack as bare module paths
+    (``layers.N.ffn.experts`` — no trailing tensor segment), which the
+    routing-expert classifier used to miss, flooding ``gemm_algos`` with
+    nvfp4 and driving every sweep into the phantom
+    ``ModuleKey { gemm_quant: "nvfp4" }`` lookup. The checkpoints were also
+    absent from ``DEEPSEEK_V4_HF_MODELS``, so ``get_model`` bypassed the
+    packaged configs and re-downloaded the HF ``quantization_config`` (whose
+    blanket ``Linear`` config-group target re-created the same phantom).
+    """
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            # The DSV4 sidecar shape: bare module path, no trailing segment.
+            ("layers.0.ffn.experts", True),
+            # Tensor under the expert stack (the historical shape).
+            ("model.layers.3.mlp.experts.7.down_proj", True),
+            ("routing_expert_gemm", True),
+            # Shared experts are dense-path, never routed.
+            ("layers.0.ffn.shared_experts", False),
+            ("layers.0.ffn.shared_experts.0.up_proj", False),
+            ("layers.0.self_attn.q_proj", False),
+            # Suffix precision: "experts" embedded in a longer leaf name is
+            # not the expert module.
+            ("layers.0.ffn.experts_gate", False),
+        ],
+    )
+    def test_routing_expert_target_classification(self, target: str, expected: bool):
+        from aiconfigurator_core.sdk.models.helpers import _is_routing_expert_target
+
+        assert _is_routing_expert_target(target) is expected
+
+    def test_nvfp4_exports_are_registered_for_offline_configs(self):
+        for hf_id in ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"):
+            assert hf_id in common.DEEPSEEK_V4_HF_MODELS
+            assert hf_id in common.DefaultHFModels
+            # Derived roster: they join the daily support matrix (the AIC-1743
+            # §3 coverage gap) unless explicitly retired.
+            assert hf_id in common.SupportMatrixHFModels
+
+    @pytest.mark.parametrize("hf_id", ["nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"])
+    def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str, monkeypatch):
+        """The packaged sidecar preserves the base checkpoint's FP8-block
+        non-expert lane and quantizes the routed experts as NVFP4. The explicit
+        sidecar MoE mode must win over the native DeepSeek-V4 ``expert_dtype``
+        fallback so the SDK key matches the Collector artifact contract.
+        """
+        import aiconfigurator.sdk.utils as sdk_utils
+        from aiconfigurator_core.sdk.models.helpers import _get_model_info
+
+        def _no_network(*args, **kwargs):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        _get_model_info.cache_clear()
+        try:
+            model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
+            model = models.get_model(hf_id, model_config, backend_name="vllm")
+            assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+            assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4
+            assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        finally:
+            sdk_utils.get_model_config_from_model_path.cache_clear()
+            sdk_utils._load_model_config_from_model_path.cache_clear()
+            _get_model_info.cache_clear()

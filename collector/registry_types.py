@@ -41,9 +41,8 @@ class PerfFile(str, Enum):
     WIDEEP_GENERATION_MOE = "wideep_generation_moe_perf.txt"
     WIDEEP_DEEPEP_LL = "wideep_deepep_ll_perf.txt"
     WIDEEP_DEEPEP_NORMAL = "wideep_deepep_normal_perf.txt"
-    # Model-agnostic large-scale EP tables (unified schema): a2a dispatch/combine
-    # communication and expert-parallel MoE compute. Consumer loaders live in
-    # aiconfigurator_core.sdk.operations.moe_comm (shipped with PR 1).
+    # Model-agnostic large-scale EP tables: dispatch/combine communication and
+    # expert-parallel MoE compute.
     MOE_A2A = "moe_a2a_perf.txt"
     MOE_EXPERT_COMPUTE = "moe_expert_compute_perf.txt"
     MLA_CONTEXT_MODULE = "mla_context_module_perf.txt"
@@ -56,6 +55,10 @@ class PerfFile(str, Enum):
     # modeler can amortize: per_layer = (1/freq)*full + (1-1/freq)*skip.
     DSA_CONTEXT_MODULE_SKIP_INDEXER = "dsa_context_module_skip_indexer_perf.txt"
     DSA_GENERATION_MODULE_SKIP_INDEXER = "dsa_generation_module_skip_indexer_perf.txt"
+    # MiniMax-M3 MSA (block-sparse GQA) full-module data — same row schema as
+    # the DSA module files, keyed by architecture.
+    MSA_CONTEXT_MODULE = "msa_context_module_perf.txt"
+    MSA_GENERATION_MODULE = "msa_generation_module_perf.txt"
     MHC_MODULE = "mhc_module_perf.txt"
     # DeepSeek-V4 module-level data — one OpEntry per (attn_kind, mode) pair,
     # mirroring the existing aic_dev "1 OpEntry = 1 file" convention.
