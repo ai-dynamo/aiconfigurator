@@ -1624,7 +1624,7 @@ def _run_agg_estimate(
         model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1792,7 +1792,7 @@ def _run_static_estimate(
         )
 
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name)
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1961,20 +1961,51 @@ def _run_disagg_estimate(
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
     _apply_nextn(prefill_model_config, nextn)
     _apply_nextn(decode_model_config, nextn)
+
+    prefill_database = load_database(system_name)
+    decode_database = load_database(decode_system_name)
+    if check_is_moe(model_path):
+        resolve_model_config_moe_comm(
+            prefill_model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=prefill_database,
+            required_phases=("context",),
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+        resolve_model_config_moe_comm(
+            decode_model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=decode_database,
+            required_phases=("generation",),
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+
     # Prefill runs context attention → resolve fmha against the perf data. Decode
-    # is generation-only and keeps fp8, so it needs no adjustment.
-    resolve_context_fmha_by_data(
-        prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
-    )
+    # is generation-only and keeps fp8, so it needs no adjustment. A resolved
+    # large-EP tuple owns its WideEP attention labels and must not be rewritten
+    # by the generic narrow-attention fallback.
+    if prefill_model_config.moe_comm_backend is None:
+        resolve_context_fmha_by_data(
+            prefill_model_config, model_path, prefill_database, backend_name, is_context_role=True
+        )
     resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path, backend_name=backend_name)
     resolve_dsv4_moe_arch(
         decode_model_config,
         model_path,
         system_name=decode_system_name or system_name,
         backend_name=backend_name,
     )
-    resolve_nvfp4_for_system(decode_model_config, decode_system_name or system_name, model_path)
+    resolve_nvfp4_for_system(
+        decode_model_config,
+        decode_system_name or system_name,
+        model_path,
+        backend_name=backend_name,
+    )
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -1986,8 +2017,6 @@ def _run_disagg_estimate(
         engine_step_backend=engine_step_backend,
     )
 
-    prefill_database = load_database(system_name)
-    decode_database = load_database(decode_system_name)
     prefill_backend = get_backend(backend_name)
     decode_backend = get_backend(backend_name)
 
@@ -2292,9 +2321,9 @@ def _run_afd_estimate(
         a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
     )
     resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(a_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(a_model_config, system_name, model_path, backend_name=backend_name)
     resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(f_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(f_model_config, system_name, model_path, backend_name=backend_name)
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

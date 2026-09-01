@@ -58,6 +58,14 @@ use crate::perf_database::parquet_loader::PerfReader;
 const CONTEXT_AXES: &[&str] = &["num_heads", "seq_len", "batch"];
 /// Axes for the generation table (RAW Grid; seq is innermost).
 const GENERATION_AXES: &[&str] = &["num_heads", "batch", "seq_len"];
+const WIDEEP_MLA_ATTENTION_BACKENDS: &[&str] = &["flashinfer", "fa3"];
+const BLACKWELL_MLA_KERNEL_SOURCE: &str = "trtllm_mla";
+
+fn invalid_kernel_source(requested: &str) -> AicError {
+    AicError::InvalidEngineConfig(format!(
+        "attention_backend must be 'flashinfer', 'fa3', or match an available kernel_source; got {requested:?}."
+    ))
+}
 
 /// Owner for both WideEP MLA tables. Each side is lazily loaded on first
 /// query.
@@ -99,43 +107,71 @@ pub struct GenerationKey {
     pub kv_quant: String,
 }
 
-fn resolve_context_key(grids: &WideEpContextMlaGrids, requested: ContextKey) -> ContextKey {
+/// Resolve a user-facing backend alias to the measured context-table key.
+///
+/// Exact measured kernel sources remain valid for low-level callers. Only the
+/// supported user-facing aliases may borrow Blackwell's `trtllm_mla` slice;
+/// unknown or empty values must not silently select it.
+fn resolve_context_key(
+    grids: &WideEpContextMlaGrids,
+    requested: ContextKey,
+) -> Result<ContextKey, AicError> {
+    if requested.kernel_source.is_empty() {
+        return Err(invalid_kernel_source(&requested.kernel_source));
+    }
     if grids.by_keys.contains_key(&requested) {
-        return requested;
+        return Ok(requested);
     }
-    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
-        return requested;
+    if WIDEEP_MLA_ATTENTION_BACKENDS.contains(&requested.kernel_source.as_str()) {
+        let fallback = ContextKey {
+            kernel_source: BLACKWELL_MLA_KERNEL_SOURCE.to_string(),
+            ..requested.clone()
+        };
+        return Ok(if grids.by_keys.contains_key(&fallback) {
+            fallback
+        } else {
+            requested
+        });
     }
-    let fallback = ContextKey {
-        kernel_source: "trtllm_mla".to_string(),
-        ..requested.clone()
-    };
-    if grids.by_keys.contains_key(&fallback) {
-        fallback
-    } else {
-        requested
+    if grids
+        .by_keys
+        .keys()
+        .any(|key| key.kernel_source == requested.kernel_source)
+    {
+        return Ok(requested);
     }
+    Err(invalid_kernel_source(&requested.kernel_source))
 }
 
 fn resolve_generation_key(
     grids: &WideEpGenerationMlaGrids,
     requested: GenerationKey,
-) -> GenerationKey {
+) -> Result<GenerationKey, AicError> {
+    if requested.kernel_source.is_empty() {
+        return Err(invalid_kernel_source(&requested.kernel_source));
+    }
     if grids.by_keys.contains_key(&requested) {
-        return requested;
+        return Ok(requested);
     }
-    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
-        return requested;
+    if WIDEEP_MLA_ATTENTION_BACKENDS.contains(&requested.kernel_source.as_str()) {
+        let fallback = GenerationKey {
+            kernel_source: BLACKWELL_MLA_KERNEL_SOURCE.to_string(),
+            ..requested.clone()
+        };
+        return Ok(if grids.by_keys.contains_key(&fallback) {
+            fallback
+        } else {
+            requested
+        });
     }
-    let fallback = GenerationKey {
-        kernel_source: "trtllm_mla".to_string(),
-        ..requested.clone()
-    };
-    if grids.by_keys.contains_key(&fallback) {
-        fallback
-    } else {
-        requested
+    if grids
+        .by_keys
+        .keys()
+        .any(|key| key.kernel_source == requested.kernel_source)
+    {
+        return Ok(requested);
     }
+    Err(invalid_kernel_source(&requested.kernel_source))
 }
 
 impl WideEpMlaTable {
@@ -201,7 +237,7 @@ impl WideEpMlaTable {
                 fmha_quant: fmha_quant.name().to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -263,7 +299,7 @@ impl WideEpMlaTable {
                 kernel_source: kernel_source.to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -317,7 +353,7 @@ impl WideEpMlaTable {
                 fmha_quant: fmha_quant.name().to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -339,7 +375,7 @@ impl WideEpMlaTable {
                 kernel_source: kernel_source.to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -747,11 +783,13 @@ mod tests {
 
         for source in ["flashinfer", "fa3"] {
             assert_eq!(
-                resolve_context_key(&context, context_key(source)),
+                resolve_context_key(&context, context_key(source))
+                    .expect("supported context alias"),
                 context_key("trtllm_mla")
             );
             assert_eq!(
-                resolve_generation_key(&generation, generation_key(source)),
+                resolve_generation_key(&generation, generation_key(source))
+                    .expect("supported generation alias"),
                 generation_key("trtllm_mla")
             );
         }
@@ -773,12 +811,33 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_context_key(&context, context_key("flashinfer")),
+            resolve_context_key(&context, context_key("flashinfer")).expect("exact context slice"),
             context_key("flashinfer")
         );
         assert_eq!(
-            resolve_generation_key(&generation, generation_key("flashinfer")),
+            resolve_generation_key(&generation, generation_key("flashinfer"))
+                .expect("exact generation slice"),
             generation_key("flashinfer")
+        );
+    }
+
+    #[test]
+    fn wideep_mla_exact_measured_source_remains_valid() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([(context_key("torch"), Node::branch())]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([(generation_key("torch"), Node::branch())]),
+        };
+
+        assert_eq!(
+            resolve_context_key(&context, context_key("torch")).expect("measured context source"),
+            context_key("torch")
+        );
+        assert_eq!(
+            resolve_generation_key(&generation, generation_key("torch"))
+                .expect("measured generation source"),
+            generation_key("torch")
         );
     }
 
@@ -792,11 +851,13 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_context_key(&context, context_key("flashinfer")),
+            resolve_context_key(&context, context_key("flashinfer"))
+                .expect("supported context alias"),
             context_key("flashinfer")
         );
         assert_eq!(
-            resolve_generation_key(&generation, generation_key("flashinfer")),
+            resolve_generation_key(&generation, generation_key("flashinfer"))
+                .expect("supported generation alias"),
             generation_key("flashinfer")
         );
     }
@@ -811,13 +872,19 @@ mod tests {
         };
 
         for source in ["torch", ""] {
-            assert_eq!(
-                resolve_context_key(&context, context_key(source)),
-                context_key(source)
+            assert!(
+                matches!(
+                    resolve_context_key(&context, context_key(source)),
+                    Err(AicError::InvalidEngineConfig(_))
+                ),
+                "invalid context source {source:?} must not borrow trtllm_mla"
             );
-            assert_eq!(
-                resolve_generation_key(&generation, generation_key(source)),
-                generation_key(source)
+            assert!(
+                matches!(
+                    resolve_generation_key(&generation, generation_key(source)),
+                    Err(AicError::InvalidEngineConfig(_))
+                ),
+                "invalid generation source {source:?} must not borrow trtllm_mla"
             );
         }
     }

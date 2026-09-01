@@ -2634,29 +2634,44 @@ class PerfDatabase:
             if callable(cache_clear):
                 cache_clear()
 
-    def moe_a2a_coverage(self, hidden_size: int, topk: int, num_experts: int) -> dict[str, set[tuple[int, int]]]:
+    def moe_a2a_coverage(
+        self,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        model_quantization=None,
+        inference_phase: str | None = None,
+    ) -> dict[str, set[tuple[int, int]]]:
         """Probe moe_a2a coverage for one model shape (PR 2's enumerator contract).
 
         Returns ``comm_backend -> {(ep_size, node_num)}`` where BOTH the
         dispatch AND combine phases carry a non-empty token curve for the
-        shape, under ANY ``comm_dtype`` and ANY ``sms`` (the prepare phase is
-        not required). Read-only key walk over the table bound by
+        shape. When model quantization and inference phase are supplied, each
+        phase must exist under the exact serving communication dtype; omitted
+        arguments preserve the legacy ANY-dtype introspection behavior. SMS
+        remains an ANY axis and prepare is not required. Read-only key walk over the table bound by
         ``MoEAllToAll.load_data`` — no query execution, and non-vivifying
         (``.get`` only: injected stores may be auto-vivifying defaultdicts).
         An absent or unloaded table — including a ``LoadedOpData`` wrapping
         ``None``, which raises on item access but is falsy — yields ``{}``.
         Deliberately not lru_cached: the returned sets are mutable.
         """
-        from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
+        from aiconfigurator_core.sdk.operations.moe_comm import (
+            MOE_A2A_BACKENDS,
+            MoEAllToAll,
+            communication_dtype_for,
+        )
 
         MoEAllToAll.load_data(self)
         table = self._moe_a2a_data
         if not table:
             return {}
 
-        def pairs_for(by_phase, phase: str) -> set[tuple[int, int]]:
+        def pairs_for(by_phase, phase: str, required_dtype: str | None) -> set[tuple[int, int]]:
             pairs: set[tuple[int, int]] = set()
-            for by_ep in (by_phase.get(phase) or {}).values():  # ANY comm_dtype
+            by_dtype = by_phase.get(phase) or {}
+            dtype_slices = by_dtype.values() if required_dtype is None else (by_dtype.get(required_dtype) or {},)
+            for by_ep in dtype_slices:
                 for ep_size, by_node in by_ep.items():
                     for node_num, by_hidden in by_node.items():
                         by_sms = ((by_hidden.get(hidden_size) or {}).get(topk) or {}).get(num_experts) or {}
@@ -2666,7 +2681,27 @@ class PerfDatabase:
 
         coverage: dict[str, set[tuple[int, int]]] = {}
         for comm_backend, by_phase in table.items():
-            covered = pairs_for(by_phase, "dispatch") & pairs_for(by_phase, "combine")
+            required = {"dispatch": None, "combine": None}
+            if model_quantization is not None and inference_phase is not None:
+                backend_spec = MOE_A2A_BACKENDS.get(comm_backend)
+                if backend_spec is None or inference_phase not in backend_spec.inference_phases:
+                    continue
+                try:
+                    required = {
+                        phase: communication_dtype_for(
+                            system=self.system,
+                            comm_backend=comm_backend,
+                            model_quantization=model_quantization,
+                            communication_phase=phase,
+                            inference_phase=inference_phase,
+                        )
+                        for phase in ("dispatch", "combine")
+                    }
+                except ValueError:
+                    continue
+            covered = pairs_for(by_phase, "dispatch", required["dispatch"]) & pairs_for(
+                by_phase, "combine", required["combine"]
+            )
             if covered:
                 coverage[comm_backend] = covered
         return coverage
@@ -2704,6 +2739,36 @@ class PerfDatabase:
                 for by_hidden in by_slots.values():  # ANY num_slots
                     by_ep = ((by_hidden.get(hidden_size) or {}).get(inter_size) or {}).get(1) or {}  # moe_tp == 1
                     covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
+        return covered
+
+    def legacy_moe_compute_coverage(
+        self,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        quant_mode: common.MoEQuantMode,
+    ) -> set[int]:
+        """Return EP sizes covered by the regular expert-kernel MoE table.
+
+        vLLM and TensorRT-LLM publish expert compute in ``moe_perf.parquet``
+        rather than the WideEP-specific compute tables.  This probe is used
+        only to gate the compute leg of a graph whose communication is already
+        owned by :class:`MoEAllToAll`; it does not enable the legacy
+        ``MoEDispatch``/NCCL graph.
+        """
+        from aiconfigurator_core.sdk.operations.moe import MoE
+
+        MoE.load_data(self)
+        table = self._moe_data
+        if not table:
+            return set()
+
+        covered: set[int] = set()
+        for by_topk in (table.get(quant_mode) or {}).values():  # ANY distribution
+            by_hidden = ((by_topk.get(topk) or {}).get(num_experts) or {}).get(hidden_size) or {}
+            by_ep = (by_hidden.get(inter_size) or {}).get(1) or {}  # moe_tp == 1
+            covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
         return covered
 
     # ═══════════════════════════════════════════════════════════════════

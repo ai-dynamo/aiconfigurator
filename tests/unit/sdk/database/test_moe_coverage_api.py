@@ -167,6 +167,25 @@ def test_a2a_pair_covered_across_different_dtype_and_sms(a2a_cov_db):
     assert (16, 2) in a2a_cov_db.moe_a2a_coverage(*_SHAPE)["deepep_ht"]
 
 
+def test_a2a_quantized_probe_requires_exact_serving_phase_dtypes(stub_perf_db):
+    stub_perf_db.system = "h100_sxm"
+    stub_perf_db._moe_a2a_data = _store(
+        [
+            (("trtllm_deepep_ht", "dispatch", "bfloat16", 8, 1, *_SHAPE, 0), {32: _leaf(0.1)}),
+            (("trtllm_deepep_ht", "combine", "bfloat16", 8, 1, *_SHAPE, 0), {32: _leaf(0.2)}),
+            (("trtllm_deepep_ll", "dispatch", "fp8", 8, 1, *_SHAPE, 0), {32: _leaf(0.3)}),
+            (("trtllm_deepep_ll", "combine", "fp8", 8, 1, *_SHAPE, 0), {32: _leaf(0.4)}),
+        ]
+    )
+
+    assert stub_perf_db.moe_a2a_coverage(*_SHAPE, common.MoEQuantMode.fp8_block, "context") == {
+        "trtllm_deepep_ht": {(8, 1)}
+    }
+    assert stub_perf_db.moe_a2a_coverage(*_SHAPE, common.MoEQuantMode.fp8_block, "generation") == {
+        "trtllm_deepep_ll": {(8, 1)}
+    }
+
+
 def test_a2a_prepare_neither_required_nor_sufficient(a2a_cov_db):
     coverage = a2a_cov_db.moe_a2a_coverage(*_SHAPE)
     assert (8, 2) in coverage["nvlink_two_sided"]  # covered without any prepare row
@@ -320,6 +339,25 @@ def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
     assert stub_perf_db.moe_expert_compute_coverage(7168, 4096, 8, 256, fp8_block, "context") == set()  # absent inter
 
     assert _key_paths(data) == before
+
+
+# ---------------------------------------------------------------------------
+# legacy_moe_compute_coverage on a synthetic store
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_moe_compute_coverage_uses_regular_expert_kernel_table(stub_perf_db):
+    fp8_block = common.MoEQuantMode.fp8_block
+    stub_perf_db._moe_data = _store(
+        [
+            ((fp8_block, "balanced", 8, 256, 7168, 2048, 1, 64), {32: _leaf(0.1)}),
+            ((fp8_block, "power_law_1.2", 8, 256, 7168, 2048, 1, 128), {32: _leaf(0.2)}),
+            ((fp8_block, "balanced", 8, 256, 7168, 2048, 2, 256), {32: _leaf(0.3)}),
+        ]
+    )
+
+    assert stub_perf_db.legacy_moe_compute_coverage(7168, 2048, 8, 256, fp8_block) == {64, 128}
+    assert stub_perf_db.legacy_moe_compute_coverage(4096, 2048, 8, 256, fp8_block) == set()
 
 
 # ---------------------------------------------------------------------------

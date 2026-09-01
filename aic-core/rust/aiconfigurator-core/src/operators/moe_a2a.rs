@@ -45,9 +45,13 @@ use crate::perf_database::PerfDatabase;
 /// is a config `ValueError`, failed where the intent is expressed rather than
 /// surfacing later as a data miss. Pinned by
 /// `undeclared_phase_is_a_config_error_not_a_data_miss`.
-const MOE_A2A_BACKENDS: [(&str, &[&str]); 4] = [
+const MOE_A2A_BACKENDS: [(&str, &[&str]); 8] = [
     ("deepep_ht", &["dispatch", "combine"]),
     ("deepep_ll", &["dispatch", "combine"]),
+    ("deepep_v2_context", &["dispatch", "combine"]),
+    ("deepep_v2_generation", &["dispatch", "combine"]),
+    ("trtllm_deepep_ht", &["dispatch", "combine"]),
+    ("trtllm_deepep_ll", &["dispatch", "combine"]),
     ("nvlink_two_sided", &["prepare", "dispatch", "combine"]),
     ("nvlink_one_sided", &["dispatch", "combine"]),
 ];
@@ -185,20 +189,21 @@ impl MoeAllToAllOp {
             self.topk,
             self.num_experts,
         )?;
-        let use_node1_fallback = db.backend == "sglang"
-            && matches!(self.comm_backend.as_str(), "deepep_ht" | "deepep_ll")
-            && self.node_num > 1
+        let use_node1_fallback = matches!(
+            self.comm_backend.as_str(),
+            "deepep_ht" | "deepep_ll" | "trtllm_deepep_ht" | "trtllm_deepep_ll"
+        ) && self.node_num > 1
             && !exact_shape;
         let (lookup_ep_size, lookup_node_num, source) = if use_node1_fallback {
-            // Legacy DeepEP tables have no EP axis. Their unified adapter
-            // stores node-1 rows at EP=8; PR #1314 intentionally lets those
-            // same-shape measurements represent an unmeasured multi-node
-            // scale and marks the optimistic result as estimated.
-            (
-                crate::perf_database::moe_a2a::legacy_deepep_ep_size(1),
-                1,
-                Source::Estimated,
-            )
+            // Preserve SGLang's legacy adapter coordinate from PR #1314.
+            // New vLLM/TRT-LLM tables use the system's physical full-node EP
+            // (EP4 on NVL4, EP8 on HGX). Every substitution is estimated.
+            let donor_ep = if db.backend == "sglang" {
+                crate::perf_database::moe_a2a::legacy_deepep_ep_size(1)
+            } else {
+                db.system_spec.node.num_gpus_per_node
+            };
+            (donor_ep, 1, Source::Estimated)
         } else {
             (self.moe_ep_size, self.node_num, Source::Silicon)
         };
@@ -224,7 +229,9 @@ impl MoeAllToAllOp {
             let comm_backend = match self.comm_backend.as_str() {
                 "deepep_ht" => "deepep_ht",
                 "deepep_ll" => "deepep_ll",
-                _ => unreachable!("node-1 fallback is restricted to SGLang DeepEP"),
+                "trtllm_deepep_ht" => "trtllm_deepep_ht",
+                "trtllm_deepep_ll" => "trtllm_deepep_ll",
+                _ => unreachable!("node-1 fallback is restricted to DeepEP HT/LL backends"),
             };
             Ok(result.with_moe_comm_fallback(MoeCommFallback {
                 comm_backend,
@@ -427,6 +434,8 @@ mod tests {
                 a2a_row_at("deepep_ht", "dispatch", 8, 1, 20, 64, 1280.0),
                 a2a_row_at("deepep_ht", "combine", 8, 1, 20, 64, 2560.0),
                 a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 64, 12800.0),
+                a2a_row_at("trtllm_deepep_ht", "dispatch", 8, 1, 20, 64, 5120.0),
+                a2a_row_at("trtllm_deepep_ll", "dispatch", 8, 1, 0, 64, 25600.0),
             ],
         );
         let mut db = PerfDatabase::load(&systems_root(), "h200_sxm", "sglang", "0.5.6.post2")
@@ -568,6 +577,52 @@ mod tests {
                 comm_backend: "deepep_ht",
                 requested_ep_size: 128,
                 requested_node_num: 32,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn trtllm_deepep_node1_substitutes_for_missing_multi_node_scale_as_estimated() {
+        let (_tmp, mut db) = synthetic_db(DatabaseMode::Silicon);
+        db.tables_mut().backend = "trtllm".to_string();
+        let mut fallback = op("dispatch", "trtllm_deepep_ht", 1);
+        fallback.moe_ep_size = 64;
+        fallback.node_num = 8;
+        fallback.sms = 20;
+        let got = fallback.query(&db, 64).expect("node-1 fallback");
+        assert!((got.latency_ms - 5.120).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "trtllm_deepep_ht",
+                requested_ep_size: 64,
+                requested_node_num: 8,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn vllm_deepep_node1_substitutes_for_missing_multi_node_scale_as_estimated() {
+        let (_tmp, mut db) = synthetic_db(DatabaseMode::Silicon);
+        db.tables_mut().backend = "vllm".to_string();
+        let mut fallback = op("dispatch", "deepep_ll", 1);
+        fallback.moe_ep_size = 64;
+        fallback.node_num = 8;
+        fallback.sms = 0;
+        let got = fallback.query(&db, 64).expect("node-1 fallback");
+        assert!((got.latency_ms - 12.800).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "deepep_ll",
+                requested_ep_size: 64,
+                requested_node_num: 8,
                 measurement_ep_size: 8,
                 measurement_node_num: 1,
             }]
@@ -741,6 +796,36 @@ mod tests {
                     "{backend} declares an unvalidatable phase {phase:?}"
                 );
             }
+        }
+    }
+
+    /// Keep the Rust constructor's validation registry in exact identity
+    /// parity with Python's public `MOE_A2A_BACKENDS` registry. A missing
+    /// identity here turns a valid Python request into a Rust config error.
+    #[test]
+    fn registry_contains_every_python_backend_identity() {
+        let names = MOE_A2A_BACKENDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "deepep_ht",
+                "deepep_ll",
+                "deepep_v2_context",
+                "deepep_v2_generation",
+                "trtllm_deepep_ht",
+                "trtllm_deepep_ll",
+                "nvlink_two_sided",
+                "nvlink_one_sided",
+            ]
+        );
+        for backend in names {
+            validate_a2a_request(backend, "dispatch")
+                .unwrap_or_else(|error| panic!("{backend} rejected: {error}"));
+            validate_a2a_request(backend, "combine")
+                .unwrap_or_else(|error| panic!("{backend} rejected: {error}"));
         }
     }
 

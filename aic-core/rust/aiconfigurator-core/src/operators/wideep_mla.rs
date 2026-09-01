@@ -35,15 +35,10 @@ fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     (f * f - p * p) / (f * f)
 }
 
-/// Python whitelists the attention backend INSIDE `get_silicon` only
-/// (`mla.py:1191-1192` generation, `:1459-1460` context:
-/// `if attn_backend not in {"flashinfer", "fa3"}: raise ValueError`), AFTER
-/// the table's `raise_if_not_loaded()`. The EMPIRICAL path slices whatever
-/// backend is requested (`mla.py:1147, 1410`) — e.g. b200's `trtllm_mla`
-/// wideep slices calibrate fine there — so the check must not run for
-/// EMPIRICAL or for the HYBRID fallback. The error is a Python `ValueError`,
-/// deliberately NOT a missing-data signal: under HYBRID it propagates
-/// instead of triggering the empirical fallback.
+/// User-facing SILICON queries accept only `flashinfer` and `fa3`. The
+/// perf-database layer separately resolves those aliases to Blackwell's
+/// measured `trtllm_mla` key and lets low-level EMPIRICAL callers request an
+/// exact measured kernel source.
 fn check_attn_backend(attn_backend: &str) -> Result<(), AicError> {
     if attn_backend != "flashinfer" && attn_backend != "fa3" {
         return Err(AicError::InvalidEngineConfig(format!(
@@ -380,19 +375,13 @@ mod tests {
         );
     }
 
-    /// EMPIRICAL mode never runs the whitelist: it slices whatever backend
-    /// is requested (mla.py:1147, 1410) — b200's wideep MLA tables are
-    /// `trtllm_mla`-only and calibrate fine. Oracles:
-    ///
-    /// ```text
-    /// db = perf_database.get_database_view("b200_sxm", "sglang", "0.5.10",
-    ///     allow_missing_data=True, database_mode="EMPIRICAL", shared_layer=False)
-    /// float(WideEPContextMLA._query_wideep_context_mla_table(db, b, s,
-    ///     prefix, tp_size, KVCacheQuantMode.fp8, FMHAQuantMode.fp8_block,
-    ///     "trtllm_mla", DatabaseMode.EMPIRICAL))   # + generation variant
-    /// ```
+    /// EMPIRICAL accepts an exact measured kernel source and resolves the
+    /// supported user-facing aliases to Blackwell's `trtllm_mla`-only table.
+    /// Unknown or empty values must not borrow that slice. The numeric
+    /// oracles were captured before the Python query stack retired and remain
+    /// pinned here at the engine-owned query boundary.
     #[test]
-    fn empirical_estimates_from_non_whitelisted_backend_slice() {
+    fn empirical_resolves_user_backends_and_exact_kernel_sources() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
@@ -404,37 +393,67 @@ mod tests {
             (4, 4096, 0, 128, 5.1478),
             (2, 3000, 1000, 16, 0.5668068670651026),
         ];
-        for &(b, s, prefix, n, expected) in ctx_cases {
-            let (latency, source) = query_wideep_context_mla_table(
-                &db,
-                b,
-                s,
-                prefix,
-                n,
-                KvCacheQuantMode::Fp8,
-                FmhaQuantMode::Fp8Block,
-                "trtllm_mla",
-            )
-            .expect("trtllm_mla slice estimates");
+        for backend in ["trtllm_mla", "flashinfer", "fa3"] {
+            for &(b, s, prefix, n, expected) in ctx_cases {
+                let (latency, source) = query_wideep_context_mla_table(
+                    &db,
+                    b,
+                    s,
+                    prefix,
+                    n,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Fp8Block,
+                    backend,
+                )
+                .expect("supported backend resolves to the trtllm_mla slice");
+                assert_close(
+                    latency,
+                    expected,
+                    &format!("{backend} ctx(b={b}, s={s}, pfx={prefix})"),
+                );
+                assert_eq!(source, Source::Empirical);
+            }
+
+            let (latency, source) =
+                query_wideep_generation_mla_table(&db, 3, 5000, 16, KvCacheQuantMode::Fp8, backend)
+                    .expect("supported backend resolves to the trtllm_mla slice");
             assert_close(
                 latency,
-                expected,
-                &format!("trtllm_mla ctx(b={b}, s={s}, pfx={prefix})"),
+                0.056915046282426024,
+                &format!("{backend} gen(b=3, s=5000)"),
             );
             assert_eq!(source, Source::Empirical);
         }
 
-        let (latency, source) = query_wideep_generation_mla_table(
-            &db,
-            3,
-            5000,
-            16,
-            KvCacheQuantMode::Fp8,
-            "trtllm_mla",
-        )
-        .expect("trtllm_mla gen slice estimates");
-        assert_close(latency, 0.056915046282426024, "trtllm_mla gen(b=3, s=5000)");
-        assert_eq!(source, Source::Empirical);
+        for invalid in ["", "torch"] {
+            let context = query_wideep_context_mla_table(
+                &db,
+                1,
+                1024,
+                0,
+                128,
+                KvCacheQuantMode::Fp8,
+                FmhaQuantMode::Fp8Block,
+                invalid,
+            );
+            assert!(
+                matches!(context, Err(AicError::InvalidEngineConfig(_))),
+                "invalid backend {invalid:?} must not borrow trtllm_mla, got {context:?}"
+            );
+
+            let generation = query_wideep_generation_mla_table(
+                &db,
+                1,
+                1024,
+                128,
+                KvCacheQuantMode::Fp8,
+                invalid,
+            );
+            assert!(
+                matches!(generation, Err(AicError::InvalidEngineConfig(_))),
+                "invalid backend {invalid:?} must not borrow trtllm_mla, got {generation:?}"
+            );
+        }
     }
 
     /// HYBRID with the table NOT loaded (vLLM DBs ship no wideep MLA files):
