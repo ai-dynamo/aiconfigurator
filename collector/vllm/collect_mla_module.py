@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# 0.27.0 audit (pod GB300 probe): DeepseekV2MLAAttention ctor params,
+# _CONFIG_REGISTRY gap (glm_moe_dsa still unmapped),
+# backend_supports_prefill_query_quantization (mla_attention.py) and the
+# prefill selector surface are all unchanged vs the 0.24.0 citations below.
 __compat__ = "vllm==0.24.0"
 
 """
