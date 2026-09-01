@@ -1,65 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# V3 sidecars recovered from the persistent workdirs of the original
-# replacement runs (manual JET pipelines 63033558/63034673/63061173 on
-# aws-pdx, resume-chained, 8x NVIDIA B300 SXM6 AC, mirrored amd64 build of
-# the image below, collector @ eda12dc). JET pipeline 64707151, job
-# 413093927 retrieved the collector-produced hashes and dates verbatim.
+# Legacy/documentary tier: these tables combine the original 2026-08-17
+# replacement campaigns with scoped values-only remeasurements from
+# 2026-08-26. Schema version 1 cannot attest multiple collection events for
+# one table, so the run details remain documented in PR #1558 rather than in
+# unsupported structured fields. The parquet data itself is unchanged.
 schema_version: 1
+provenance: legacy
 runtime:
   framework: sglang
   version: 0.5.14
-  image: lmsysorg/sglang:v0.5.14
-  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   context_attention_perf:
-    # Device-truth replacement of the borrowed (device='NVIDIA GB300') table;
-    # values-only at matched keys (median 1.029), strict grid superset
-    # (+1906 trtllm_mha keys). status partial per derive_table_status: ONE
-    # unresolved deterministic failure — trtllm_mha b32/isl1/h1/kv1/hd256/
-    # win1024 fails on the amd64 build across two independent runs (passes
-    # on GB300 arm64); interior grid point covered by interpolation.
-    collector_ref: eda12dc15b7e04c3463a4c19f0fd3c0811df9ca7
-    collector_hash: sha256:7071dc3f080341739b9d6730667df1fe9e68207e245a551a9719df200ad747cd
-    case_plan_hash: sha256:2462093aa9b8106d84f6587c4df5c475f8c60cea094f16670d697148f0852f03
-    collected_at: '2026-08-17'
-    rows: 44167
     status: partial
-    collection_events:
-      - method: scoped --case-filter re-collection
-        selection: 5 loader-selected spike cases
-        collector_ref: 2a5a8b0d4328c74210a49f23d6d8cee3fd8e77b1
-        collector_hash: sha256:be67cd2c1a7ed15724902f04c5f9bc74cfaa55b80e0127d62a8b10dc1bdf85d4
-        case_plan_hash: sha256:d9734ed791fac753283d33627658d4d78cfbf07489620152820857b80cf264a7
-        collected_at: '2026-08-26'
-        rows: 5
-        status: complete
-        collector_invocations: 2
-        merge_method: per-key minimum
-        jet_pipeline: 64707151
-        jet_child_pipeline: 64707230
-        gitlab_job: 413093927
   generation_attention_perf:
-    # Same replacement run (median 1.000), strict superset (+2745 trtllm_mha
-    # keys), zero failures.
-    collector_ref: eda12dc15b7e04c3463a4c19f0fd3c0811df9ca7
-    collector_hash: sha256:7071dc3f080341739b9d6730667df1fe9e68207e245a551a9719df200ad747cd
-    case_plan_hash: sha256:867b249f273a1158586052108d78c8f7251be61d3dd16b661b8029a17d19e0ff
-    collected_at: '2026-08-17'
-    rows: 49680
     status: complete
-    collection_events:
-      - method: scoped --case-filter re-collection
-        selection: 5 loader-selected spike cases plus 2 FlashInfer-lane duplicates
-        collector_ref: 2a5a8b0d4328c74210a49f23d6d8cee3fd8e77b1
-        collector_hash: sha256:be67cd2c1a7ed15724902f04c5f9bc74cfaa55b80e0127d62a8b10dc1bdf85d4
-        case_plan_hash: sha256:e1e75a89167572963fdc6760e52d08e6504e7997fa31cd3eacec7aceb9bfec95
-        collected_at: '2026-08-26'
-        rows: 7
-        status: complete
-        collector_invocations: 2
-        merge_method: per-key minimum
-        jet_pipeline: 64707151
-        jet_child_pipeline: 64707230
-        gitlab_job: 413093927
