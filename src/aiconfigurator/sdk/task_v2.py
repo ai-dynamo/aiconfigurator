@@ -1275,8 +1275,8 @@ class Task:
 
         Per spec section 4.5, an EP size is explorable for a phase when its
         comm backend carries dispatch+combine rows for the model shape at the
-        requested EP/node scale, or SGLang DeepEP carries the marked node-1
-        substitute retained from PR #1314. The backend's registry feasibility
+        requested EP/node scale, or DeepEP HT/LL carries the marked full-node
+        node-1 substitute. The backend's registry feasibility
         rules must admit the config, and the EP expert-compute table must cover
         the shape under the role's MoE quant mode for that phase. BOTH phases
         are probed for every role: a
@@ -1358,6 +1358,7 @@ class Task:
                             comm_backend=name,
                             moe_ep_size=ep,
                             expected_nodes=nodes_for(ep, gpus_per_node),
+                            gpus_per_node=gpus_per_node,
                         )
                         and backend_spec.feasible(
                             topk=shape.topk,

@@ -20,8 +20,7 @@ from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
 from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
-_DEEPEP_NODE1_FALLBACK_BACKENDS = frozenset(("deepep_ht", "deepep_ll"))
-_LEGACY_DEEPEP_NODE1_COORDINATE = (8, 1)
+_DEEPEP_NODE1_FALLBACK_BACKENDS = frozenset(("deepep_ht", "deepep_ll", "trtllm_deepep_ht", "trtllm_deepep_ll"))
 
 LargeEpCoverage = Mapping[str, Mapping[str, Set[int]]]
 
@@ -33,23 +32,22 @@ def a2a_covers_parallel(
     comm_backend: str,
     moe_ep_size: int,
     expected_nodes: int,
+    gpus_per_node: int,
 ) -> bool:
     """Whether A2A data can serve a target EP/node scale.
 
-    SGLang DeepEP preserves the marked node-1 substitution introduced by
-    PR #1314: prefer an exact scale, otherwise let the canonical legacy
-    ``(ep=8, node_num=1)`` row for the already shape-filtered coverage probe
-    represent a multi-node request. The Rust legacy adapter uses the same
-    coordinate and marks that substitution as estimated. Other frameworks
-    and communication backends remain exact-scale only.
+    Prefer an exact scale. Otherwise, DeepEP HT/LL may use the full-node
+    ``(ep=gpus_per_node, node_num=1)`` row for the already shape-filtered
+    coverage probe to represent a multi-node request. The query engine uses
+    the same coordinate and marks that substitution as estimated.
     """
     if (moe_ep_size, expected_nodes) in pairs:
         return True
     return (
-        framework == "sglang"
+        framework in {"sglang", "vllm", "trtllm"}
         and comm_backend in _DEEPEP_NODE1_FALLBACK_BACKENDS
         and expected_nodes > 1
-        and _LEGACY_DEEPEP_NODE1_COORDINATE in pairs
+        and (gpus_per_node, 1) in pairs
     )
 
 
@@ -187,6 +185,7 @@ def resolve_model_config_moe_comm(
                         comm_backend=comm_backend,
                         moe_ep_size=moe_ep_size,
                         expected_nodes=expected_nodes,
+                        gpus_per_node=gpus_per_node,
                     )
                     and moe_ep_size in compute_eps
                     and backend_spec.feasible(
