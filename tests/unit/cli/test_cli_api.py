@@ -792,14 +792,8 @@ class TestCLIRecommendUnit:
         assert captured_kwargs["enable_wideep"] is True
         assert captured_kwargs["moe_backend"] == "deepep_moe"
 
-    def test_dspark_nextn_auto_enabled(self, monkeypatch):
-        """cli_recommend auto-enables DSPARK via the nextn='auto' → 0 → DSPARK path.
-
-        Exercises the realistic production flow: nextn='auto' calls
-        _resolve_nextn_auto which returns 0 for DSPARK models (block size is not
-        in the checkpoint), then _resolve_dspark_nextn fills in the architectural
-        block size and planning acceptance.
-        """
+    def test_dspark_nextn_auto_uses_explicit_acceptance(self, monkeypatch):
+        """Explicit auto resolves DSPARK depth without inferring acceptance."""
         import aiconfigurator.cli.api as api
 
         captured = {}
@@ -814,20 +808,37 @@ class TestCLIRecommendUnit:
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
         monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
-        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: (7, 5.6))
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: 7)
 
         api.cli_recommend(
             model_path="moonshotai/Kimi-K3",
             system="h200_sxm",
             target_concurrency=16,
             nextn="auto",
+            nextn_accepted=3.0,
         )
 
         assert captured["nextn"] == 7
-        assert abs(captured["nextn_accepted"] - 5.6) < 1e-9
+        assert captured["nextn_accepted"] == 3.0
 
-    def test_dspark_explicit_nextn_accepted_not_overridden(self, monkeypatch):
-        """Explicit nextn_accepted is preserved when DSPARK is auto-detected."""
+    def test_dspark_auto_requires_explicit_acceptance(self, monkeypatch):
+        """DSPARK architectural depth never implies workload acceptance."""
+        import aiconfigurator.cli.api as api
+
+        monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: 7)
+
+        with pytest.raises(ValueError, match="requires 'nextn_accepted'"):
+            api.cli_recommend(
+                model_path="moonshotai/Kimi-K3",
+                system="h200_sxm",
+                target_concurrency=16,
+                nextn="auto",
+            )
+
+    @pytest.mark.parametrize("accepted", [3.0, 0.0])
+    def test_dspark_omitted_depth_uses_explicit_acceptance(self, monkeypatch, accepted):
+        """Measured acceptance opts an omitted DSPARK depth into architecture resolution."""
         import aiconfigurator.cli.api as api
 
         captured = {}
@@ -841,17 +852,78 @@ class TestCLIRecommendUnit:
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
-        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: (7, 5.6))
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: 7)
 
         api.cli_recommend(
             model_path="moonshotai/Kimi-K3",
             system="h200_sxm",
             target_concurrency=16,
-            nextn_accepted=3.0,
+            nextn_accepted=accepted,
         )
 
         assert captured["nextn"] == 7
-        assert captured["nextn_accepted"] == 3.0
+        assert captured["nextn_accepted"] == accepted
+
+    def test_dspark_explicit_zero_opts_out(self, monkeypatch):
+        """Explicit nextn=0 remains disabled and bypasses DSPARK resolution."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(
+            api,
+            "_resolve_dspark_nextn",
+            lambda _: pytest.fail("explicit zero must not resolve DSPARK"),
+        )
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn=0,
+        )
+
+        assert captured["nextn"] == 0
+        assert captured["nextn_accepted"] is None
+
+    def test_omitted_speculation_remains_disabled(self, monkeypatch):
+        """Existing callers that omit both inputs keep speculative decoding off."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(
+            api,
+            "_resolve_dspark_nextn",
+            lambda _: pytest.fail("omitted speculation must not fetch DSPARK metadata"),
+        )
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+        )
+
+        assert captured["nextn"] == 0
+        assert captured["nextn_accepted"] is None
 
     def test_non_dspark_model_unaffected(self, monkeypatch):
         """Non-DSPARK models are not touched by the DSPARK auto-detect path."""
@@ -868,12 +940,14 @@ class TestCLIRecommendUnit:
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
         monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: None)
 
         api.cli_recommend(
             model_path="Qwen/Qwen3-32B",
             system="h200_sxm",
             target_concurrency=16,
+            nextn="auto",
         )
 
         assert captured["nextn"] == 0

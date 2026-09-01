@@ -254,6 +254,10 @@ SMOKE_CASES = [
         ),
         id="qwen35-27b-b200-trtllm-isl1024-osl2",
     ),
+    # Qwen3.5 declares mamba_ssm_dtype=float32, so sglang's exact serving
+    # predicate keeps the FLA lane on SM100 instead of selecting FlashInfer.
+    # This slot-neutral case keeps that invariant anchored across version
+    # bumps.
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3.5-397B-A17B",

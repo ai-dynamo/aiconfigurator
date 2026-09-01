@@ -188,10 +188,63 @@ tables:
     collector_ref: 0b077da5        # repo SHA the collector ran from
     collector_hash: "sha256:..."   # content hash of the op's module closure
     case_plan_hash: "sha256:..."   # hash of the resolved case set
-    collected_at: 2026-07-20
+    collected_at: "2026-07-20"
     rows: 12345
     status: complete               # complete | partial
 ```
+
+Schema v1 remains the single-event format above. Schema v2 is required when a
+shipped table combines or amends more than one collection event:
+
+```yaml
+schema_version: 2
+runtime:
+  framework: sglang
+  version: "0.5.14"
+  image: "registry.example/sglang:v0.5.14"
+  image_digest: "sha256:..."
+tables:
+  gdn_perf:
+    rows: 8874                    # merged table as shipped
+    status: complete
+    collections:
+      - collector_ref: 0b077da5
+        collector_hash: "sha256:..."
+        case_plan_hash: "sha256:..."
+        collected_at: "2026-08-10"
+        rows: 8820
+        status: complete
+        runtime:                    # optional event override
+          framework: sglang
+          version: "0.5.14"
+          image: "registry.example/older-sglang:v0.5.14"
+          image_digest: "sha256:..."
+      - collector_ref: 1c188eb6
+        collector_hash: "sha256:..."
+        case_plan_hash: "sha256:..."
+        collected_at: "2026-08-13"
+        rows: 54
+        status: partial
+        source_campaign_rows: 1243
+        source_campaign_status: partial
+```
+
+Every v2 event requires all six v1 attestation fields. In particular,
+`case_plan_hash` must attest a non-empty attempted set and `status` must be
+`complete` or `partial`; CI validates every event rather than only the merged
+table summary. `source_campaign_rows` and `source_campaign_status` are optional
+when only a selected subset of a larger campaign contributes rows. The top-level
+`runtime` is the default for every event. An event may carry a `runtime` mapping
+with the same known fields to override that default; an absent event runtime
+inherits the top-level identity. The automatic finalizer only appends histories
+whose top-level runtime matches the current run, because it cannot infer a
+missing historical override.
+
+The finalize writer continues to emit v1 for a single event. If a valid v2
+sidecar already exists, it preserves histories for untouched tables, promotes
+other fully-attested single-event entries when needed, and appends the fresh
+event when the same accumulated parquet table is finalized again. An explicit
+top-level provenance tier such as `provenance: local` is preserved.
 
 - `collector_hash` covers the registry-declared `collect_*.py` module plus its
   declared shared dependencies (e.g. `helper.py`, the family's
@@ -333,9 +386,12 @@ The loader's source ordering (§7) in one list:
    declaration says so.
 4. Cross-backend fill only for kernel sources whitelisted by
    `perf_data_reuse_manifest.yaml`, and only after channels 1–2.
-5. The `comm` family is excluded from sibling-version reuse entirely — NCCL
-   curves are topology-bound, so shape-filling across versions is wrong there
-   (current NCCL/oneCCL behavior, now stated as policy).
+5. The `comm` family never uses declared (`reuse.yaml`) or cross-backend fill.
+   Framework-versioned namespaces (`comm/sglang`, `comm/trtllm`, and
+   `comm/vllm`) may fill from strictly earlier versions of the same storage
+   backend. Communication-library namespaces (`comm/nccl`, `comm/oneccl`) and
+   every unknown future backend remain primary-only until their version
+   semantics are explicitly validated.
 
 Guardrails:
 
@@ -348,6 +404,9 @@ Guardrails:
   operational definition of **unsupported silent fallback**.
 - **Scope limits:** all reuse runs only in SILICON/HYBRID modes; formula-only
   modes (EMPIRICAL, SOL) are untouched.
+- **Retention:** an older framework communication table can now be a live
+  donor (for example TRT-LLM rc20 falling back to rc10). Per-op pruning must
+  account for this same-backend chain before deleting old comm data.
 
 ## 7. Loader changes (`aic-core/src/aiconfigurator_core/sdk/perf_database.py`)
 

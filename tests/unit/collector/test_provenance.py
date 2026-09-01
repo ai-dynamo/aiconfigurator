@@ -300,6 +300,43 @@ def test_write_collection_meta_schema_matches_design_5(tmp_path):
         }
 
 
+def test_write_collection_meta_preserves_multi_event_history(tmp_path):
+    event_a = TABLES["gemm_perf"]
+    event_b = {
+        **event_a,
+        "case_plan_hash": "sha256:" + "5" * 64,
+        "collected_at": "2026-08-26",
+        "rows": 3,
+        "classified_failures": 1,
+        "status": "complete",
+    }
+    tables = {
+        "gemm_perf": {
+            "rows": 45,
+            "status": "complete",
+            "collections": [event_a, event_b],
+        },
+        "moe_perf": TABLES["moe_perf"],
+    }
+
+    runtime_meta = {
+        **RUNTIME_META,
+        "source_commit": "1" * 40,
+        "abi": {"deep_ep": "d4f41e4e93", "nvshmem": "3.3.24"},
+    }
+    meta_path = provenance.write_collection_meta(tmp_path, runtime_meta, tables)
+    doc = yaml.safe_load(meta_path.read_text(encoding="utf-8"))
+
+    assert doc["schema_version"] == 2
+    assert doc["runtime"] == runtime_meta
+    assert doc["tables"]["gemm_perf"] == tables["gemm_perf"]
+    assert doc["tables"]["moe_perf"] == {
+        "rows": TABLES["moe_perf"]["rows"],
+        "status": TABLES["moe_perf"]["status"],
+        "collections": [TABLES["moe_perf"]],
+    }
+
+
 def test_write_collection_meta_omits_absent_optional_runtime_fields(tmp_path):
     runtime_meta = {"framework": "wideep_sglang", "version": "0.5.10", "image": "deepseek-v4-blackwell"}
     meta_path = provenance.write_collection_meta(tmp_path, runtime_meta, TABLES)

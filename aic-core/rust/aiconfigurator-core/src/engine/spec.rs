@@ -512,6 +512,9 @@ mod tests {
             head_k_dim: 128,
             num_v_heads: 32,
             head_v_dim: 128,
+            // Non-default value so the round-trip notices a
+            // `#[serde(default)]` swallowing the carried field.
+            mamba_ssm_dtype: "bfloat16".into(),
         }
     }
 
@@ -766,7 +769,7 @@ mod tests {
             enable_shared_layer: None,
             strict_provenance: false,
             database_mode: Default::default(),
-        tolerate_dirless_version: false,
+            tolerate_dirless_version: false,
             transfer_policy: None,
             extra: BTreeMap::new(),
         }
@@ -1019,6 +1022,44 @@ mod tests {
             }
             other => {
                 panic!("expected UnsupportedSchemaVersion for a v11 DSA payload, got {other:?}")
+            }
+        }
+    }
+
+    /// v13 -> v14 regression (PR #1533): `GdnOp` gained
+    /// `mamba_ssm_dtype`, a positional bincode layout change. A pre-PR v13
+    /// producer's GDN payload must be rejected by the version gate before the
+    /// missing trailing string reaches op decoding as an opaque EOF.
+    #[test]
+    fn from_bincode_rejects_v13_gdn_producer_at_the_version_gate() {
+        let mut legacy_gdn = gdn();
+        legacy_gdn.mamba_ssm_dtype.clear();
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![],
+            vec![OpSpec::Gdn(legacy_gdn)],
+        );
+        let mut bytes = spec.to_bincode().expect("to_bincode");
+
+        // The GDN op is the final value in the wire payload. An empty String
+        // is encoded as its 8-byte length, so removing that suffix recreates
+        // the exact pre-field GdnOp layout emitted by a v13 producer.
+        assert_eq!(&bytes[bytes.len() - 8..], &[0; 8]);
+        bytes.truncate(bytes.len() - 8);
+        bytes[..4].copy_from_slice(&13u32.to_le_bytes());
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion {
+                kind,
+                got,
+                expected,
+            }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, 13);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => {
+                panic!("expected UnsupportedSchemaVersion for a v13 GDN payload, got {other:?}")
             }
         }
     }

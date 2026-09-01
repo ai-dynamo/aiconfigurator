@@ -395,8 +395,8 @@ aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --bac
 - `--ttft`, `--tpot`: SLA targets in ms (default: 2000ms, 30ms)
 - `--request-latency`: End-to-end request latency target in ms
 - `--isl`, `--osl`: Input/output sequence lengths (default: 4000, 1000)
-- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers`
-- `--nextn-accepted`: Required when the resolved draft depth is greater than 0; it must be a measured average in the range `0 <= nextn_accepted <= nextn`
+- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers` and then DSPARK architecture metadata. Omitted or `0` keeps speculation disabled unless a DSPARK model is paired with an explicit `--nextn-accepted` measurement.
+- `--nextn-accepted`: Required when the resolved draft depth is greater than 0; it must be a measured average in the range `0 <= nextn_accepted <= nextn`. AIC never infers this workload-dependent value.
 - All other arguments match `default` mode (quantization, prefix caching, etc.)
 
 The output includes `total_gpus_needed` and `replicas_needed` columns, showing both agg and disagg configurations ranked by fewest GPUs first.
@@ -954,16 +954,18 @@ Hybrid mode is a quick solution to support new models without modeling the opera
 #### Speculative Decoding (`--nextn`, `--nextn-accepted`)
 
 These flags enable MTP (Multi-Token Prediction) speculative decoding in the
-configuration search. MTP is **never enabled implicitly** — omitting `--nextn`
-keeps it off even for models that ship MTP layers (the CLI logs a hint when
-the checkpoint declares them):
+configuration search. MTP is **never enabled implicitly** — omitting both flags
+keeps it off even for models that ship MTP layers. In recommend mode only, an
+explicit `--nextn-accepted` measurement can pair with an omitted depth to select
+a DSPARK architecture's fixed block size:
 
 - `--nextn N` — MTP draft length (compute cost side: extra MTP-layer forward
   plus the wider verify batch; no fixed upper bound). Default: 0 (disabled).
 - `--nextn auto` — take the draft depth from the checkpoint's
-  `num_nextn_predict_layers` (absent or 0 keeps MTP disabled). Only the depth
-  comes from the checkpoint — the acceptance value below is still required,
-  because it is a property of your workload, not of the model.
+  `num_nextn_predict_layers`. If that value is absent or 0 for a DSPARK model,
+  use its fixed architectural block size instead. Only the depth is resolved —
+  the acceptance value below is still required because it is a property of
+  your backend and workload, not of the model.
 - `--nextn-accepted A` — Average accepted draft tokens per decode step
   (`0 <= nextn_accepted <= nextn`); each step yields `1 + nextn_accepted` output tokens.
   Required whenever the draft depth is > 0 (explicit or via `auto`) — there is

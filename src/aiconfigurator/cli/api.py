@@ -381,13 +381,6 @@ def cli_default(
 
 _MAX_GPUS_PER_WORKER = 64
 
-# Conservative nextn_accepted fraction used when recommend auto-enables DSPARK.
-# nextn_accepted has no backend equivalent — it is AIC's throughput modeling
-# assumption (accepted tokens per step as a fraction of the block size).
-# Users who have empirical acceptance data can override via cli_recommend's
-# nextn_accepted parameter. 0.8 is conservative for a well-aligned draft model.
-_DSPARK_DEFAULT_ACCEPTANCE = 0.8
-
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
     """Scale GPU candidates for recommend mode."""
@@ -430,7 +423,7 @@ def cli_recommend(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int | str = 0,
+    nextn: int | str | None = None,
     nextn_accepted: float | None = None,
     strict_sla: bool = False,
     enable_chunked_prefill: bool = False,
@@ -479,8 +472,10 @@ def cli_recommend(
         tpot: Time per output token SLA target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: MTP draft length, or 'auto' to use the checkpoint's
-            num_nextn_predict_layers. Default is 0 (disabled).
+        nextn: MTP draft length, or 'auto' to resolve the depth from the
+            checkpoint, falling back to DSPARK architecture metadata. Omitted
+            or 0 keeps speculative decoding disabled unless a DSPARK model is
+            paired with an explicit ``nextn_accepted`` workload measurement.
         nextn_accepted: Average accepted draft tokens per decode step
             (0 <= nextn_accepted <= nextn). Required when the draft depth
             resolves to > 0.
@@ -533,19 +528,16 @@ def cli_recommend(
     gpus_per_node = spec["node"]["num_gpus_per_node"]
 
     # Fail fast on inconsistent MTP inputs (same early check as cli_default).
-    # nextn="auto" resolves the draft depth from the checkpoint first.
+    # Explicit "auto" resolves the checkpoint depth first and falls back to
+    # DSPARK's architectural block size. An omitted nextn may use that DSPARK
+    # depth only when the caller supplied an explicit workload acceptance
+    # measurement. Explicit nextn=0 always remains the opt-out.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
-
-    # DSPARK architectures (e.g. Kimi-K3) always run with a standalone draft
-    # model in production. Their block size is an architectural constant absent
-    # from the checkpoint, so nextn="auto" returns 0. Auto-enable here so that
-    # recommend produces accurate throughput estimates without requiring callers
-    # to know about DSPARK internals.
-    if nextn == 0 and (dspark := _resolve_dspark_nextn(model_path)):
-        nextn, dspark_accepted = dspark
-        if nextn_accepted is None:
-            nextn_accepted = dspark_accepted
+        if nextn == 0:
+            nextn = _resolve_dspark_nextn(model_path) or 0
+    elif nextn is None:
+        nextn = _resolve_dspark_nextn(model_path) if nextn_accepted is not None else 0
 
     nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 

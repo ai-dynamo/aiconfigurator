@@ -1083,8 +1083,14 @@ mod tests {
         let got = mqa_chunked(16384, 0, &mut lookup)
             .expect("lookup must not error")
             .expect("in-grid chunks must resolve");
-        let want = table.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap().unwrap()
-            + table.query_paged_mqa_logits(1, 8192, 8192, 1, 64).unwrap().unwrap();
+        let want = table
+            .query_paged_mqa_logits(1, 8192, 0, 1, 64)
+            .unwrap()
+            .unwrap()
+            + table
+                .query_paged_mqa_logits(1, 8192, 8192, 1, 64)
+                .unwrap()
+                .unwrap();
         assert!(
             ((got - want) / want).abs() < 1e-12,
             "chunk walk must sum its chunk lookups: {got} vs {want}"

@@ -272,7 +272,6 @@ mod tests {
         );
     }
 
-
     /// Routing + the "both" = emp(pre) + emp(post) composition, pinned
     /// RELATIVELY (each half resolves on its own curve with its own SOL).
     /// Estimator math lives on synthetic grids; values in the goldens.
@@ -282,7 +281,10 @@ mod tests {
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
         let q = |op: &str, nt: u32| {
             let r = mhc_op(op).query(&db, nt).expect("empirical query");
-            assert!(r.latency_ms.is_finite() && r.latency_ms > 0.0, "op={op}, nt={nt}");
+            assert!(
+                r.latency_ms.is_finite() && r.latency_ms > 0.0,
+                "op={op}, nt={nt}"
+            );
             assert_eq!(r.source, Source::Empirical, "op={op}, nt={nt}");
             r.latency_ms
         };
@@ -300,7 +302,10 @@ mod tests {
     #[test]
     fn mhc_hybrid_with_data_stays_silicon() {
         let sil = b200_sglang_db();
-        let want = mhc_op("pre").query(&sil, 3).expect("silicon query").latency_ms;
+        let want = mhc_op("pre")
+            .query(&sil, 3)
+            .expect("silicon query")
+            .latency_ms;
         let mut db = b200_sglang_db();
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
         let result = mhc_op("pre").query(&db, 3).expect("hybrid query");

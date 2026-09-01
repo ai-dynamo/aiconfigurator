@@ -58,6 +58,8 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
 
 STATUS_COMPLETE = "complete"
 STATUS_PARTIAL = "partial"
+COLLECTION_META_SCHEMA_VERSION = 1
+MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION = 2
 
 _RUNTIME_FIELD_ORDER = (
     "framework",
@@ -66,6 +68,15 @@ _RUNTIME_FIELD_ORDER = (
     "image_variant",
     "image_digest",
     "source_commit",
+    "abi",
+    "live_abi",
+    "transport",
+    "backend_capability",
+    "backend_abis",
+    "backend_capabilities",
+)
+_RUNTIME_STRING_FIELDS = ("image", "image_variant", "image_digest", "source_commit")
+_RUNTIME_MAPPING_FIELDS = (
     "abi",
     "live_abi",
     "transport",
@@ -82,6 +93,8 @@ _TABLE_FIELD_ORDER = (
     "classified_failures",
     "status",
 )
+_TABLE_REQUIRED_FIELD_ORDER = tuple(field for field in _TABLE_FIELD_ORDER if field != "classified_failures")
+_COLLECTION_OPTIONAL_FIELD_ORDER = ("source_campaign_rows", "source_campaign_status", "runtime")
 
 
 def _registry_lists(registry_module) -> tuple[list, ...]:
@@ -231,22 +244,252 @@ def spdx_header() -> str:
     )
 
 
-def write_collection_meta(out_dir: str | Path, runtime_meta: dict[str, Any], tables: dict[str, dict[str, Any]]) -> Path:
-    """Render ``collection_meta.yaml`` per design §5, with deterministic key order."""
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+def _ordered_runtime(runtime: Any, *, field: str) -> dict[str, Any]:
+    if not isinstance(runtime, dict):
+        raise ValueError(f"{field} must be a mapping")  # noqa: TRY004
+    unknown = sorted(set(runtime) - set(_RUNTIME_FIELD_ORDER))
+    if unknown:
+        raise ValueError(f"{field} has unsupported field(s): {', '.join(unknown)}")
+    for key in ("framework", "version"):
+        if not isinstance(runtime.get(key), str) or not runtime[key].strip():
+            raise ValueError(f"{field}.{key} must be a non-empty string")
+    for key in _RUNTIME_STRING_FIELDS:
+        if key in runtime and (not isinstance(runtime[key], str) or not runtime[key].strip()):
+            raise ValueError(f"{field}.{key} must be a non-empty string when provided")
+    for key in _RUNTIME_MAPPING_FIELDS:
+        if key in runtime and not isinstance(runtime[key], dict):
+            raise ValueError(f"{field}.{key} must be a mapping when provided")
+    return {key: runtime[key] for key in _RUNTIME_FIELD_ORDER if key in runtime}
 
-    doc = {
-        "schema_version": 1,
-        "runtime": {key: runtime_meta[key] for key in _RUNTIME_FIELD_ORDER if key in runtime_meta},
-        "tables": {
-            table: {key: tables[table][key] for key in _TABLE_FIELD_ORDER if key in tables[table]}
-            for table in sorted(tables)
-        },
+
+def _ordered_collection_event(event: Any, *, table: str, index: int) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        raise ValueError(f"{table}.collections[{index}] must be a mapping")  # noqa: TRY004
+
+    missing = [field for field in _TABLE_REQUIRED_FIELD_ORDER if field not in event]
+    if missing:
+        raise ValueError(f"{table}.collections[{index}] missing required field(s): {', '.join(missing)}")
+
+    allowed = {*_TABLE_FIELD_ORDER, *_COLLECTION_OPTIONAL_FIELD_ORDER}
+    unknown = sorted(set(event) - allowed)
+    if unknown:
+        raise ValueError(f"{table}.collections[{index}] has unsupported field(s): {', '.join(unknown)}")
+
+    for field in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
+        if not isinstance(event[field], str) or not event[field].strip():
+            raise ValueError(f"{table}.collections[{index}].{field} must be a non-empty string")
+    if event["status"] not in (STATUS_COMPLETE, STATUS_PARTIAL):
+        raise ValueError(f"{table}.collections[{index}].status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
+    if not isinstance(event["rows"], int) or isinstance(event["rows"], bool) or event["rows"] < 0:
+        raise ValueError(f"{table}.collections[{index}].rows must be a non-negative integer")
+    classified_failures = event.get("classified_failures")
+    if classified_failures is not None and (
+        not isinstance(classified_failures, int) or isinstance(classified_failures, bool) or classified_failures < 0
+    ):
+        raise ValueError(f"{table}.collections[{index}].classified_failures must be a non-negative integer")
+    source_rows = event.get("source_campaign_rows")
+    if source_rows is not None and (
+        not isinstance(source_rows, int) or isinstance(source_rows, bool) or source_rows < event["rows"]
+    ):
+        raise ValueError(
+            f"{table}.collections[{index}].source_campaign_rows must be an integer at least as large as rows"
+        )
+    source_status = event.get("source_campaign_status")
+    if source_status is not None and source_status not in (STATUS_COMPLETE, STATUS_PARTIAL):
+        raise ValueError(
+            f"{table}.collections[{index}].source_campaign_status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'"
+        )
+
+    ordered = {
+        field: event[field]
+        for field in (*_TABLE_FIELD_ORDER, "source_campaign_rows", "source_campaign_status")
+        if field in event
+    }
+    if "runtime" in event:
+        ordered["runtime"] = _ordered_runtime(event["runtime"], field=f"{table}.collections[{index}].runtime")
+    return ordered
+
+
+def _ordered_multi_event_table(table: str, entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise ValueError(f"{table} must be a mapping")  # noqa: TRY004
+    if "rows" not in entry or "status" not in entry:
+        raise ValueError(f"{table} missing required merged-table rows/status")
+    if not isinstance(entry["rows"], int) or isinstance(entry["rows"], bool) or entry["rows"] < 0:
+        raise ValueError(f"{table}.rows must be a non-negative integer")
+    if entry["status"] not in (STATUS_COMPLETE, STATUS_PARTIAL):
+        raise ValueError(f"{table}.status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
+
+    collections = entry.get("collections")
+    if collections is None:
+        collections = [entry]
+    if not isinstance(collections, list) or not collections:
+        raise ValueError(f"{table}.collections must be a non-empty list")
+
+    return {
+        "rows": entry["rows"],
+        "status": entry["status"],
+        "collections": [
+            _ordered_collection_event(event, table=table, index=index) for index, event in enumerate(collections)
+        ],
     }
 
+
+def validate_collection_meta_for_update(
+    document: Any,
+    *,
+    tables_to_update: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Validate an existing sidecar before a collector mutates table data.
+
+    Historical ``local``/``collected`` v1 sidecars may contain reduced table
+    summaries. They can be preserved beside a new table, but cannot take part
+    in a v2 history promotion when any existing table is updated.
+    """
+    if not isinstance(document, dict):
+        raise ValueError("collection_meta.yaml must be a mapping")  # noqa: TRY004
+    unknown_document_fields = sorted(set(document) - {"schema_version", "provenance", "runtime", "tables"})
+    if unknown_document_fields:
+        raise ValueError(f"collection_meta.yaml has unsupported field(s): {', '.join(unknown_document_fields)}")
+    schema_version = document.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in (COLLECTION_META_SCHEMA_VERSION, MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION)
+    ):
+        raise ValueError(f"unsupported collection_meta.yaml schema_version {schema_version!r}")
+    provenance_tier = document.get("provenance")
+    if provenance_tier is not None and (not isinstance(provenance_tier, str) or not provenance_tier.strip()):
+        raise ValueError("collection_meta.yaml provenance must be a non-empty string when provided")
+    if provenance_tier == "legacy":
+        raise ValueError("legacy-tier collection_meta.yaml cannot be updated by a fresh collection")
+    _ordered_runtime(document.get("runtime"), field="runtime")
+
+    tables = document.get("tables")
+    if not isinstance(tables, dict):
+        raise ValueError("collection_meta.yaml tables must be a mapping")  # noqa: TRY004
+    if any(not isinstance(table, str) or not table for table in tables):
+        raise ValueError("collection_meta.yaml table names must be non-empty strings")
+
+    if schema_version == MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION:
+        for table, entry in tables.items():
+            if not isinstance(entry, dict) or set(entry) != {"rows", "status", "collections"}:
+                raise ValueError(f"{table} must contain exactly rows, status, and collections")
+            _ordered_multi_event_table(table, entry)
+        return
+
+    reduced_tables: set[str] = set()
+    for table, entry in tables.items():
+        if isinstance(entry, dict) and set(entry) == {"status"} and provenance_tier in {"local", "collected"}:
+            if entry["status"] not in (STATUS_COMPLETE, STATUS_PARTIAL):
+                raise ValueError(f"{table}.status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
+            reduced_tables.add(table)
+            continue
+        if (
+            isinstance(entry, dict)
+            and set(entry) == {"collected_at", "rows", "status"}
+            and provenance_tier in {"local", "collected"}
+        ):
+            if not isinstance(entry["collected_at"], str) or not entry["collected_at"].strip():
+                raise ValueError(f"{table}.collected_at must be a non-empty string")
+            if not isinstance(entry["rows"], int) or isinstance(entry["rows"], bool) or entry["rows"] < 0:
+                raise ValueError(f"{table}.rows must be a non-negative integer")
+            if entry["status"] not in (STATUS_COMPLETE, STATUS_PARTIAL):
+                raise ValueError(f"{table}.status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
+            reduced_tables.add(table)
+            continue
+        if not isinstance(entry, dict) or not set(_TABLE_REQUIRED_FIELD_ORDER) <= set(entry) <= set(_TABLE_FIELD_ORDER):
+            raise ValueError(
+                f"{table} must contain {', '.join(_TABLE_REQUIRED_FIELD_ORDER)} and may include classified_failures"
+            )
+        _ordered_collection_event(entry, table=table, index=0)
+
+    if reduced_tables and set(tables_to_update) & set(tables):
+        raise ValueError(
+            "reduced historical table metadata cannot be promoted while updating an existing sidecar table"
+        )
+
+
+def append_collection_event(
+    existing: dict[str, Any], current: dict[str, Any], *, table: str, merged_rows: int
+) -> dict[str, Any]:
+    """Append a fresh collection event while retaining an existing valid history.
+
+    A full v1 entry is promoted to the first v2 event. Incomplete v1/local
+    entries cannot be promoted honestly and fail instead of being discarded.
+    ``current.rows`` describes this event; ``merged_rows`` describes the
+    accumulated parquet table as shipped.
+    """
+    if "collections" in existing:
+        existing_history = _ordered_multi_event_table(table, existing)["collections"]
+    else:
+        existing_history = [_ordered_collection_event(existing, table=table, index=0)]
+    current_event = _ordered_collection_event(current, table=table, index=len(existing_history))
+    return {
+        "rows": merged_rows,
+        "status": current["status"],
+        "collections": [*existing_history, current_event],
+    }
+
+
+def render_collection_meta(
+    runtime_meta: dict[str, Any],
+    tables: dict[str, dict[str, Any]],
+    *,
+    provenance_tier: str | None = None,
+) -> bytes:
+    """Render the exact design-§5 ``collection_meta.yaml`` bytes."""
+    schema_version = (
+        MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION
+        if any("collections" in entry for entry in tables.values())
+        else COLLECTION_META_SCHEMA_VERSION
+    )
+    if schema_version == MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION:
+        rendered_tables = {table: _ordered_multi_event_table(table, tables[table]) for table in sorted(tables)}
+    else:
+        rendered_tables = {
+            table: {key: tables[table][key] for key in _TABLE_FIELD_ORDER if key in tables[table]}
+            for table in sorted(tables)
+        }
+
+    doc = {"schema_version": schema_version}
+    if provenance_tier is not None:
+        if not isinstance(provenance_tier, str) or not provenance_tier.strip():
+            raise ValueError("provenance_tier must be a non-empty string when provided")
+        doc["provenance"] = provenance_tier
+    doc["runtime"] = (
+        _ordered_runtime(runtime_meta, field="runtime")
+        if schema_version == MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION
+        else {key: runtime_meta[key] for key in _RUNTIME_FIELD_ORDER if key in runtime_meta}
+    )
+    doc["tables"] = rendered_tables
+
+    return (
+        spdx_header()
+        + yaml.safe_dump(
+            doc,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    ).encode()
+
+
+def write_collection_meta(
+    out_dir: str | Path,
+    runtime_meta: dict[str, Any],
+    tables: dict[str, dict[str, Any]],
+    *,
+    provenance_tier: str | None = None,
+) -> Path:
+    """Write ``collection_meta.yaml`` per design §5, with deterministic key order."""
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
     meta_path = out_path / "collection_meta.yaml"
-    with meta_path.open("w", encoding="utf-8") as meta_file:
-        meta_file.write(spdx_header())
-        yaml.safe_dump(doc, meta_file, sort_keys=False, default_flow_style=False)
+    meta_path.write_bytes(
+        render_collection_meta(
+            runtime_meta,
+            tables,
+            provenance_tier=provenance_tier,
+        )
+    )
     return meta_path

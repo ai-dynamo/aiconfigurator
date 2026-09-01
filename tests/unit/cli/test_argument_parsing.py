@@ -579,9 +579,7 @@ class TestCLIArgumentParsing:
         )
         assert not hasattr(args, "total_gpus")
 
-    def test_recommend_nextn_auto_resolves_and_validates(self, cli_parser, monkeypatch):
-        import aiconfigurator.cli.main as cli_main
-
+    def test_recommend_nextn_auto_is_preserved_for_api_resolution(self, cli_parser):
         args = cli_parser.parse_args(
             [
                 "recommend",
@@ -597,12 +595,23 @@ class TestCLIArgumentParsing:
                 "0.7",
             ]
         )
-        monkeypatch.setattr(cli_main, "resolve_nextn_auto", lambda _model_path: 2)
-
-        cli_main._resolve_and_validate_nextn(args)
-
-        assert args.nextn == 2
+        assert args.nextn == "auto"
         assert args.nextn_accepted == 0.7
+
+    def test_recommend_omitted_nextn_has_distinct_sentinel(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "moonshotai/Kimi-K3",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+            ]
+        )
+
+        assert args.nextn is None
 
     def test_recommend_nextn_requires_explicit_acceptance(self, cli_parser):
         from aiconfigurator.cli.main import _resolve_and_validate_nextn

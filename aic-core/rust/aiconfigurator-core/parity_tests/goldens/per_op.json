@@ -402,12 +402,12 @@
         },
         "context_proj_gemm": {
           "energy_wms": 0.0,
-          "latency_ms": 1.1945333315266504,
+          "latency_ms": 0.6143235498004489,
           "source": "silicon"
         },
         "context_qkv_gemm": {
           "energy_wms": 0.0,
-          "latency_ms": 1.1301635768678453,
+          "latency_ms": 0.6969902300172383,
           "source": "silicon"
         },
         "context_router_gemm": {
@@ -469,12 +469,12 @@
         },
         "generation_proj_gemm": {
           "energy_wms": 0.0,
-          "latency_ms": 1.050583091047075,
+          "latency_ms": 0.41030222839779323,
           "source": "silicon"
         },
         "generation_qkv_gemm": {
           "energy_wms": 0.0,
-          "latency_ms": 0.9403058290481567,
+          "latency_ms": 0.503715541627672,
           "source": "silicon"
         },
         "generation_router_gemm": {
@@ -1162,39 +1162,39 @@
   "post_freeze_pins": {
     "gpt-oss-20b-b200-trtllm-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-sglang-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-sglang-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-sampled-prefix": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m27-b200-vllm-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-trtllm-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     }
   }
 }

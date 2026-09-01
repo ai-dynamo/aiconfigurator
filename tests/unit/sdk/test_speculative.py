@@ -169,21 +169,14 @@ class TestResolveDsparkNextn:
         )
         assert resolve_dspark_nextn("meta-llama/Llama-3.1-8B-Instruct") is None
 
-    def test_kimi_k3_returns_block_size_and_acceptance(self, monkeypatch):
-        from aiconfigurator_core.sdk.config_builders import (
-            _DSPARK_DEFAULT_ACCEPTANCE,
-            resolve_dspark_nextn,
-        )
+    def test_kimi_k3_returns_block_size(self, monkeypatch):
+        from aiconfigurator_core.sdk.config_builders import resolve_dspark_nextn
 
         monkeypatch.setattr(
             "aiconfigurator_core.sdk.utils.get_model_config_from_model_path",
             lambda _: {"architecture": "KimiK3ForConditionalGeneration"},
         )
-        result = resolve_dspark_nextn("moonshotai/Kimi-K3")
-        assert result is not None
-        nextn, nextn_accepted = result
-        assert nextn == 7
-        assert abs(nextn_accepted - 7 * _DSPARK_DEFAULT_ACCEPTANCE) < 1e-9
+        assert resolve_dspark_nextn("moonshotai/Kimi-K3") == 7
 
     def test_empty_model_path_raises(self):
         from aiconfigurator_core.sdk.config_builders import resolve_dspark_nextn
@@ -191,11 +184,35 @@ class TestResolveDsparkNextn:
         with pytest.raises(ValueError, match="requires a model path"):
             resolve_dspark_nextn("")
 
-    def test_fetch_failure_returns_none(self, monkeypatch):
+    def test_expected_fetch_failure_warns_and_returns_none(self, monkeypatch, caplog):
+        from aiconfigurator_core.sdk.config_builders import resolve_dspark_nextn
+        from aiconfigurator_core.sdk.utils import HuggingFaceDownloadError
+
+        monkeypatch.setattr(
+            "aiconfigurator_core.sdk.utils.get_model_config_from_model_path",
+            lambda _: (_ for _ in ()).throw(HuggingFaceDownloadError("network error")),
+        )
+        with caplog.at_level("WARNING", logger="aiconfigurator_core.sdk.config_builders"):
+            assert resolve_dspark_nextn("some/model") is None
+        assert "some/model" in caplog.text
+        assert "network error" in caplog.text
+
+    def test_unexpected_failure_propagates(self, monkeypatch):
         from aiconfigurator_core.sdk.config_builders import resolve_dspark_nextn
 
         monkeypatch.setattr(
             "aiconfigurator_core.sdk.utils.get_model_config_from_model_path",
-            lambda _: (_ for _ in ()).throw(RuntimeError("network error")),
+            lambda _: (_ for _ in ()).throw(RuntimeError("programming error")),
         )
-        assert resolve_dspark_nextn("some/model") is None
+        with pytest.raises(RuntimeError, match="programming error"):
+            resolve_dspark_nextn("some/model")
+
+    def test_malformed_metadata_propagates(self, monkeypatch):
+        from aiconfigurator_core.sdk.config_builders import resolve_dspark_nextn
+
+        monkeypatch.setattr(
+            "aiconfigurator_core.sdk.utils.get_model_config_from_model_path",
+            lambda _: {},
+        )
+        with pytest.raises(KeyError, match="architecture"):
+            resolve_dspark_nextn("some/model")

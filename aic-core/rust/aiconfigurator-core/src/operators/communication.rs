@@ -737,9 +737,9 @@ mod tests {
             .expect("empirical never reroutes");
         let (latency, source) = (__r.latency_ms, __r.source);
         assert!(
-                latency.is_finite() && latency > 0.0,
-                "expected positive latency, got {latency}"
-            );
+            latency.is_finite() && latency > 0.0,
+            "expected positive latency, got {latency}"
+        );
         assert_eq!(source, Source::Empirical);
 
         // HYBRID with NO NCCL data at all: the nested NCCL empirical raises
