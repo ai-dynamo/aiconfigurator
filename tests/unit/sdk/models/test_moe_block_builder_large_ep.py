@@ -101,9 +101,8 @@ trtllm_data_present = pytest.mark.skipif(
 REL_TOL = 1e-9
 
 # Six token points per phase spanning small -> in-range -> beyond-range
-# overflow of the shipped comm/compute token grids.
-SGLANG_CONTEXT_TOKENS = (2, 8, 96, 1024, 16384, 262144)
-SGLANG_GENERATION_TOKENS = (2, 8, 32, 128, 256, 2048)
+# overflow of the shipped compute token grids (the comm legs now pick
+# exact-grid points from the raw tables instead; see _grid_token_spread).
 TRTLLM_TOKENS = (1, 3, 48, 512, 4096, 131072)
 
 
@@ -120,15 +119,24 @@ def _names(op_list):
 
 
 def _assert_ops_identical(built, expected):
-    """Same op classes in order, same names, same constructor-derived state."""
+    """Same op classes in order, same names, same constructor-derived state.
+
+    Composite getters re-wrap children as the Rust base classes, so classes
+    compare by NAME; state compares on the engine wire form (``_spec_json``),
+    which carries every constructor-derived field."""
     assert _names(built) == _names(expected)
     for got, want in zip(built, expected, strict=True):
-        assert type(got) is type(want), got._name
-        assert got.__dict__ == want.__dict__, got._name
+        assert type(got).__name__ == type(want).__name__, got._name
+        assert got._spec_json() == want._spec_json(), got._name
 
 
 def _lat(op, db, x):
-    return float(op.query(db, x=x))
+    # Composite getters re-wrap children as Rust base classes (no shim kit),
+    # so evaluate through the single-op plumbing directly — the exact call
+    # the shells' token-shape ``_engine_query`` mapped to.
+    from aiconfigurator_core.sdk import engine
+
+    return float(engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=1, x=int(x)))
 
 
 def _assert_close(got, want, context):
@@ -180,46 +188,46 @@ def _build_sglang(cfg, phase, enable_eplb, model_family="DEEPSEEK"):
     )
 
 
-def _legacy_sglang_comm_latency(db, phase, x):
-    """The legacy graph's single MoEDispatch op (deepep branch), recomputed.
+def _sglang_comm_grid(db, phase):
+    """The RAW loaded deepep table slice the legacy single-dispatch op read.
 
-    WideEPDeepSeekModel wires ONE dispatch op whose deepep table row sums the
-    dispatch+combine legs: context -> ``query_wideep_deepep_normal`` (node
-    span = 32 GPUs / 8 per node, tokens // scale_num_tokens with tp=1),
-    generation -> ``query_wideep_deepep_ll``. Latency scales by the layer
-    count (deepseek.py:1206-1227, 1320-1340).
-    """
+    ``query_wideep_deepep_normal``/``ll`` are tombstones since #1357 PR-5, so
+    the legacy expectation is re-derived from the raw rows those facades
+    walked: context -> ``_wideep_deepep_normal_data`` at (node_num=4 [32 GPUs
+    / 8 per node], hidden 7168, topk 8, experts 256, sms 20); generation ->
+    ``_wideep_deepep_ll_data`` at the same shape (deepseek.py:1206-1227,
+    1320-1340). Table latency is the summed dispatch+combine legs in us."""
+    ops.MoEDispatch.load_data(db)
     if phase == "context":
-        result = db.query_wideep_deepep_normal(
-            node_num=4, num_tokens=x, num_experts=256, topk=8, hidden_size=7168, sms=20
-        )
-    else:
-        result = db.query_wideep_deepep_ll(node_num=4, num_tokens=x, num_experts=256, topk=8, hidden_size=7168)
-    return float(result) * NUM_LAYERS
+        return db._wideep_deepep_normal_data[4][7168][8][256][20]
+    return db._wideep_deepep_ll_data[4][7168][8][256]
 
 
-def _legacy_sglang_moe_latency(db, phase, x, enable_eplb):
-    """The legacy graph's MoE op, recomputed via ``query_moe``.
+def _legacy_sglang_comm_latency(grid, x):
+    """The legacy graph's single MoEDispatch op, recomputed from a RAW table
+    row (exact-grid tokens only — off-grid interpolation retired to the
+    compiled engine and is anchored by the frozen parity goldens). The legacy
+    op scaled by layer count and returned ms."""
+    return grid[x]["latency"] * NUM_LAYERS / 1000.0
 
-    Tokens globalize by attention_dp (x * 32); the EPLB 0.8 prefill token
-    correction applies inside the query. The legacy class passed
-    ``enable_eplb=False`` for generation unconditionally (deepseek.py:1359).
-    """
-    result = db.query_moe(
-        num_tokens=x * 32,
-        hidden_size=7168,
-        inter_size=2048,
-        topk=8,
-        num_experts=256,
-        moe_tp_size=1,
-        moe_ep_size=32,
-        quant_mode=SGLANG_MOE_QUANT,
-        workload_distribution=_sglang_distribution(phase, enable_eplb),
-        is_context=(phase == "context"),
-        moe_backend="deepep_moe",
-        enable_eplb=enable_eplb and phase == "context",
-    )
-    return float(result) * NUM_LAYERS
+
+def _grid_token_spread(grid, count=6):
+    """Deterministic small -> large spread of exact-grid token points."""
+    tokens = sorted(grid)
+    picks = sorted({tokens[min(i * (len(tokens) - 1) // (count - 1), len(tokens) - 1)] for i in range(count)})
+    return picks
+
+
+# The legacy expert-compute expectation (query_moe with moe_backend=
+# "deepep_moe": tokens globalized by attention_dp, EPLB 0.8 prefill token
+# correction, deepseek.py:1359) is NOT recomputable any more: the engine
+# retired the sglang deepep_moe MoE-compute path outright (AIC-1601 — the
+# removed wideep context/generation MoE tables), and re-deriving the
+# distribution/EPLB corrections from raw rows would re-implement the retired
+# query math. Large-EP expert-compute value fidelity is anchored by the
+# frozen parity goldens and tests/unit/sdk/database/
+# test_moe_ep_query_equivalence.py; the builder's MoEExpertCompute state is
+# pinned by TestSglangLargeEPStructure.
 
 
 def _sglang_expected_shared_triplet(phase):
@@ -298,7 +306,7 @@ class TestSglangLargeEPValues:
 
     @pytest.fixture(scope="class")
     def db(self):
-        db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+        db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
         assert db is not None
         return db
 
@@ -306,16 +314,17 @@ class TestSglangLargeEPValues:
     @pytest.mark.parametrize("phase", ["context", "generation"])
     def test_comm_and_compute_match_legacy_queries(self, db, phase, enable_eplb):
         built = _build_sglang(_sglang_cfg(enable_eplb), phase, enable_eplb)
-        dispatch, moe, combine = built[3:]
+        dispatch, _moe, combine = built[3:]
 
-        tokens = SGLANG_CONTEXT_TOKENS if phase == "context" else SGLANG_GENERATION_TOKENS
-        for x in tokens:
+        # Comm legs compare against RAW table rows, so ride exact-grid tokens;
+        # off-grid/beyond-grid behavior is the engine's (parity goldens).
+        comm_grid = _sglang_comm_grid(db, phase)
+        for x in _grid_token_spread(comm_grid):
             context = f"sglang {phase} eplb={enable_eplb} x={x}"
             # A6: legacy pre_dispatch rode a summed dispatch+combine table row.
             _assert_close(
-                _lat(dispatch, db, x) + _lat(combine, db, x), _legacy_sglang_comm_latency(db, phase, x), context
+                _lat(dispatch, db, x) + _lat(combine, db, x), _legacy_sglang_comm_latency(comm_grid, x), context
             )
-            _assert_close(_lat(moe, db, x), _legacy_sglang_moe_latency(db, phase, x, enable_eplb), context)
 
 
 # ---------------------------------------------------------------------------
@@ -373,26 +382,25 @@ def _build_trtllm(cfg, phase, enable_eplb):
     )
 
 
-def _legacy_trtllm_a2a_latency(db, op_name, phase, x):
-    """One leg of the legacy TrtLLMWideEPMoEDispatch query, recomputed.
+def _trtllm_a2a_grid(db, op_name):
+    """The RAW loaded alltoall table slice the legacy per-leg query read.
 
-    The legacy op queried ``query_trtllm_alltoall`` per leg with
-    ``moe_backend="wideep"`` (NVLinkTwoSided on SM100) and ``node_num=None``
-    (derived as ep//4 = 4 on GB200 NVL4); pre_dispatch = prepare + dispatch,
-    post_dispatch = combine (deepseek.py:759-813, 973-1011).
-    """
-    result = db.query_trtllm_alltoall(
-        op_name=op_name,
-        num_tokens=x,
-        hidden_size=7168,
-        topk=8,
-        num_experts=256,
-        moe_ep_size=16,
-        quant_mode=TRTLLM_MOE_QUANT,
-        moe_backend="wideep",
-        node_num=None,
-    )
-    return float(result) * _trtllm_scale(phase)
+    ``query_trtllm_alltoall`` is a tombstone since #1357 PR-5, so the legacy
+    expectation is re-derived from the raw rows it walked:
+    ``_trtllm_alltoall_data`` at (NVLinkTwoSided [moe_backend="wideep" on
+    SM100], op_name, nvfp4, node_num=4 [ep//4 on GB200 NVL4], hidden 7168,
+    topk 8, experts 256, ep 16) — deepseek.py:759-813, 973-1011."""
+    # Rehomed since the class deletion (AIC-1357): MoEAllToAll owns the
+    # legacy trtllm alltoall view binding.
+    ops.MoEAllToAll.load_data(db)
+    return db._trtllm_alltoall_data["NVLinkTwoSided"][op_name][TRTLLM_MOE_QUANT][4][7168][8][256][16]
+
+
+def _legacy_trtllm_a2a_latency(grid, phase, x):
+    """One leg of the legacy TrtLLMWideEPMoEDispatch query, recomputed from a
+    RAW table row (exact-grid tokens only — off-grid interpolation retired to
+    the compiled engine and is anchored by the frozen parity goldens)."""
+    return grid[x]["latency"] * _trtllm_scale(phase)
 
 
 def _legacy_trtllm_combine_op_name(phase):
@@ -404,18 +412,33 @@ def _legacy_trtllm_combine_op_name(phase):
 
 
 def _legacy_trtllm_moe_latency(db, phase, x, enable_eplb, num_slots):
-    """The legacy TrtLLMWideEPMoE query, recomputed via ``query_wideep_moe_compute``."""
-    result = db.query_wideep_moe_compute(
-        num_tokens=x * 16,  # attention_dp globalizes tokens
+    """The legacy TrtLLMWideEPMoE query, recomputed via the unified
+    expert-compute twin (the retired ``query_wideep_moe_compute`` shim's
+    exact construction) through the engine's single-op plumbing."""
+    from aiconfigurator_core.sdk import engine
+    from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
+
+    op = MoEExpertCompute(
+        "wideep_moe_query",
+        1.0,
         hidden_size=7168,
         inter_size=2048,
         topk=8,
         num_experts=256,
-        num_slots=num_slots or 256,
-        moe_tp_size=1,
         moe_ep_size=16,
         quant_mode=TRTLLM_MOE_QUANT,
         workload_distribution=_trtllm_distribution(enable_eplb),
+        attention_dp_size=1,
+        inference_phase="context",
+        num_slots=num_slots or 256,
+    )
+    result = engine._evaluate_single_op(
+        db,
+        op,
+        is_context=True,
+        batch_size=1,
+        s=1,
+        x=int(x * 16),  # attention_dp globalizes tokens
     )
     return float(result) * _trtllm_scale(phase)
 
@@ -546,7 +569,7 @@ class TestTrtllmLargeEPStructure:
 class TestTrtllmLargeEPValues:
     @pytest.fixture(scope="class")
     def db(self):
-        db = get_database("gb200", "trtllm", "1.3.0rc10")
+        db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
         assert db is not None
         return db
 
@@ -560,20 +583,28 @@ class TestTrtllmLargeEPValues:
         else:
             prepare, dispatch, moe, combine = built[0]._group_a[1:]
 
-        for x in TRTLLM_TOKENS:
+        # A2A legs compare against RAW table rows, so ride exact-grid tokens;
+        # off-grid/beyond-grid behavior is the engine's (parity goldens).
+        prepare_grid = _trtllm_a2a_grid(db, "alltoall_prepare")
+        dispatch_grid = _trtllm_a2a_grid(db, "alltoall_dispatch")
+        combine_grid = _trtllm_a2a_grid(db, _legacy_trtllm_combine_op_name(phase))
+        for x in _grid_token_spread(prepare_grid):
             context = f"trtllm {phase} eplb={enable_eplb} slots={num_slots} x={x}"
             # A6: legacy pre_dispatch = prepare + dispatch; post_dispatch = combine.
             _assert_close(
                 _lat(prepare, db, x) + _lat(dispatch, db, x),
-                _legacy_trtllm_a2a_latency(db, "alltoall_prepare", phase, x)
-                + _legacy_trtllm_a2a_latency(db, "alltoall_dispatch", phase, x),
+                _legacy_trtllm_a2a_latency(prepare_grid, phase, x)
+                + _legacy_trtllm_a2a_latency(dispatch_grid, phase, x),
                 context,
             )
             _assert_close(
                 _lat(combine, db, x),
-                _legacy_trtllm_a2a_latency(db, _legacy_trtllm_combine_op_name(phase), phase, x),
+                _legacy_trtllm_a2a_latency(combine_grid, phase, x),
                 context,
             )
+
+        for x in TRTLLM_TOKENS:
+            context = f"trtllm {phase} eplb={enable_eplb} slots={num_slots} x={x}"
             _assert_close(_lat(moe, db, x), _legacy_trtllm_moe_latency(db, phase, x, enable_eplb, num_slots), context)
 
 

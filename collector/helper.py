@@ -850,6 +850,7 @@ def convert_perf_csv_to_parquet(
 
     try:
         import pyarrow as pa
+        import pyarrow.compute as pc_compute
         import pyarrow.csv as pc
         import pyarrow.parquet as pq
     except ImportError as exc:
@@ -870,6 +871,7 @@ def convert_perf_csv_to_parquet(
         table = pc.read_csv(csv_path)
         if merge_existing and parquet_path.exists():
             table = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
+        table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
         pq.write_table(table, tmp_path, compression=compression)
         os.replace(tmp_path, parquet_path)
         if delete_source:
@@ -879,6 +881,35 @@ def convert_perf_csv_to_parquet(
             tmp_path.unlink()
         _release_merge_lock(merge_lock, lock_fd)
     return parquet_path
+
+
+def _normalize_power_metrics(table, *, pa, pc):
+    """Store unavailable power metrics as typed zero sentinels.
+
+    A running GPU workload cannot have a valid zero-watt measurement, and the
+    SDK already interprets zero energy as uncovered power data.  Committed
+    parquet files therefore use ``0.0`` rather than null for unavailable
+    ``power``/``power_limit`` cells.  Tables that omit these optional columns
+    remain unchanged.
+    """
+    for name in ("power", "power_limit"):
+        if name not in table.column_names:
+            continue
+
+        index = table.schema.get_field_index(name)
+        column = table.column(index)
+        try:
+            column = column.cast(pa.float64())
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError) as exc:
+            raise ValueError(f"{name} must be convertible to float64") from exc
+
+        column = pc.fill_null(column, 0.0)
+        for row_index, value in enumerate(column.to_pylist()):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must contain finite non-negative values; row {row_index} has {value!r}")
+
+        table = table.set_column(index, name, column)
+    return table
 
 
 def _acquire_merge_lock(lock_path: Path) -> int:
@@ -913,10 +944,11 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
     # with drifted types would otherwise round-trip through pandas and
     # silently rewrite the parquet under a different schema. Metric columns
     # are exempt from the type check — pyarrow.csv infers an all-empty
-    # optional metric column (e.g. power on a power-off run) as `null` while
-    # populated runs infer `double`, and treating that drift as a mismatch
-    # made the merge silently OVERWRITE the accumulated dataset. Metric
-    # values are cast to the existing metric type instead. Order-insensitive
+    # optional metric column as `null` while populated runs infer `double`,
+    # and treating that drift as a mismatch made the merge silently OVERWRITE
+    # the accumulated dataset. Metric types are reconciled for concatenation;
+    # the finalizer then casts power metrics to double and replaces nulls with
+    # the repository's 0.0 unavailable-measurement sentinel. Order-insensitive
     # (the merge realigns column order below); Arrow metadata is ignored
     # (pandas round-trips change it).
     def fields(schema):

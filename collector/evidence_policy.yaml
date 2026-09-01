@@ -55,9 +55,12 @@ evidence_systems:
 rules:
   # Pin version change (design §9 row 1): fresh silicon for the family's
   # tables on every system the manifest lists, OR a reuse.yaml declaration
-  # backed by kernel-identity evidence (#1345 facts showing unchanged
-  # kernels) plus a before/after spot benchmark on one evidence system per
-  # SM generation.
+  # with an explicit approved_by owner sign-off. A reuse declaration is an
+  # owner-accepted approximation (owner decision, tianhaox 2026-08-19,
+  # revising the earlier kernel-identity + spot-benchmark requirement);
+  # kernel-identity notes and spot benchmarks are OPTIONAL strengthening
+  # evidence, recommended when the framework diff touches the family's
+  # dispatch.
   pin_version:
     requirement: recollect_or_declared_reuse
 

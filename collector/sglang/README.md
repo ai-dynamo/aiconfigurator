@@ -15,7 +15,11 @@ The collected performance data can be used for performance modeling, scheduling 
 ## Overview
 
 - **collect_mla_module.py**: Collects performance data for MLA and DSA attention module operators
-- **../wideep/sglang/collect_deepep_moe.py**: Collects performance data for DeepEP MoE operators
+- Large-EP expert compute is measured by
+  `../wideep/sglang/collect_deepep_moe.py` into the `moe_ep` table; measured
+  communication is collected by `../wideep/sglang/collect_moe_a2a.py`.
+  Stock `moe_perf` remains only the modeled fallback when no matching
+  dedicated `moe_ep` row is available.
 
 ## Requirements
 
@@ -43,8 +47,6 @@ registered or accepted WideEP MLA collector:
 # Attention (MLA/DSA Module)
 python collect_mla_module.py --mode context --attn-type mla
 
-# MoE
-python ../wideep/sglang/collect_deepep_moe.py --device cuda:0 --output-path /path/to/output/
 ```
 
 **Arguments:**
@@ -85,7 +87,7 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 | Kernel | `attention_generation` | Standard Attention decode |
 | Module | `dsa_context_module` | DSA module prefill (DeepSeek-V3.2, GLM-5) |
 | Module | `dsa_generation_module` | DSA module decode (DeepSeek-V3.2, GLM-5) |
-| Wideep | `moe_ep` | Large-EP MoE expert compute (unified `moe_expert_compute_perf` table) |
+| Wideep | `moe_a2a` | Large-EP MoE dispatch/combine communication |
 
 **Note:** Requested operators run sequentially. Cases within one operator are
 distributed across the selected GPU workers. Module-level operators use
@@ -154,72 +156,10 @@ Output format:
 framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency
 ```
 
-## 2. MoE Operator Collection (`collector/wideep/sglang/collect_deepep_moe.py`)
+## 2. Large-EP communication collection
 
-### Features
-- Tests DeepEP MoE operator performance
-- Supports different expert number configurations
-- Tests both prefill and decode phases
-- Supports power-law and uniform distribution modes
-
-### Usage
-
-#### Direct Mode
-```bash
-export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python ../wideep/sglang/collect_deepep_moe.py --device cuda:0 --output-path /path/to/output/
-```
-
-#### Framework Mode
-```bash
-python collect.py --backend sglang --ops moe_ep
-```
-
-#### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model
-
-#### Modify Configuration
-
-**Multi-GPU Parallel Mode**: The script supports parallel execution across multiple GPUs using subprocess isolation. Each GPU runs a different EP configuration simultaneously.
-
-Edit the configuration at the bottom of the script:
-```python
-# Configuration variables (modify as needed)
-num_experts_list = [128, 64, 32, 16, 8, 4, 2, 1]  # List of expert counts to simulate different EP sizes
-
-# Server arguments (per-GPU subprocess)
-server_args = ServerArgs(
-    tp_size=1,                   # Each subprocess uses 1 GPU
-    ep_size=1,                   # Each subprocess uses 1 GPU
-)
-```
-
-**Simulating Different EP Configurations**:
-
-The `num_experts` parameter is used to simulate different expert parallel (EP) sizes. With `tp_size=1` and `ep_size=1` (single GPU):
-
-- `num_experts=128` → simulates **EP 2** (256 / 128 = 2)
-- `num_experts=64` → simulates **EP 4** (256 / 64 = 4)
-- `num_experts=32` → simulates **EP 8** (256 / 32 = 8)
-- `num_experts=16` → simulates **EP 16** (256 / 16 = 16)
-- `num_experts=8` → simulates **EP 32** (256 / 8 = 32)
-- `num_experts=4` → simulates **EP 64** (256 / 4 = 64)
-- `num_experts=2` → simulates **EP 128** (256 / 2 = 128)
-- `num_experts=1` → simulates **EP 256** (256 / 1 = 256)
-
-The simulated EP size is calculated as: `simulated_ep_size = 256 / num_experts * ep_size`
-
-### Test Parameters
-- Number of experts: Configurable (suggested: 16, 32, 64, 128, 256)
-- Number of tokens: 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
-- Distribution mode: `power_law`  or `uniform`
-
-### Output
-Results are saved to:
-- `moe_expert_compute_perf.txt`: both phases in one table, split by the `inference_phase`
-  column (`context` / `generation`)
-
-Output format:
-```csv
-framework,version,device,op_name,kernel_source,moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency
-```
+Use `collector/wideep/sglang/collect_moe_a2a.py` for measured dispatch/combine
+communication. Use `collector/wideep/sglang/collect_deepep_moe.py` for
+Large-EP local expert compute; it publishes the dedicated `moe_ep` table.
+Stock `moe_perf` is a modeled fallback only when a matching `moe_ep` row is
+not available.

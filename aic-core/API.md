@@ -121,14 +121,20 @@ node width would silently mis-price the cross-node all-to-all.
 
 Enumeration follows the coverage probes. A parallel tuple with `moe_tp == 1`
 and `moe_ep > 1` participates in the large-EP regime when
-`moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)` cover its EP size
-— at this system's `nodes_for(ep, gpus_per_node)` topology and the run's MoE
-quant mode — for every phase the worker runs, plus the context phase for
-every role (a worker's weights are sized from its context ops). Coverage is
-necessary, not sufficient: each tuple is resolved individually, the per-phase
-backend being the first `MOE_A2A_BACKENDS` registry entry that covers the
-tuple's EP, and a tuple that resolves no backend for a required phase builds
-the fused graph instead. Collecting the two tables for a model shape on a
+`moe_expert_compute_coverage(...)` covers its requested EP size under the run's
+MoE quant mode for every phase the worker runs, plus the context phase for
+every role (a worker's weights are sized from its context ops), and compatible
+all-to-all data is reported by `moe_a2a_coverage(...)`. The resolver prefers
+the exact requested EP/node topology. For multi-node SGLang DeepEP
+(`deepep_ht` or `deepep_ll`) only, the canonical shape-filtered EP8/node1 row
+may be used unchanged as `estimated`; no topology scaling is synthesized.
+Other frameworks, backends, and single-node requests remain exact-topology
+only.
+
+Each tuple is resolved individually. A tuple that resolves a backend for every
+required phase builds the large-EP graph. An unresolved intra-node tuple keeps
+the fused graph, while an unresolved cross-node tuple raises
+`PerfDataNotAvailableError`. Collecting both tables for a model shape on a
 system is what makes large EP explorable there — no flag, no code change.
 
 `aiconfigurator_core.sdk.__all__` is the supported high-level surface. The
@@ -195,22 +201,27 @@ if estimate_ms is None:
 
 ## Stable Rust facade
 
-New embedded consumers should construct engines with `AicEngineBuilder`. The
-flat `build_aic_engine(...)` function is a source-compatibility adapter for
-existing callers: it remains supported through the 0.10 release and is planned
-for removal in version 0.11.0. Both paths normalize into the same private build
-request and enter Python once to compile an engine specification. Calls on the
-returned `AicEngine` are pure Rust and do not re-enter Python.
+Embedded consumers construct engines with `AicEngineBuilder`. It normalizes
+configuration into one private build request and enters Python once to compile
+an engine specification. Calls on the returned `AicEngine` are pure Rust and do
+not re-enter Python.
 
 Standalone binaries must enable the crate's `embed-python` feature; applications
 hosted by an initialized Python interpreter do not. In either case, the matching
-`aiconfigurator-core` wheel must be importable. See the
+`aiconfigurator_core` Python package must be importable. Standard deployments
+should install the upper `aiconfigurator` distribution, which supplies that
+package: bundled in 0.10 and through a pinned core-wheel dependency in
+split-package releases. Core-only consumers may install `aiconfigurator-core`
+directly. See the
 [crate README](rust/aiconfigurator-core/README.md) for setup and usage examples.
+
+The flat `build_aic_engine` adapter remains available in the 0.11.0 release and
+is removed from `main` for the next minor release. Consumers upgrading past
+0.11.0 must migrate to `AicEngineBuilder`.
 
 The supported root-level Rust surface is grouped as follows:
 
-- compiled engine: `AicEngineBuilder` (preferred), `build_aic_engine`
-  (0.10 compatibility adapter), `AicEngine`, `AicError`;
+- compiled engine: `AicEngineBuilder`, `AicEngine`, `AicError`;
 - forward-pass estimation: `ForwardPassPerfModel`,
   `ForwardPassPerfOptions`, diagnostics/readiness/source types, and the
   `ForwardPassMetrics` telemetry types;

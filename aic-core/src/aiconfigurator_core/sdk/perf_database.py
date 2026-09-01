@@ -6,27 +6,45 @@ from __future__ import annotations
 import copy
 import functools
 import importlib.resources as pkg_resources
+import json
 import logging
 import os
 import traceback
 from collections import UserDict, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import ClassVar, Optional
 
 import yaml
 
-from aiconfigurator_core.sdk import common, perf_interp
-from aiconfigurator_core.sdk.common import PerfDataFilename, parse_support_matrix_version
-from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
+from aiconfigurator_core.sdk import common
+from aiconfigurator_core.sdk.common import PerfDataFilename
+from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.system_spec import SystemSpec
 
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator_core") / "systems")]
-_MISSING_SILICON_DATA_EXCEPTIONS = (PerfDataNotAvailableError, InterpolationDataNotAvailableError)
+
+# Ad-hoc probe shapes must fit the op-list FFI's u32 token count; comm shims
+# factor an element count into ``x * per_token_elements`` with both in range
+# (power-of-two splits always exist for the legacy chart sweeps; odd counts
+# stay whole in the per-token field).
+_MAX_PROBE_X = 2**31
+
+
+def _factor_message_size(size: int) -> tuple[int, int]:
+    per_token = 1
+    x = int(size)
+    while x > _MAX_PROBE_X:
+        if x % 2:
+            raise ValueError(f"message size {size} cannot be factored into u32 range")
+        x //= 2
+        per_token *= 2
+    return x, per_token
+
+
 SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
 INCOMPLETE_MARKER = "INCOMPLETE.txt"
 # Structured provenance markers (Collector V3 design §5/§6.3), yaml-first with the
@@ -88,6 +106,214 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
 
 def get_systems_paths() -> list[str]:
     return list(_SYSTEMS_PATHS)
+
+
+def _version_sort_tuple(version_str: str) -> tuple:
+    """Comparable tuple for version strings like '1.3.0rc10' / '0.5.6.post2' / 'v0.20_fix'."""
+    import re
+
+    version_str = str(version_str).lower()
+
+    def suffix_number(start: int) -> int:
+        suffix_match = re.search(r"(\d+)(?!.*\d)", version_str[start:])
+        return int(suffix_match.group(1)) if suffix_match else 0
+
+    def prerelease_parts() -> list[int]:
+        rc_match = re.search(r"rc(\d+)", version_str)
+        if rc_match:
+            return [0, int(rc_match.group(1))]
+        if "rc" in version_str:
+            return [0, 0]
+        return [1, 0]
+
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+    if m:
+        parts = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+        parts.extend(prerelease_parts())
+        parts.append(suffix_number(m.end()))
+        return tuple(parts)
+    m = re.search(r"v?(\d+)\.(\d+)", version_str)
+    if m:
+        parts = [int(m.group(1)), int(m.group(2)), 0]
+        parts.extend(prerelease_parts())
+        parts.append(suffix_number(m.end()))
+        return tuple(parts)
+    return (0, 0, 0, 0, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Queryable-version slots.
+#
+# Each (system, framework) exposes at most three queryable versions:
+#   current  — the newest maintainer-completed full upgrade (authored in
+#              systems/query_versions.yaml; per-system overrides win)
+#   previous — the current before it (authored alongside)
+#   next     — DERIVED: the highest declared version newer than current
+#              (single-op development drops for new models land here; their
+#              lower-version op data serves next queries via backward fill)
+#
+# The literal aliases "current" / "previous" / "next" are accepted wherever a
+# version is requested. Any other version is rejected loudly unless the
+# caller passes allow_unlisted_version=True (test fixtures pinning data
+# coordinates). Data directories outside the slots are NOT versions — they
+# are backward-fill / cross-backend sources only. When the slots file is
+# absent from the systems root (external/synthetic trees), the gate is off
+# and behavior is unchanged.
+# ---------------------------------------------------------------------------
+
+_QUERY_VERSIONS_BASENAME = "query_versions.yaml"
+_SLOT_ALIASES = ("current", "previous", "next")
+
+
+@functools.cache
+def _load_query_slots_doc(systems_paths: tuple[str, ...]) -> dict | None:
+    for systems_root in systems_paths:
+        path = os.path.join(systems_root, _QUERY_VERSIONS_BASENAME)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.warning(f"failed to parse {path}: {e}; version slots disabled")
+                return None
+    return None
+
+
+def get_version_slots(system: str, backend: str, systems_paths: str | list[str] | None = None) -> dict[str, str] | None:
+    """Resolved slots for (system, backend): {'current': v[, 'previous': v][, 'next': v]}.
+
+    None when the slots file is absent (gate off) or the combination has no
+    authored entry (e.g. a framework never maintained on that system).
+    """
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+    doc = _load_query_slots_doc(tuple(systems_paths))
+    if not doc:
+        return None
+    override_entry = (doc.get("overrides") or {}).get(system, {}).get(backend)
+    entry = override_entry if override_entry is not None else (doc.get("defaults") or {}).get(backend)
+    if not entry or not entry.get("current"):
+        return None
+    # Slots only govern systems that actually hold data for this backend:
+    # estimate-only spec yamls (no data tree) and synthetic test systems keep
+    # the ungated behavior even though the framework defaults exist.
+    has_any_version_dir = False
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f) or {}
+            data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+            if any(True for _ in _iter_backend_version_dirs(data_dir, backend)):
+                has_any_version_dir = True
+                break
+        except Exception:
+            continue
+    if not has_any_version_dir:
+        return None
+    slots = {"current": str(entry["current"])}
+    if entry.get("previous"):
+        slots["previous"] = str(entry["previous"])
+    # next is derived FLEET-WIDE per framework: systematic upgrades and
+    # development drops land on typical hardware together, so the next version
+    # is one label across every defaults-governed system — a system without
+    # its own next-version data serves next queries through backward fill (exactly the
+    # rows the retired reuse markers used to graft). Override systems
+    # (frozen baselines like a100/b60) expose no next.
+    if override_entry is None:
+        # Override-governed systems (frozen baselines like a100/b60) are a
+        # separate compatibility domain: their data drops must not advertise
+        # a fleet-wide next that defaults-governed systems cannot load.
+        override_systems = frozenset(
+            name for name, per_backend in (doc.get("overrides") or {}).items() if (per_backend or {}).get(backend)
+        )
+        nxt = _derive_fleet_next(tuple(systems_paths), backend, slots["current"], override_systems)
+        if nxt is not None:
+            slots["next"] = nxt
+    return slots
+
+
+@functools.cache
+def _derive_fleet_next(
+    systems_paths: tuple[str, ...], backend: str, current: str, exclude_systems: frozenset[str] = frozenset()
+) -> str | None:
+    """Highest DATA-BACKED version strictly newer than `current`, across all
+    defaults-governed systems in the tree (override-governed systems are
+    excluded — their frozen baselines are not part of the fleet upgrade
+    cadence). Marker-only directories do not qualify — next means a developer
+    actually dropped measurements somewhere."""
+    current_key = _version_sort_tuple(current)
+    candidates: set[str] = set()
+    for systems_root in systems_paths:
+        try:
+            entries = os.listdir(systems_root)
+        except Exception:
+            continue
+        for entry in entries:
+            if not entry.endswith(".yaml"):
+                continue
+            if entry[: -len(".yaml")] in exclude_systems:
+                continue
+            try:
+                with open(os.path.join(systems_root, entry)) as f:
+                    system_spec = yaml.safe_load(f) or {}
+                data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+                if not os.path.isdir(data_dir):
+                    continue
+                for version, version_path in _iter_backend_version_dirs(data_dir, backend):
+                    if _version_sort_tuple(version) > current_key and _database_version_dir_has_perf_files(
+                        version_path
+                    ):
+                        candidates.add(version)
+            except Exception as e:
+                logger.warning("could not derive next slot from %s: %s", entry, e)
+    return max(candidates, key=_version_sort_tuple) if candidates else None
+
+
+def resolve_query_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+    allow_unlisted: bool = False,
+) -> str:
+    """Map a requested version (or slot alias) onto the queryable slots.
+
+    Raises ValueError for versions outside the slots unless allow_unlisted.
+    """
+    slots = get_version_slots(system, backend, systems_paths=systems_paths)
+    if slots is None:
+        if version in _SLOT_ALIASES:
+            raise ValueError(
+                f"no queryable versions defined for {backend} on {system}; cannot resolve alias {version!r}"
+            )
+        return version
+    if version in _SLOT_ALIASES:
+        resolved = slots.get(version)
+        if resolved is None:
+            raise ValueError(f"{backend} on {system} has no {version!r} version; available slots: {slots}")
+        return resolved
+    if version in slots.values() or allow_unlisted:
+        return version
+    # Transition escape for legacy test fixtures that pin data coordinates
+    # through user-level surfaces (Task/CLI) with no allow parameter. Not for
+    # production use; the fixture-discipline follow-up retires it.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        return version
+    raise ValueError(
+        f"{backend}/{version!r} looks like an old-style raw version query; "
+        f"{system} now resolves versions through queryable slots. "
+        f"New way: use an alias ('current'/'previous'/'next') or one of the "
+        f"slot versions {slots}. "
+        f"Old way (raw data-coordinate access, data outside these slots is "
+        f"not maintained to the queryable bar): re-run with the environment "
+        f"variable AIC_ALLOW_UNLISTED_VERSIONS=1, or pass "
+        f"allow_unlisted_version=True in SDK code."
+    )
 
 
 @functools.cache
@@ -213,40 +439,13 @@ def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[s
     return sorted(modes)
 
 
-@functools.cache
-def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tuple[dict, ...]]:
-    """Load `<systems_root>/op_kernel_source_manifest.yaml` and group entries by op_file.
-
-    Returns `op_file -> tuple of entries` (each entry has tier, kernel_source, frameworks).
-    Used by PerfDatabase to discover which sibling backend/version dirs hold rows that the
-    active backend can inherit. Returns an empty dict if the manifest is absent or empty.
-
-    The manifest is generated by `tools/perf_database/check_kernel_source.py`.
-    """
-    manifest_path = os.path.join(systems_root, "op_kernel_source_manifest.yaml")
-    if not os.path.exists(manifest_path):
-        return {}
-    with open(manifest_path) as f:
-        data = yaml.safe_load(f) or {}
-    accum: dict[str, list[dict]] = defaultdict(list)
-    for entry in data.get("groups", []) or []:
-        op_file = entry.get("op_file")
-        if not op_file:
-            continue
-        if op_file.endswith(".txt"):
-            op_file = f"{os.path.splitext(op_file)[0]}.parquet"
-        accum[op_file].append(entry)
-    return {key: tuple(value) for key, value in accum.items()}
-
-
-# ``_read_filtered_rows`` lives in ``operations.base`` so the per-op-module
-# loaders can import it without a circular dependency on ``perf_database``
-# at module load time. Re-exported here for any external callers that may
-# still import it via ``aiconfigurator_core.sdk.perf_database._read_filtered_rows``.
+# Path-resolution helpers live in ``operations.base`` so the per-op-module
+# loaders can import them without a circular dependency on ``perf_database``
+# at module load time; re-exported here for external callers. (The row
+# readers ``_read_perf_rows`` / ``_read_filtered_rows`` retired with the
+# last Python parser — the engine table view serves every table.)
 from aiconfigurator_core.sdk.operations.base import (  # noqa: F401
     _KNOWN_BACKEND_DIRS,
-    _read_filtered_rows,
-    _read_perf_rows,
     _resolve_perf_data_path,
     resolve_op_data_path,
 )
@@ -293,7 +492,14 @@ def get_supported_databases(
     supported_dict = defaultdict(lambda: defaultdict(list))
     for system, backend_versions in supported_sets.items():
         for backend, versions in backend_versions.items():
-            supported_dict[system][backend] = sorted(versions)
+            # With version slots active, the queryable surface is the slot set
+            # (current / previous / derived next), not every declared directory —
+            # directories outside the slots are fill sources, not versions.
+            slots = get_version_slots(system, backend, systems_paths=systems_paths)
+            if slots is not None:
+                supported_dict[system][backend] = sorted(set(slots.values()), key=_version_sort_tuple)
+            else:
+                supported_dict[system][backend] = sorted(versions)
 
     return supported_dict
 
@@ -576,11 +782,19 @@ def get_latest_database_version(
     """
     import re
 
+    # Under version slots, "latest" means the maintained default (current) —
+    # next is opt-in via its alias, never the implicit default. The shortcut
+    # only fires when current is visible in the supported set, so tests that
+    # monkeypatch get_supported_databases keep their synthetic behavior.
+    slots = get_version_slots(system, backend, systems_paths=systems_paths)
+
     if systems_paths is None:
         supported_databases = get_supported_databases()
     else:
         supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
+    if slots is not None and slots["current"] in database_versions:
+        return slots["current"]
     if not include_shared_layer_marker_versions:
         database_versions = [
             version
@@ -827,8 +1041,9 @@ def _is_family_layout_version_dir(version_path: str, data_dir: str) -> bool:
     family-layout-paired concept (design §7 item 1: "family tree first,
     legacy layout as deprecated fallback for one transition window") -- a
     legacy-shaped dir predates the V3 metadata regime entirely, so strict
-    provenance does not apply to it, mirroring how ``_op_file_family_from_path``
-    already treats legacy-shaped paths as structurally outside the comm-family
+    provenance does not apply to it, mirroring how the engine resolver's
+    ``op_file_family_from_path`` (``perf_database/source_resolution.rs``)
+    treats legacy-shaped paths as structurally outside the comm-family
     exclusion (Task 1's FIX-2).
     """
     try:
@@ -880,6 +1095,12 @@ def _version_dir_unusable_for_request(version_path: str, data_dir: str, *, stric
 
     A malformed sidecar raises in strict mode; non-strict mode warns and lets
     normal loading continue, matching the existing request-scoped behavior.
+
+    LOAD-GATE ONLY since the deprecation-cleanup PR: per-op source admission
+    (the four-channel walk) moved into the engine
+    (``perf_database/source_resolution.rs``), which applies this same
+    predicate to every candidate dir. This Python copy remains the
+    ``get_database`` request gate's incomplete-check.
     """
     try:
         return bool(_version_dir_state(version_path, data_dir=data_dir)["unusable"])
@@ -899,6 +1120,7 @@ def get_database(
     database_mode: str | None = None,
     shared_layer: bool | None = None,
     strict_provenance: bool | None = None,
+    allow_unlisted_version: bool = False,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version.
@@ -943,6 +1165,10 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
+    version = resolve_query_version(
+        system, backend, version, systems_paths=systems_paths, allow_unlisted=allow_unlisted_version
+    )
+
     shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
     # Only pass the override kwarg when explicitly set: PerfDatabase derives the
     # same flag from database_mode otherwise, and tests monkeypatch PerfDatabase
@@ -953,6 +1179,8 @@ def get_database(
         extra_database_kwargs["strict_provenance"] = strict_provenance
     effective_strict = _strict_provenance_enabled(strict_provenance)
     missing_data_candidate = None
+    dirless_next_candidate = None
+    is_advertised_next = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
@@ -1007,10 +1235,27 @@ def get_database(
                     _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=True)
                     _STRICT_VALIDATED_REQUESTS.add(request_key)
                 return database
-        elif allow_missing_data:
-            if missing_data_candidate is None:
-                missing_data_candidate = (systems_root, cache_key)
         else:
+            # Directory-less NEXT candidate (design §14): the fleet-derived
+            # next may be data-backed on other default-governed systems only;
+            # a system without its own directory serves every op through the
+            # channel-1 backward fill PerfDatabase already performs. DEFERRED,
+            # never returned mid-loop: an exact next directory in a LATER
+            # configured root must win over a directory-less fallback from an
+            # earlier root (review blocker 2026-08-28). The relaxation covers
+            # exactly the advertised next slot — raw versions and the
+            # authored current/previous keep the loud missing-directory gate,
+            # and provenance labeling is untouched.
+            if is_advertised_next is None:
+                slots = get_version_slots(system, backend, systems_paths=list(systems_paths))
+                is_advertised_next = slots is not None and version == slots.get("next")
+            if is_advertised_next:
+                if dirless_next_candidate is None:
+                    dirless_next_candidate = (systems_root, cache_key)
+            elif allow_missing_data:
+                if missing_data_candidate is None:
+                    missing_data_candidate = (systems_root, cache_key)
+                continue
             if is_incomplete:
                 logger.warning(
                     f"data for {system=}, {backend=}, {version=} is marked incomplete in either layout, "
@@ -1020,6 +1265,37 @@ def get_database(
                 logger.warning(
                     f"no data found for {system=}, {backend=}, {version=} in either layout, continuing searching"
                 )
+
+    if dirless_next_candidate is not None:
+        systems_root, cache_key = dirless_next_candidate
+        try:
+            database = databases_cache[cache_key][backend][version]
+        except KeyError:
+            pass
+        else:
+            database.dirless_next_load = True
+            return database
+        logger.info(
+            f"Loading directory-less next database for {system=}, {backend=}, {version=} "
+            "(no exact directory in any configured root; all ops ride backward fill)"
+        )
+        try:
+            database = PerfDatabase(
+                system, backend, version, systems_root, database_mode=database_mode, **extra_database_kwargs
+            )
+            # The engine reload (Rust) keeps its own loud missing-directory
+            # gate; the spec builders read this marker to carry the
+            # dir-less-next tolerance on the wire.
+            database.dirless_next_load = True
+            databases_cache[cache_key][backend][version] = database
+            return database
+        except Exception:
+            if effective_strict:
+                raise
+            logger.warning(
+                f"failed directory-less next load for {system=}, {backend=}, {version=}",
+                exc_info=True,
+            )
 
     if missing_data_candidate is not None:
         systems_root, cache_key = missing_data_candidate
@@ -1134,6 +1410,7 @@ def get_database_view(
     transfer_policy=None,
     shared_layer: bool | None = None,
     strict_provenance: bool | None = None,
+    allow_unlisted_version: bool = False,
 ) -> PerfDatabase | None:
     """Return an isolated, lightweight query view over a cached database.
 
@@ -1158,6 +1435,7 @@ def get_database_view(
         "database_mode": mode.name,
         "shared_layer": shared_layer,
         "strict_provenance": strict_provenance,
+        "allow_unlisted_version": allow_unlisted_version,
     }
     if systems_paths is not None:
         database_kwargs["systems_paths"] = systems_paths
@@ -1452,64 +1730,20 @@ def get_all_databases(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# CSV loader re-exports.
-#
-# Every ``load_*_data`` function lives in the op module that owns the
-# data it parses (lazy per-op data ownership). The re-exports below keep the previous
-# import paths working for external callers and for legacy
-# ``aiconfigurator_core.sdk.perf_database.<loader>`` patch sites in test
-# fixtures (the conftest now patches the new locations directly; these
-# survive for code outside this repo).
+# Loader disposition after the deprecation-cleanup PR: the compiled engine
+# owns the data plane — every ``PerfDatabase._<family>_data`` attribute is
+# served by the engine table view (``sdk/engine_table_view.py``) in the
+# retired parsers' exact nested shape, and NO path parses perf files in
+# Python anymore, tests included (the collector-format handshake asserts
+# against the engine view / frozen schema literals instead),
+# tests included; the LAST survivor — the dsv4 csa-topk-calib parser —
+# retired when the ``_dsv4_csa_topk_calib_data`` view attribute landed
+# (``test_dsv4_cp_top_last_reuse.py`` now pins the engine view). The DSA
+# model-dims constants keep their legacy import path.
 # ─────────────────────────────────────────────────────────────────────────
-from aiconfigurator_core.sdk.operations.attention import (  # noqa: F401
-    load_context_attention_data,
-    load_encoder_attention_data,
-    load_generation_attention_data,
-)
-from aiconfigurator_core.sdk.operations.communication import (  # noqa: F401
-    load_custom_allreduce_data,
-    load_nccl_data,
-)
 from aiconfigurator_core.sdk.operations.dsa import (  # noqa: F401
     DEFAULT_DSA_ARCHITECTURE,
     DSA_MODEL_DIMS,
-    load_context_dsa_module_data,
-    load_generation_dsa_module_data,
-)
-from aiconfigurator_core.sdk.operations.dsv4 import (  # noqa: F401
-    _dsv4_normalize_dtype,
-    load_context_dsv4_kind_module_data,
-    load_dsv4_megamoe_module_data,
-    load_dsv4_sparse_kernel_data,
-    load_generation_dsv4_kind_module_data,
-    load_mhc_module_data,
-)
-from aiconfigurator_core.sdk.operations.gemm import (  # noqa: F401
-    load_compute_scale_data,
-    load_gemm_data,
-    load_scale_matrix_data,
-)
-from aiconfigurator_core.sdk.operations.mamba import (  # noqa: F401
-    load_gdn_data,
-    load_mamba2_data,
-)
-from aiconfigurator_core.sdk.operations.mla import (  # noqa: F401
-    load_context_mla_data,
-    load_context_mla_module_data,
-    load_generation_mla_data,
-    load_generation_mla_module_data,
-    load_mla_bmm_data,
-    load_wideep_context_mla_data,
-    load_wideep_generation_mla_data,
-)
-from aiconfigurator_core.sdk.operations.moe import (  # noqa: F401
-    load_moe_data,
-    load_trtllm_alltoall_data,
-    load_wideep_context_moe_data,
-    load_wideep_deepep_ll_data,
-    load_wideep_deepep_normal_data,
-    load_wideep_generation_moe_data,
-    load_wideep_moe_compute_data,
 )
 
 
@@ -1891,91 +2125,6 @@ def _gemm_key_names(database) -> list[str]:
 # ``comm`` is the one family design §6.5 rule 5 hard-excludes from every reuse
 # channel (NCCL curves are topology-bound; shape-filling across versions is
 # wrong there). Detected structurally off the op's resolved primary path.
-_COMM_FAMILY_DIR = "comm"
-
-
-def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str | None:
-    """Best-effort family-dir name for an op's resolved primary path.
-
-    Structural: the family-first layout is
-    ``<data_dir>/<family>/<backend>/<version>/<file>``, so the family is the
-    path's first component relative to ``system_data_root`` when that
-    component isn't a known backend dir. Returns ``None`` for legacy-layout
-    paths (``<data_dir>/<backend>/<version>/<file>``, 3 components) or
-    otherwise-unresolved paths — comm exclusion then simply does not trigger;
-    detection is deliberately primary-path-only (see ``_build_op_sources``).
-
-    Deliberate exception, not a bug (AIC-1503 PR4 task 1, FIX 2): design
-    §6.5 rule 5's "comm" family is a structural concept that only exists in
-    the family-first layout. A comm op file (custom_allreduce_perf.parquet,
-    trtllm_alltoall_perf.parquet, wideep_deepep_*_perf.parquet, ...) resolved
-    under a legacy-shaped 3-component path has no family component to
-    detect, so this function returns ``None`` for it and `_build_op_sources`
-    does NOT apply the comm hard exclusion — that op keeps the pre-V3
-    sibling-reuse behavior for as long as its tree stays legacy-shaped. This
-    was adjudicated deliberately over the alternative of recognizing these
-    op files by table-name identity: that would smuggle catalog knowledge
-    ("which tables are comm") into a loader that must stay catalog-free. The
-    real committed tree is fully family-first today (zero live exposure);
-    this only matters for the transition window if a legacy-shaped tree is
-    ever loaded again. Pinned by
-    ``test_reuse_ordering.py::test_legacy_layout_comm_op_keeps_pre_v3_siblings``
-    — any future change to this behavior must update that test deliberately.
-    """
-    try:
-        rel = os.path.relpath(primary_path, system_data_root)
-    except ValueError:
-        return None
-    parts = rel.split(os.sep)
-    if len(parts) == 4 and parts[0] not in KNOWN_BACKEND_DIRS:
-        return parts[0]
-    # Legacy-layout (3-component) or otherwise-unresolved path: no family
-    # component exists structurally, so we can't detect "comm" here. This is
-    # the transition-window exception described above, not a bug — legacy
-    # comm op files simply keep pre-V3 sibling-reuse behavior.
-    return None
-
-
-def _requested_version_reuse_entries(
-    system_data_root: str, backend: str, version: str, op_file_basename: str, *, strict: bool
-) -> list[dict[str, str]]:
-    """Declared-reuse entries (design §6.3) for one op file, scoped to the
-    REQUESTED version dir(s) only.
-
-    A (backend, version) pair may resolve to several family dirs (mirrors
-    ``_iter_backend_version_dirs``'s own contract); every ``reuse.yaml`` found
-    at that pair is parsed and only entries whose ``table`` names this op file
-    are kept, in file order.
-
-    A malformed ``reuse.yaml`` raises ``ValueError`` in strict mode (mirrors
-    ``_check_strict_provenance_for_request``'s load-time check). Non-strict
-    mode warns once per path -- the SAME dedupe key as that load-time check,
-    so a tree that already warned at load doesn't warn again here -- and
-    treats that path as declaring zero donors, instead of crashing. Without
-    this, a non-strict ``get_database()`` call would warn-and-continue at
-    load time only to crash on the very same malformed file the first time an
-    op is actually queried (AIC-1503 PR4 task 5, FIX 1).
-    """
-    matched: list[dict[str, str]] = []
-    for candidate_version, version_path in _iter_backend_version_dirs(system_data_root, backend):
-        if candidate_version != version:
-            continue
-        reuse_path = os.path.join(version_path, REUSE_YAML_MARKER)
-        if not os.path.isfile(reuse_path):
-            continue
-        try:
-            entries = _parse_reuse_yaml(reuse_path)["entries"]
-        except ValueError as e:
-            if strict:
-                raise
-            _warn_strict_provenance_once("malformed-reuse", reuse_path, str(e))
-            continue
-        for reuse_entry in entries:
-            if f"{reuse_entry['table']}.parquet" == op_file_basename:
-                matched.append(reuse_entry)
-    return matched
-
-
 _UNPARSEABLE_SIBLING_VERSION_WARNED: set[tuple[str, str, str]] = set()
 
 
@@ -2090,11 +2239,6 @@ class PerfDatabase:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
-        # Manifest entries grouped by op_file. Used by ``_build_op_sources``
-        # (lazy-load path inside each op class) to discover which sibling
-        # backend/version dirs hold rows the active backend can inherit.
-        self._op_kernel_source_manifest_entries = _load_op_kernel_source_manifest_entries(systems_root)
-
         # Per-op-file source diagnostics (design §6.5 guardrail), lazily populated
         # by ``_build_op_sources`` as each op loads: op_file basename -> list of
         # {version, path, channel, exists} for every ADMITTED source, in priority
@@ -2102,6 +2246,9 @@ class PerfDatabase:
         # attribution — two different tables in the same source file share one
         # entry even if only one of them actually contributed rows.
         self.data_provenance: dict[str, list[dict[str, object]]] = {}
+        # (op_file_basename, sibling_path) pairs already warned about as
+        # low-fidelity cross-backend fallbacks — see _build_op_sources.
+        self._fallback_warned: set[tuple[str, str]] = set()
 
         # lazy per-op data ownership: every op class owns its CSV data and loads it on first query
         # via ``OpClass.load_data(database)``. No eager warm-up here — each op
@@ -2266,221 +2413,119 @@ class PerfDatabase:
         primary_path: str,
         system_data_root: str,
     ) -> list[tuple[str, Optional[set[str]]]]:
-        """Build the priority-ordered list of source files for one op (design §6).
+        """Priority-ordered source files for one op, resolved BY THE ENGINE.
 
-        Returns a list of `(file_path, kernel_source_filter)` tuples to be
-        loaded in order. The first source whose file actually contains rows
-        for a shape becomes the source of truth for that shape — later sources
-        only fill in shapes the earlier ones lacked. Ordering, in priority:
-
-          1. Active backend/version (primary). Filter is `None` — load every row.
-          2. Declared donors from the REQUESTED version dir's `reuse.yaml`
-             (design §6.3), in file order. Same backend, any direction — this
-             is the only channel that may borrow a version NEWER than
-             requested. Filter is `None`.
-          3. Same-backend siblings STRICTLY EARLIER than requested (design
-             §6.2), nearest first. Free and always on; no manifest dependency.
-             A version newer than requested is never admitted here — only an
-             explicit declaration (channel 2) can do that. Filter is `None`.
-          4. Cross-backend fill (design §6.4), kernel-identity gated by
-             `op_kernel_source_manifest.yaml`, newest-first per framework.
-
-        Every admitted source is recorded, tagged with its channel
-        (`primary | declared_reuse | fallback | cross_backend`), into
-        `self.data_provenance[op_file_basename]` — see that attribute's
-        docstring for the granularity contract.
-
-        A structured ``status: partial`` primary is admitted normally: its
-        successful rows win and channels 2-4 fill missing shapes. Only a
-        legacy ``INCOMPLETE.txt`` directory is refused wholesale because that
-        marker carries no table/shape-level coverage information.
-
-        Returns just the primary tuple (still recorded) when the shared layer
-        is disabled, when the op file is framework-agnostic (nccl / oneccl),
-        or when the op's primary path resolves under the `comm` family dir
-        (design §6.5 rule 5 — comm is hard-excluded from every reuse channel,
-        declarations included; NCCL curves are topology-bound). The
-        kernel-source filter on cross-backend sources is essential — `load_*`
-        functions strip `kernel_source` from dict keys, so an unfiltered
-        cross-backend row would silently clobber an active-backend row on key
-        conflict. Same-backend sources (primary/declared/fallback) use no
-        filter, same as reading the active backend's own file.
+        The four-channel resolution (primary / declared_reuse / fallback /
+        cross_backend — Collector V3 design §6) lives in the compiled engine
+        (`perf_database/source_resolution.rs`) since the deprecation-cleanup
+        PR; the engine's own table loads run the same code, so this report
+        always matches what the engine loaded. This wrapper keeps the
+        established Python surface: it returns the `(file_path,
+        kernel_source_filter)` list, records every ADMITTED source into
+        ``self.data_provenance[op_file_basename]`` (entry shape
+        ``{version, path, channel, exists}``), and re-emits the resolver's
+        structured warnings through the module's established registries
+        (legacy-marker/layout deprecations, unparseable siblings, strict
+        sidecar problems, low-fidelity cross-backend fills). Strict-mode
+        failures (malformed sidecar metadata with ``strict_provenance``)
+        raise ``ValueError`` exactly like the retired in-Python resolver.
         """
-        op_file_basename = op_filename_enum.value
-        records: list[dict[str, object]] = []
-        primary_version_dir = os.path.dirname(primary_path)
-        if os.path.isfile(primary_path) and _version_dir_unusable_for_request(
-            primary_version_dir, system_data_root, strict=self.strict_provenance
-        ):
-            # Only the unstructured legacy marker is a whole-directory veto.
-            # Structured partial tables are admitted above fallback sources so
-            # their successful rows remain authoritative for covered shapes.
-            logger.warning(
-                "Not admitting primary source %s for %s: version dir %s carries legacy %s "
-                "without table/shape-level coverage metadata; sibling sources may still fill.",
+        import aiconfigurator_core as _core
+
+        report = json.loads(
+            _core.resolve_op_sources_report_json(
+                self.systems_root,
+                system_data_root,
+                self.backend,
+                self.version,
+                op_filename_enum.value,
                 primary_path,
-                op_file_basename,
-                primary_version_dir,
-                INCOMPLETE_MARKER,
+                enable_shared_layer=self.enable_shared_layer,
+                strict=self.strict_provenance,
             )
-        else:
-            records.append({"version": self.version, "path": primary_path, "channel": "primary", "ks_filter": None})
+        )
+        self._emit_resolver_warnings(report["warnings"])
+        self.data_provenance[op_filename_enum.value] = [
+            {key: record[key] for key in ("version", "path", "channel", "exists")} for record in report["records"]
+        ]
+        return [
+            (record["path"], set(record["ks_filter"]) if record["ks_filter"] is not None else None)
+            for record in report["records"]
+        ]
 
-        def _finish() -> list[tuple[str, Optional[set[str]]]]:
-            self.data_provenance[op_file_basename] = [
-                {
-                    "version": record["version"],
-                    "path": record["path"],
-                    "channel": record["channel"],
-                    "exists": os.path.isfile(record["path"]),
-                }
-                for record in records
-            ]
-            return [(record["path"], record["ks_filter"]) for record in records]
-
-        if not self.enable_shared_layer:
-            return _finish()
-        if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
-            return _finish()
-        if _op_file_family_from_path(primary_path, system_data_root) == _COMM_FAMILY_DIR:
-            return _finish()
-
-        backend_lower = self.backend.lower()
-
-        # Channel 2 (design §6.3): declared donors from the REQUESTED version
-        # dir's reuse.yaml, in file order. Duplicate (table, from_version)
-        # entries in one reuse.yaml would otherwise admit the same source
-        # twice -- table is fixed to op_file_basename for this call, so
-        # `declared_donor_versions` membership alone is the (table,
-        # from_version) dedupe key; first occurrence wins (AIC-1503 PR4
-        # task 5, FIX 2).
-        declared_donor_versions: set[str] = set()
-        for reuse_entry in _requested_version_reuse_entries(
-            system_data_root, backend_lower, self.version, op_file_basename, strict=self.strict_provenance
-        ):
-            from_version = reuse_entry["from_version"]
-            if from_version in declared_donor_versions:
+    def _emit_resolver_warnings(self, events: list[dict]) -> None:
+        """Re-emit the engine resolver's structured warning events through the
+        module's own loggers and warn-once registries, preserving the retired
+        in-Python resolver's exact messages and dedupe granularity (global
+        per-tree for layout/marker/unparseable warnings; per-database for the
+        low-fidelity cross-backend warning)."""
+        for event in events:
+            kind, args = event["kind"], event["args"]
+            if kind == "primary_veto":
+                logger.warning(
+                    "Not admitting primary source %s for %s: version dir %s carries legacy %s "
+                    "without table/shape-level coverage metadata; sibling sources may still fill.",
+                    args[0],
+                    args[1],
+                    args[2],
+                    INCOMPLETE_MARKER,
+                )
+            elif kind == "legacy_layout":
+                if args[0] not in _LEGACY_LAYOUT_WARNED:
+                    _LEGACY_LAYOUT_WARNED.add(args[0])
+                    logger.warning(
+                        "Legacy perf-data layout (<backend>/<version>) found under %s; "
+                        "migrate to <family>/<backend>/<version> (Collector V3 design §3)",
+                        args[0],
+                    )
+            elif kind == "legacy_marker":
+                _warn_legacy_marker_once(args[0], args[1], args[2])
+            elif kind == "malformed_sidecar":
+                _warn_strict_provenance_once("malformed-sidecar", args[0], args[1])
+            elif kind == "malformed_reuse":
+                _warn_strict_provenance_once("malformed-reuse", args[0], args[1])
+            elif kind == "strict_provenance":
+                _warn_strict_provenance_once(args[0], args[1], args[2])
+            elif kind == "duplicate_declared":
                 logger.debug(
                     "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
-                    reuse_entry["table"],
-                    from_version,
-                    system_data_root,
+                    args[0],
+                    args[1],
+                    args[2],
                 )
-                continue
-            donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
-            if not os.path.isfile(donor_path):
-                continue
-            if _version_dir_unusable_for_request(
-                os.path.dirname(donor_path), system_data_root, strict=self.strict_provenance
-            ):
-                continue
-            records.append(
-                {
-                    "version": from_version,
-                    "path": donor_path,
-                    "channel": "declared_reuse",
-                    "ks_filter": None,
-                }
-            )
-            declared_donor_versions.add(from_version)
-
-        # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
-        # sibling versions can't be ordered against the requested version, so
-        # they're excluded here (logged once) — an explicit declaration still
-        # works for them. Versions already admitted as declared donors above
-        # are excluded too — the dominant real reuse.yaml pattern points
-        # BACKWARD at an earlier sibling, and without this exclusion that same
-        # physical source would be listed twice (channels declared_reuse AND
-        # fallback), doubling I/O and duplicating data_provenance rows.
-        requested_parsed = parse_support_matrix_version(self.version)
-        if requested_parsed is not None:
-            sibling_versions = {v for v, _ in _iter_backend_version_dirs(system_data_root, backend_lower)}
-            sibling_versions.discard(self.version)
-            sibling_versions -= declared_donor_versions
-            earlier_versions = []
-            for sibling_version in sibling_versions:
-                parsed = parse_support_matrix_version(sibling_version)
-                if parsed is None:
-                    _warn_unparseable_sibling_version_once(system_data_root, backend_lower, sibling_version)
-                    continue
-                if parsed >= requested_parsed:
-                    continue  # Never admit newer-than-requested implicitly.
-                earlier_versions.append((parsed, sibling_version))
-            earlier_versions.sort(key=lambda item: item[0], reverse=True)  # nearest-earlier first
-            for _, sibling_version in earlier_versions:
-                sibling_path = resolve_op_data_path(system_data_root, backend_lower, sibling_version, op_file_basename)
-                if not os.path.isfile(sibling_path):
-                    continue
-                if _version_dir_unusable_for_request(
-                    os.path.dirname(sibling_path), system_data_root, strict=self.strict_provenance
-                ):
-                    continue
-                records.append(
-                    {"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None}
-                )
-
-        # Channel 4 aka §6.4 (cross-backend fill, kernel-identity gated). Same
-        # mechanism as before; the active backend is excluded from
-        # `ordered_frameworks` because channels 2-3 above already cover it.
-        per_framework_filter: dict[str, set[str]] = defaultdict(set)
-        per_framework_fallback: dict[str, set[str]] = defaultdict(set)
-        for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):
-            frameworks_lower = {fw.lower() for fw in entry.get("frameworks") or []}
-            if backend_lower not in frameworks_lower:
-                continue  # Active backend isn't listed as a consumer of this kernel_source.
-            ks = entry.get("kernel_source")
-            if not ks:
-                continue
-            tier = entry.get("tier")
-            if tier in ("shared", "shared_fallback"):
-                for fw in frameworks_lower:
-                    per_framework_filter[fw].add(ks)
-                if tier == "shared_fallback":
-                    for fw in frameworks_lower:
-                        per_framework_fallback[fw].add(ks)
-
-        ordered_frameworks = sorted(set(per_framework_filter) - {backend_lower})
-
-        # Sort key for newest-first ordering. Parseable PEP 440 versions form one
-        # group and always rank above unparseable strings — guarantees `1.10.0`
-        # beats `1.2.0` regardless of the lexicographic accident.
-        def _newest_first(version: str) -> tuple:
-            parsed = parse_support_matrix_version(version)
-            return (1, parsed) if parsed is not None else (0, version)
-
-        for framework in ordered_frameworks:
-            ks_filter = per_framework_filter[framework]
-            fallback_only = per_framework_fallback.get(framework, set())
-            fw_versions = sorted(
-                {v for v, _ in _iter_backend_version_dirs(system_data_root, framework)},
-                key=_newest_first,
-                reverse=True,
-            )
-            for sibling_version in fw_versions:
-                sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
-                if not os.path.isfile(sibling_path):
-                    continue
-                if _version_dir_unusable_for_request(
-                    os.path.dirname(sibling_path), system_data_root, strict=self.strict_provenance
-                ):
-                    continue
-                records.append(
-                    {
-                        "version": sibling_version,
-                        "path": sibling_path,
-                        "channel": "cross_backend",
-                        "ks_filter": ks_filter,
-                    }
-                )
-                if fallback_only & ks_filter:
+            elif kind == "unparseable_sibling":
+                _warn_unparseable_sibling_version_once(args[0], args[1], args[2])
+            elif kind == "low_fidelity":
+                if (args[0], args[1]) not in self._fallback_warned:
+                    self._fallback_warned.add((args[0], args[1]))
                     logger.warning(
                         "Loading low-fidelity fallback rows for %s from %s. Queries "
                         "returning these rows are framework-implicit and may differ "
                         "from real backend behavior.",
-                        op_file_basename,
-                        sibling_path,
+                        args[0],
+                        args[1],
                     )
-        return _finish()
+            else:  # pragma: no cover - future resolver kinds surface loudly
+                logger.warning("Unknown source-resolver warning %s: %s", kind, args)
+
+    def _materialize_source_reports(self) -> None:
+        """Resolve every op file once (provenance + warnings), mirroring the
+        retired eager wire sweep (`_compute_perf_db_sources` resolved all op
+        files while building a probe spec). The engine resolves its OWN
+        sources at load; this Python-side sweep exists so ``data_provenance``
+        fills and resolver warnings reach the module logger at the same
+        moment they used to — the first engine-backed table fetch. Idempotent
+        per database instance."""
+        if self.__dict__.get("_source_reports_materialized"):
+            return
+        system_data_root = os.path.join(self.systems_root, self.system_spec["data_dir"])
+        for filename_enum in PerfDataFilename:
+            primary_path = resolve_op_data_path(system_data_root, self.backend, self.version, filename_enum.value)
+            self._build_op_sources(filename_enum, primary_path, system_data_root)
+        # Set only AFTER the sweep completes: a strict-provenance failure
+        # mid-sweep must leave the next call free to retry (and fail closed
+        # again) instead of short-circuiting with data_provenance half-filled.
+        self._source_reports_materialized = True
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
@@ -2554,8 +2599,7 @@ class PerfDatabase:
         return getattr(self, "_shared_layer_mode", False)
 
     def clear_runtime_caches(self) -> None:
-        """Clear cached query/interpolation state while preserving loaded op data."""
-        perf_interp.clear_caches()
+        """Clear cached query state while preserving loaded op data."""
         _cached_configured_database_view.cache_clear()
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
@@ -2563,773 +2607,44 @@ class PerfDatabase:
             if callable(cache_clear):
                 cache_clear()
 
-    @staticmethod
-    def _interp_pr(latency: float, energy: float = 0.0) -> PerformanceResult:
-        """Build a PerformanceResult derived from silicon table data.
-
-        Silicon-table interpolation/extrapolation still uses silicon data; only
-        explicit formula fallbacks should be tagged as ``"empirical"``.
-        """
-        return PerformanceResult(latency, energy=energy, source="silicon")
-
-    def _query_silicon_or_hybrid(
+    def moe_a2a_coverage(
         self,
-        get_silicon: Callable[[], PerformanceResult],
-        get_empirical: Callable[[], float],
-        database_mode: common.DatabaseMode,
-        error_msg: str,
-    ) -> PerformanceResult:
-        """
-        Helper method to query database (SILICON mode) with optional fallback to empirical mode.
-
-        Args:
-            get_silicon: Callable that performs the database query and returns PerformanceResult
-            get_empirical: Callable that returns empirical latency (float) - should be a lambda or function
-                          that captures the necessary arguments
-            database_mode: Database mode (SILICON or HYBRID) - HYBRID mode falls back to empirical only when
-                           silicon data is explicitly reported unavailable
-            error_msg: Error message for logging when query fails
-
-        Returns:
-            PerformanceResult from database query or empirical fallback (if database_mode is HYBRID)
-        """
-        if not error_msg.endswith("."):
-            error_msg += "."
-
-        try:
-            return get_silicon()
-
-        except _MISSING_SILICON_DATA_EXCEPTIONS as e:
-            if database_mode == common.DatabaseMode.HYBRID:
-                debug_msg = error_msg + " Will try empirical mode."
-                logger.debug(debug_msg)
-                return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
-
-            exception_msg = error_msg + " Consider using HYBRID mode."
-            # Missing-data exceptions are control-flow signals. The terminal
-            # caller decides whether the miss is user-visible; logging here would
-            # warn during expected probes such as FallbackOp's SILICON attempt.
-            if not isinstance(e, PerfDataNotAvailableError):
-                missing_data_error = PerfDataNotAvailableError(
-                    f"{exception_msg} Missing silicon data for the requested lookup."
-                )
-                raise missing_data_error from e
-            # Modify the original exception message
-            if e.args:
-                e.args = (str(e.args[0]) + " " + exception_msg,) + e.args[1:]
-            else:
-                e.args = (exception_msg,)
-            raise
-
-    @functools.lru_cache(maxsize=32768)
-    def query_gemm(
-        self,
-        m: int,
-        n: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-        below_grid_sol: bool = False,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query GEMM operation latency and energy. Delegates to ``GEMM``;
-        see ``aiconfigurator_core.sdk.operations.gemm.GEMM._query_gemm_table``.
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-                              Power can be computed as energy/latency (W).
-
-        Example:
-            >>> result = db.query_gemm(4096, 4096, 4096, GEMMQuantMode.nvfp4)
-            >>> latency_ms = float(result)  # Use as float
-            >>> energy_wms = result.energy
-            >>> power_w = result.power  # or result.energy / float(result)
-        """
-        from aiconfigurator_core.sdk.operations.gemm import GEMM
-
-        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode, below_grid_sol=below_grid_sol)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_compute_scale(
-        self,
-        m: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query compute scale latency. Delegates to
-        ``GEMM._query_compute_scale_table``."""
-        from aiconfigurator_core.sdk.operations.gemm import GEMM
-
-        return GEMM._query_compute_scale_table(self, m, k, quant_mode, database_mode)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_scale_matrix(
-        self,
-        m: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query scale matrix latency. Delegates to
-        ``GEMM._query_scale_matrix_table``."""
-        from aiconfigurator_core.sdk.operations.gemm import GEMM
-
-        return GEMM._query_scale_matrix_table(self, m, k, quant_mode, database_mode)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_context_attention(
-        self,
-        b: int,
-        s: int,
-        prefix: int,
-        n: int,
-        n_kv: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-        window_size: int = 0,
-        head_size: int = 128,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query context attention latency. Delegates to
-        ``ContextAttention._query_context_attention_table``."""
-        from aiconfigurator_core.sdk.operations.attention import ContextAttention
-
-        return ContextAttention._query_context_attention_table(
-            self,
-            b,
-            s,
-            prefix,
-            n,
-            n_kv,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            database_mode,
-            window_size,
-            head_size,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_encoder_attention(
-        self,
-        b: int,
-        s: int,
-        n: int,
-        head_size: int,
-        fmha_quant_mode: common.FMHAQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query non-causal encoder attention latency. Delegates to
-        ``EncoderAttention._query_encoder_attention_table``."""
-        from aiconfigurator_core.sdk.operations.attention import EncoderAttention
-
-        return EncoderAttention._query_encoder_attention_table(
-            self,
-            b,
-            s,
-            n,
-            head_size,
-            fmha_quant_mode,
-            database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_generation_attention(
-        self,
-        b: int,
-        s: int,
-        n: int,
-        n_kv: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-        window_size: int = 0,
-        head_size: int = 128,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query generation attention latency. Delegates to
-        ``GenerationAttention._query_generation_attention_table``."""
-        from aiconfigurator_core.sdk.operations.attention import GenerationAttention
-
-        return GenerationAttention._query_generation_attention_table(
-            self,
-            b,
-            s,
-            n,
-            n_kv,
-            kvcache_quant_mode,
-            database_mode,
-            window_size,
-            head_size,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_context_mla(
-        self,
-        b: int,
-        s: int,
-        prefix: int,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query context MLA latency. Delegates to ``ContextMLA._query_context_mla_table``."""
-        from aiconfigurator_core.sdk.operations.mla import ContextMLA
-
-        return ContextMLA._query_context_mla_table(
-            self,
-            b,
-            s,
-            prefix,
-            num_heads,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_generation_mla(
-        self,
-        b: int,
-        s: int,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query generation MLA latency. Delegates to ``GenerationMLA._query_generation_mla_table``."""
-        from aiconfigurator_core.sdk.operations.mla import GenerationMLA
-
-        return GenerationMLA._query_generation_mla_table(
-            self,
-            b,
-            s,
-            num_heads,
-            kvcache_quant_mode,
-            database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_context_mla_module(
-        self,
-        b: int,
-        s: int,
-        prefix: int,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        *,
-        native_num_heads: int | None = None,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query context MLA module latency. Delegates to ``MLAModule._query_context_mla_module_table``."""
-        from aiconfigurator_core.sdk.operations.mla import MLAModule
-
-        return MLAModule._query_context_mla_module_table(
-            self,
-            b,
-            s,
-            prefix,
-            num_heads,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            gemm_quant_mode,
-            native_num_heads=native_num_heads,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_generation_mla_module(
-        self,
-        b: int,
-        s: int,
-        num_heads: int,
-        kv_cache_dtype: common.KVCacheQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        *,
-        native_num_heads: int | None = None,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query generation MLA module latency. Delegates to ``MLAModule._query_generation_mla_module_table``."""
-        from aiconfigurator_core.sdk.operations.mla import MLAModule
-
-        return MLAModule._query_generation_mla_module_table(
-            self,
-            b,
-            s,
-            num_heads,
-            kv_cache_dtype,
-            gemm_quant_mode,
-            native_num_heads=native_num_heads,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_generation_mla(
-        self,
-        b: int,
-        s: int,
-        tp_size: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        attention_backend: str | None = None,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query WideEP generation MLA latency.
-
-        Delegates to ``WideEPGenerationMLA._query_wideep_generation_mla_table``.
-        """
-        from aiconfigurator_core.sdk.operations.mla import WideEPGenerationMLA
-
-        return WideEPGenerationMLA._query_wideep_generation_mla_table(
-            self,
-            b,
-            s,
-            tp_size,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            attention_backend,
-            database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_context_mla(
-        self,
-        b: int,
-        s: int,
-        prefix: int,
-        tp_size: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        attention_backend: str | None = None,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query WideEP context MLA latency. Delegates to ``WideEPContextMLA._query_wideep_context_mla_table``."""
-        from aiconfigurator_core.sdk.operations.mla import WideEPContextMLA
-
-        return WideEPContextMLA._query_wideep_context_mla_table(
-            self,
-            b,
-            s,
-            prefix,
-            tp_size,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            attention_backend,
-            database_mode,
-        )
-
-    # to simplify, we no longer support allreduce_strategy
-    @functools.lru_cache(maxsize=32768)
-    def query_custom_allreduce(
-        self,
-        quant_mode: common.CommQuantMode,
-        tp_size: int,
-        size: int,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query custom AllReduce latency. Delegates to
-        ``CustomAllReduce._query_custom_allreduce_table``."""
-        from aiconfigurator_core.sdk.operations.communication import CustomAllReduce
-
-        return CustomAllReduce._query_custom_allreduce_table(self, quant_mode, tp_size, size, database_mode)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_nccl(
-        self,
-        dtype: common.CommQuantMode,
-        num_gpus: int,
-        operation: str,
-        message_size: int,  # element number
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query NCCL collective communication latency. Delegates to
-        ``NCCL._query_nccl_table``."""
-        from aiconfigurator_core.sdk.operations.communication import NCCL
-
-        return NCCL._query_nccl_table(self, dtype, num_gpus, operation, message_size, database_mode)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_moe(
-        self,
-        num_tokens: int,
-        hidden_size: int,
-        inter_size: int,
-        topk: int,
-        num_experts: int,
-        moe_tp_size: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        is_context: bool = True,
-        moe_backend: str | None = None,
-        database_mode: common.DatabaseMode | None = None,
-        is_gated: bool = True,
-        enable_eplb: bool = False,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``MoE``; see ``operations.moe.MoE._query_moe_table``."""
-        from aiconfigurator_core.sdk.operations.moe import MoE
-
-        return MoE._query_moe_table(
-            self,
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            inter_size=inter_size,
-            topk=topk,
-            num_experts=num_experts,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            quant_mode=quant_mode,
-            workload_distribution=workload_distribution,
-            is_context=is_context,
-            moe_backend=moe_backend,
-            database_mode=database_mode,
-            is_gated=is_gated,
-            enable_eplb=enable_eplb,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_mla_bmm(
-        self,
-        num_tokens: int,
-        num_heads: int,
-        quant_mode: common.GEMMQuantMode,
-        if_pre: bool = True,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query MLA BMM latency. Delegates to ``MLABmm._query_mla_bmm_table``."""
-        from aiconfigurator_core.sdk.operations.mla import MLABmm
-
-        return MLABmm._query_mla_bmm_table(
-            self,
-            num_tokens,
-            num_heads,
-            quant_mode,
-            if_pre,
-            database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_mem_op(
-        self, mem_bytes: int, database_mode: common.DatabaseMode | None = None
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query memory-operation latency analytically (no CSV data).
-
-        Returns:
-            PerformanceResult acting as float (latency in ms); energy via
-            ``.energy``. ``SOL_FULL`` (per-call diagnostic) returns the raw
-            ``(sol_time, sol_math, sol_mem)`` tuple.
-        """
-        gpu_spec = self.system_spec["gpu"]
-
-        def get_sol() -> tuple[float, float, float]:
-            sol_time = mem_bytes / gpu_spec["mem_bw"] * 1000
-            return sol_time, 0, sol_time
-
-        def get_empirical() -> float:
-            return (
-                mem_bytes / (gpu_spec["mem_bw"] * gpu_spec["mem_bw_empirical_scaling_factor"])
-                + gpu_spec["mem_empirical_constant_latency"]
-            ) * 1000
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
-        # EMPIRICAL / SILICON / HYBRID share the same empirical formula. There is
-        # no silicon table for raw memory ops, so always tag as ``empirical``.
-        return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
-
-    def query_mamba2(
-        self,
-        phase: str,
-        kernel_source: str,
-        batch_size: int,
-        seq_len: int | None,
-        d_model: int,
-        d_state: int,
-        d_conv: int,
-        nheads: int,
-        head_dim: int,
-        n_groups: int,
-        chunk_size: int,
-    ) -> PerformanceResult:
-        """Query Mamba2 kernel latency. Delegates to ``Mamba2Kernel._query_mamba2_table``."""
-        from aiconfigurator_core.sdk.operations.mamba import Mamba2Kernel
-
-        return Mamba2Kernel._query_mamba2_table(
-            self,
-            phase,
-            kernel_source,
-            batch_size,
-            seq_len,
-            d_model,
-            d_state,
-            d_conv,
-            nheads,
-            head_dim,
-            n_groups,
-            chunk_size,
-        )
-
-    def query_gdn(
-        self,
-        phase: str,
-        kernel_source: str,
-        batch_size: int,
-        seq_len: int | None,
-        d_model: int,
-        num_k_heads: int,
-        head_k_dim: int,
-        num_v_heads: int,
-        head_v_dim: int,
-        d_conv: int,
-    ) -> PerformanceResult:
-        """Query GDN kernel latency. Delegates to ``GDNKernel._query_gdn_table``."""
-        from aiconfigurator_core.sdk.operations.mamba import GDNKernel
-
-        return GDNKernel._query_gdn_table(
-            self,
-            phase,
-            kernel_source,
-            batch_size,
-            seq_len,
-            d_model,
-            num_k_heads,
-            head_k_dim,
-            num_v_heads,
-            head_v_dim,
-            d_conv,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_p2p(
-        self, message_bytes: int, database_mode: common.DatabaseMode | None = None
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query P2P latency. Delegates to ``P2P._query_p2p_table``."""
-        from aiconfigurator_core.sdk.operations.communication import P2P
-
-        return P2P._query_p2p_table(self, message_bytes, database_mode)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_deepep_ll(
-        self,
-        node_num: int,
-        num_tokens: int,
-        num_experts: int,
-        topk: int,
-        hidden_size: int,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``MoEDispatch``; see
-        ``operations.moe.MoEDispatch._query_wideep_deepep_ll_table``."""
-        from aiconfigurator_core.sdk.operations.moe import MoEDispatch
-
-        return MoEDispatch._query_wideep_deepep_ll_table(
-            self,
-            node_num=node_num,
-            num_tokens=num_tokens,
-            num_experts=num_experts,
-            topk=topk,
-            hidden_size=hidden_size,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_deepep_normal(
-        self,
-        node_num: int,
-        num_tokens: int,
-        num_experts: int,
-        topk: int,
-        hidden_size: int,
-        sms: int,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``MoEDispatch``; see
-        ``operations.moe.MoEDispatch._query_wideep_deepep_normal_table``."""
-        from aiconfigurator_core.sdk.operations.moe import MoEDispatch
-
-        return MoEDispatch._query_wideep_deepep_normal_table(
-            self,
-            node_num=node_num,
-            num_tokens=num_tokens,
-            num_experts=num_experts,
-            topk=topk,
-            hidden_size=hidden_size,
-            sms=sms,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_moe_compute(
-        self,
-        num_tokens: int,
-        hidden_size: int,
-        inter_size: int,
-        topk: int,
-        num_experts: int,
-        num_slots: int,
-        moe_tp_size: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        database_mode: common.DatabaseMode | None = None,
-        is_gated: bool = True,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``TrtLLMWideEPMoE``; see
-        ``operations.moe.TrtLLMWideEPMoE._query_compute_table``."""
-        from aiconfigurator_core.sdk.operations.moe import TrtLLMWideEPMoE
-
-        return TrtLLMWideEPMoE._query_compute_table(
-            self,
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            inter_size=inter_size,
-            topk=topk,
-            num_experts=num_experts,
-            num_slots=num_slots,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            quant_mode=quant_mode,
-            workload_distribution=workload_distribution,
-            database_mode=database_mode,
-            is_gated=is_gated,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_trtllm_alltoall(
-        self,
-        op_name: str,
-        num_tokens: int,
         hidden_size: int,
         topk: int,
         num_experts: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        node_num: int | None = None,
-        database_mode: common.DatabaseMode | None = None,
-        moe_backend: str | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``TrtLLMWideEPMoEDispatch``; see
-        ``operations.moe.TrtLLMWideEPMoEDispatch._query_alltoall_table``."""
-        from aiconfigurator_core.sdk.operations.moe import TrtLLMWideEPMoEDispatch
-
-        return TrtLLMWideEPMoEDispatch._query_alltoall_table(
-            self,
-            op_name=op_name,
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            topk=topk,
-            num_experts=num_experts,
-            moe_ep_size=moe_ep_size,
-            quant_mode=quant_mode,
-            node_num=node_num,
-            database_mode=database_mode,
-            moe_backend=moe_backend,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_moe_a2a(
-        self,
-        comm_backend: str,
-        phase: str,
-        comm_dtype: str,
-        ep_size: int,
-        node_num: int,
-        hidden_size: int,
-        topk: int,
-        num_experts: int,
-        num_tokens: int,
-        sms: int = 0,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """Query the unified large-EP MoE all-to-all comm table. Delegates to
-        ``MoEAllToAll``; see ``operations.moe_comm.MoEAllToAll._query_a2a_table``."""
-        from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
-
-        return MoEAllToAll._query_a2a_table(
-            self,
-            comm_backend=comm_backend,
-            phase=phase,
-            comm_dtype=comm_dtype,
-            ep_size=ep_size,
-            node_num=node_num,
-            hidden_size=hidden_size,
-            topk=topk,
-            num_experts=num_experts,
-            num_tokens=num_tokens,
-            sms=sms,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_moe_expert_compute(
-        self,
-        kernel_source: str,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        inference_phase: str,
-        topk: int,
-        num_experts: int,
-        num_slots: int,
-        hidden_size: int,
-        inter_size: int,
-        moe_tp_size: int,
-        moe_ep_size: int,
-        num_tokens: int,
-        is_gated: bool = True,
-        enable_eplb: bool = False,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """Query the unified large-EP MoE expert-compute table. Delegates to
-        ``MoEExpertCompute``; see ``operations.moe_comm.MoEExpertCompute._query_ep_table``."""
-        from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
-
-        return MoEExpertCompute._query_ep_table(
-            self,
-            kernel_source=kernel_source,
-            quant_mode=quant_mode,
-            workload_distribution=workload_distribution,
-            inference_phase=inference_phase,
-            topk=topk,
-            num_experts=num_experts,
-            num_slots=num_slots,
-            hidden_size=hidden_size,
-            inter_size=inter_size,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            num_tokens=num_tokens,
-            is_gated=is_gated,
-            enable_eplb=enable_eplb,
-            database_mode=database_mode,
-        )
-
-    def moe_a2a_coverage(self, hidden_size: int, topk: int, num_experts: int) -> dict[str, set[tuple[int, int]]]:
+        model_quantization=None,
+        inference_phase: str | None = None,
+    ) -> dict[str, set[tuple[int, int]]]:
         """Probe moe_a2a coverage for one model shape (PR 2's enumerator contract).
 
         Returns ``comm_backend -> {(ep_size, node_num)}`` where BOTH the
         dispatch AND combine phases carry a non-empty token curve for the
-        shape, under ANY ``comm_dtype`` and ANY ``sms`` (the prepare phase is
-        not required). Read-only key walk over the table bound by
+        shape. When model quantization and inference phase are supplied, each
+        phase must exist under the exact serving communication dtype; omitted
+        arguments preserve the legacy ANY-dtype introspection behavior. SMS
+        remains an ANY axis and prepare is not required. Read-only key walk over the table bound by
         ``MoEAllToAll.load_data`` — no query execution, and non-vivifying
         (``.get`` only: injected stores may be auto-vivifying defaultdicts).
         An absent or unloaded table — including a ``LoadedOpData`` wrapping
         ``None``, which raises on item access but is falsy — yields ``{}``.
         Deliberately not lru_cached: the returned sets are mutable.
         """
-        from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
+        from aiconfigurator_core.sdk.operations.moe_comm import (
+            MOE_A2A_BACKENDS,
+            MoEAllToAll,
+            communication_dtype_for,
+        )
 
         MoEAllToAll.load_data(self)
         table = self._moe_a2a_data
         if not table:
             return {}
 
-        def pairs_for(by_phase, phase: str) -> set[tuple[int, int]]:
+        def pairs_for(by_phase, phase: str, required_dtype: str | None) -> set[tuple[int, int]]:
             pairs: set[tuple[int, int]] = set()
-            for by_ep in (by_phase.get(phase) or {}).values():  # ANY comm_dtype
+            by_dtype = by_phase.get(phase) or {}
+            dtype_slices = by_dtype.values() if required_dtype is None else (by_dtype.get(required_dtype) or {},)
+            for by_ep in dtype_slices:
                 for ep_size, by_node in by_ep.items():
                     for node_num, by_hidden in by_node.items():
                         by_sms = ((by_hidden.get(hidden_size) or {}).get(topk) or {}).get(num_experts) or {}
@@ -3339,7 +2654,27 @@ class PerfDatabase:
 
         coverage: dict[str, set[tuple[int, int]]] = {}
         for comm_backend, by_phase in table.items():
-            covered = pairs_for(by_phase, "dispatch") & pairs_for(by_phase, "combine")
+            required = {"dispatch": None, "combine": None}
+            if model_quantization is not None and inference_phase is not None:
+                backend_spec = MOE_A2A_BACKENDS.get(comm_backend)
+                if backend_spec is None or inference_phase not in backend_spec.inference_phases:
+                    continue
+                try:
+                    required = {
+                        phase: communication_dtype_for(
+                            system=self.system,
+                            comm_backend=comm_backend,
+                            model_quantization=model_quantization,
+                            communication_phase=phase,
+                            inference_phase=inference_phase,
+                        )
+                        for phase in ("dispatch", "combine")
+                    }
+                except ValueError:
+                    continue
+            covered = pairs_for(by_phase, "dispatch", required["dispatch"]) & pairs_for(
+                by_phase, "combine", required["combine"]
+            )
             if covered:
                 coverage[comm_backend] = covered
         return coverage
@@ -3379,308 +2714,39 @@ class PerfDatabase:
                     covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
         return covered
 
-    # ═══════════════════════════════════════════════════════════════════
-    # DSA (DeepSeek Sparse Attention) Queries
-    # ═══════════════════════════════════════════════════════════════════
-
-    @functools.lru_cache(maxsize=32768)
-    def query_context_dsa_module(
+    def legacy_moe_compute_coverage(
         self,
-        b: int,
-        s: int,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        database_mode: common.DatabaseMode | None = None,
-        *,
-        prefix: int = 0,
-        architecture: str = DEFAULT_DSA_ARCHITECTURE,
-        index_n_heads: int | None = None,
-        index_head_dim: int | None = None,
-        index_topk: int | None = None,
-        dsa_backend: str = "trtllm",
-        skip_indexer: bool = False,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query context DSA module latency. Delegates to
-        ``ContextDSAModule._query_context_dsa_module_table``. ``skip_indexer``
-        selects the GLM-5.2 reuse-layer table."""
-        from aiconfigurator_core.sdk.operations.dsa import ContextDSAModule
-
-        return ContextDSAModule._query_context_dsa_module_table(
-            self,
-            b,
-            s,
-            num_heads,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            gemm_quant_mode,
-            database_mode,
-            prefix=prefix,
-            architecture=architecture,
-            index_n_heads=index_n_heads,
-            index_head_dim=index_head_dim,
-            index_topk=index_topk,
-            dsa_backend=dsa_backend,
-            skip_indexer=skip_indexer,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_generation_dsa_module(
-        self,
-        b: int,
-        s: int,
-        num_heads: int,
-        kv_cache_dtype: common.KVCacheQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        database_mode: common.DatabaseMode | None = None,
-        *,
-        architecture: str = DEFAULT_DSA_ARCHITECTURE,
-        index_n_heads: int | None = None,
-        index_head_dim: int | None = None,
-        index_topk: int | None = None,
-        dsa_backend: str = "trtllm",
-        skip_indexer: bool = False,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Query generation DSA module latency. Delegates to
-        GenerationDSAModule._query_generation_dsa_module_table. ``skip_indexer``
-        selects the GLM-5.2 reuse-layer table."""
-        from aiconfigurator_core.sdk.operations.dsa import GenerationDSAModule
-
-        return GenerationDSAModule._query_generation_dsa_module_table(
-            self,
-            b,
-            s,
-            num_heads,
-            kv_cache_dtype,
-            gemm_quant_mode,
-            database_mode,
-            architecture=architecture,
-            index_n_heads=index_n_heads,
-            index_head_dim=index_head_dim,
-            index_topk=index_topk,
-            dsa_backend=dsa_backend,
-            skip_indexer=skip_indexer,
-        )
-
-    @staticmethod
-    def _causal_limited_pairs(batch_size: int, query_len: int, prefix: int, limit: int) -> int:
-        """Return sum over queries of min(prefix + query_index + 1, limit), times batch."""
-        if limit <= 0 or query_len <= 0:
-            return 0
-        full_s = prefix + query_len
-        if prefix >= limit:
-            return batch_size * query_len * limit
-        if full_s <= limit:
-            return batch_size * (full_s * (full_s + 1) - prefix * (prefix + 1)) // 2
-        ramp = batch_size * (limit * (limit + 1) - prefix * (prefix + 1)) // 2
-        saturated = batch_size * (full_s - limit) * limit
-        return ramp + saturated
-
-    @staticmethod
-    def _sum_floor_upto(n: int, divisor: int) -> int:
-        """Return sum_{i=0..n} floor(i / divisor)."""
-        if n < 0:
-            return 0
-        q, r = divmod(n, divisor)
-        return divisor * q * (q - 1) // 2 + q * (r + 1)
-
-    @classmethod
-    def _compressed_context_pairs(cls, batch_size: int, query_len: int, prefix: int, ratio: int, limit: int) -> int:
-        if ratio <= 0 or query_len <= 0 or limit <= 0:
-            return 0
-        start = prefix + 1
-        end = prefix + query_len
-        saturation_start = limit * ratio
-        if end < saturation_start:
-            total = cls._sum_floor_upto(end, ratio) - cls._sum_floor_upto(start - 1, ratio)
-        elif start >= saturation_start:
-            total = query_len * limit
-        else:
-            ramp = cls._sum_floor_upto(saturation_start - 1, ratio) - cls._sum_floor_upto(start - 1, ratio)
-            total = ramp + (end - saturation_start + 1) * limit
-        return batch_size * total
-
-    @functools.lru_cache(maxsize=32768)
-    def query_mhc_module(
-        self,
-        num_tokens: int,
-        hidden_size: int,
-        hc_mult: int,
-        sinkhorn_iters: int,
-        op: str,
-        quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``DeepSeekV4MHCModule``; see
-        ``aiconfigurator_core.sdk.operations.dsv4.DeepSeekV4MHCModule._query_mhc_table``.
-        """
-        from aiconfigurator_core.sdk.operations.dsv4 import DeepSeekV4MHCModule
-
-        return DeepSeekV4MHCModule._query_mhc_table(
-            self,
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
-            sinkhorn_iters=sinkhorn_iters,
-            op=op,
-            quant_mode=quant_mode,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_context_deepseek_v4_attention_module(
-        self,
-        b: int,
-        s: int,
-        num_heads: int,
-        native_heads: int,
-        tp_size: int,
-        hidden_size: int,
-        q_lora_rank: int,
-        o_lora_rank: int,
-        head_dim: int,
-        rope_head_dim: int,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
-        window_size: int,
-        compress_ratio: int,
-        o_groups: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        database_mode: common.DatabaseMode | None = None,
-        *,
-        prefix: int = 0,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``ContextDeepSeekV4AttentionModule``; see
-        ``operations.dsv4.ContextDeepSeekV4AttentionModule._query_context_attn_table``.
-        """
-        from aiconfigurator_core.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
-
-        return ContextDeepSeekV4AttentionModule._query_context_attn_table(
-            self,
-            b=b,
-            s=s,
-            num_heads=num_heads,
-            native_heads=native_heads,
-            tp_size=tp_size,
-            hidden_size=hidden_size,
-            q_lora_rank=q_lora_rank,
-            o_lora_rank=o_lora_rank,
-            head_dim=head_dim,
-            rope_head_dim=rope_head_dim,
-            index_n_heads=index_n_heads,
-            index_head_dim=index_head_dim,
-            index_topk=index_topk,
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            o_groups=o_groups,
-            kvcache_quant_mode=kvcache_quant_mode,
-            fmha_quant_mode=fmha_quant_mode,
-            gemm_quant_mode=gemm_quant_mode,
-            database_mode=database_mode,
-            prefix=prefix,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_generation_deepseek_v4_attention_module(
-        self,
-        b: int,
-        s: int,
-        num_heads: int,
-        native_heads: int,
-        tp_size: int,
-        hidden_size: int,
-        q_lora_rank: int,
-        o_lora_rank: int,
-        head_dim: int,
-        rope_head_dim: int,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
-        window_size: int,
-        compress_ratio: int,
-        o_groups: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult | tuple[float, float, float]:
-        """Delegates to ``GenerationDeepSeekV4AttentionModule``; see
-        ``operations.dsv4.GenerationDeepSeekV4AttentionModule._query_generation_attn_table``.
-        """
-        from aiconfigurator_core.sdk.operations.dsv4 import GenerationDeepSeekV4AttentionModule
-
-        return GenerationDeepSeekV4AttentionModule._query_generation_attn_table(
-            self,
-            b=b,
-            s=s,
-            num_heads=num_heads,
-            native_heads=native_heads,
-            tp_size=tp_size,
-            hidden_size=hidden_size,
-            q_lora_rank=q_lora_rank,
-            o_lora_rank=o_lora_rank,
-            head_dim=head_dim,
-            rope_head_dim=rope_head_dim,
-            index_n_heads=index_n_heads,
-            index_head_dim=index_head_dim,
-            index_topk=index_topk,
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            o_groups=o_groups,
-            kvcache_quant_mode=kvcache_quant_mode,
-            fmha_quant_mode=fmha_quant_mode,
-            gemm_quant_mode=gemm_quant_mode,
-            database_mode=database_mode,
-        )
-
-    @functools.lru_cache(maxsize=32768)
-    def query_dsv4_megamoe_module(
-        self,
-        num_tokens: int,
         hidden_size: int,
         inter_size: int,
         topk: int,
         num_experts: int,
-        moe_tp_size: int,
-        moe_ep_size: int,
         quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        is_context: bool = True,
-        source_policy: str = "random",
-        pre_dispatch: str = "sglang_jit",
-        num_fused_shared_experts: int = 0,
-        kernel_source: str = "deepgemm_megamoe",
-        kernel_dtype: str = "fp8_fp4",
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """Delegates to ``DeepSeekV4MegaMoEModule``; see
-        ``operations.dsv4.DeepSeekV4MegaMoEModule._query_megamoe_table``.
-        """
-        from aiconfigurator_core.sdk.operations.dsv4 import DeepSeekV4MegaMoEModule
+    ) -> set[int]:
+        """Return EP sizes covered by the regular expert-kernel MoE table.
 
-        return DeepSeekV4MegaMoEModule._query_megamoe_table(
-            self,
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            inter_size=inter_size,
-            topk=topk,
-            num_experts=num_experts,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            quant_mode=quant_mode,
-            workload_distribution=workload_distribution,
-            is_context=is_context,
-            source_policy=source_policy,
-            pre_dispatch=pre_dispatch,
-            num_fused_shared_experts=num_fused_shared_experts,
-            kernel_source=kernel_source,
-            kernel_dtype=kernel_dtype,
-            database_mode=database_mode,
-        )
+        vLLM and TensorRT-LLM publish expert compute in ``moe_perf.parquet``
+        rather than the WideEP-specific compute tables.  This probe is used
+        only to gate the compute leg of a graph whose communication is already
+        owned by :class:`MoEAllToAll`; it does not enable the legacy
+        ``MoEDispatch``/NCCL graph.
+        """
+        from aiconfigurator_core.sdk.operations.moe import MoE
+
+        MoE.load_data(self)
+        table = self._moe_data
+        if not table:
+            return set()
+
+        covered: set[int] = set()
+        for by_topk in (table.get(quant_mode) or {}).values():  # ANY distribution
+            by_hidden = ((by_topk.get(topk) or {}).get(num_experts) or {}).get(hidden_size) or {}
+            by_ep = (by_hidden.get(inter_size) or {}).get(1) or {}  # moe_tp == 1
+            covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
+        return covered
+
+    # ═══════════════════════════════════════════════════════════════════
+    # DSA (DeepSeek Sparse Attention) Queries
+    # ═══════════════════════════════════════════════════════════════════
 
 
 if __name__ == "__main__":

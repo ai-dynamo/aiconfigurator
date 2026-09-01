@@ -67,6 +67,57 @@ class TestCLIArgumentParsing:
         action = next(a for a in mode_parser._actions if a.dest == "free_gpu_memory_fraction")
         assert action.default is None
 
+    def test_estimate_accepts_role_specific_memory_fractions(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--prefill-free-gpu-memory-fraction",
+                "0.85",
+                "--decode-free-gpu-memory-fraction",
+                "0.7",
+                "--prefill-max-seq-len",
+                "9000",
+                "--decode-max-seq-len",
+                "11000",
+            ]
+        )
+
+        assert args.prefill_free_gpu_memory_fraction == 0.85
+        assert args.decode_free_gpu_memory_fraction == 0.7
+        assert args.prefill_max_seq_len == 9000
+        assert args.decode_max_seq_len == 11000
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("--prefill-free-gpu-memory-fraction", "0"),
+            ("--prefill-free-gpu-memory-fraction", "1.01"),
+            ("--prefill-free-gpu-memory-fraction", "nan"),
+            ("--prefill-free-gpu-memory-fraction", "inf"),
+            ("--decode-free-gpu-memory-fraction", "0"),
+            ("--decode-free-gpu-memory-fraction", "1.01"),
+            ("--decode-free-gpu-memory-fraction", "nan"),
+            ("--decode-free-gpu-memory-fraction", "inf"),
+        ],
+    )
+    def test_estimate_rejects_invalid_role_specific_memory_fractions(self, cli_parser, option, value):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "estimate",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--system",
+                    "h200_sxm",
+                    option,
+                    value,
+                ]
+            )
+
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]

@@ -82,6 +82,15 @@ def test_hash_closures_yaml_covers_every_registry_module():
     assert missing == set()
 
 
+def test_provenance_modules_include_active_vllm_xpu_registry():
+    modules = provenance.enumerate_provenance_modules()
+    assert {
+        "collector.vllm.collect_attn_xpu",
+        "collector.vllm.collect_gemm_xpu",
+        "collector.vllm.collect_moe_xpu",
+    } <= modules
+
+
 def test_hash_closures_yaml_has_no_stale_entries():
     # Entries for modules no registry or standalone declaration references
     # anymore would be silently wrong — keep the file exact.
@@ -148,6 +157,19 @@ def test_collector_hash_missing_closure_file_raises(tmp_path):
         provenance.collector_hash("collector.sglang.collect_gemm", tmp_path, FAKE_CLOSURES)
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "collector.vllm.collect_attn_xpu",
+        "collector.vllm.collect_gemm_xpu",
+        "collector.vllm.collect_moe_xpu",
+    ],
+)
+def test_real_xpu_registry_modules_are_hashable(module):
+    closures = provenance.load_closures(HASH_CLOSURES_PATH)
+    assert provenance.collector_hash(module, REPO_ROOT, closures).startswith("sha256:")
+
+
 def test_collector_hash_stable_across_repo_relocation(tmp_path_factory):
     # Rebase-stability: content hash must not depend on the absolute path the
     # repo happens to live at.
@@ -196,11 +218,14 @@ def test_case_plan_hash_empty_set_is_stable():
     ("unresolved_failed_count", "had_module_failure", "expected"),
     [
         (0, False, provenance.STATUS_COMPLETE),
-        (1, False, provenance.STATUS_PARTIAL),
+        # Owner decision 2026-08-08 (PR #1486): recorded per-case failures
+        # are DATA (failure_handling.md) and no longer demote a table —
+        # only a module-level collection failure does.
+        (1, False, provenance.STATUS_COMPLETE),
         (0, True, provenance.STATUS_PARTIAL),
         (3, True, provenance.STATUS_PARTIAL),
     ],
-    ids=["all-passed", "unresolved-failures", "module-collection-failure", "both"],
+    ids=["all-passed", "recorded-failures-are-data", "module-collection-failure", "both"],
 )
 def test_derive_table_status(unresolved_failed_count, had_module_failure, expected):
     assert (
@@ -221,6 +246,7 @@ RUNTIME_META = {
     "framework": "sglang",
     "version": "0.5.14",
     "image": "lmsysorg/sglang:v0.5.14",
+    "image_variant": "linux/amd64",
     "image_digest": "sha256:" + "0" * 64,
 }
 
@@ -259,6 +285,7 @@ def test_write_collection_meta_schema_matches_design_5(tmp_path):
         "framework": "sglang",
         "version": "0.5.14",
         "image": "lmsysorg/sglang:v0.5.14",
+        "image_variant": "linux/amd64",
         "image_digest": "sha256:" + "0" * 64,
     }
     assert set(doc["tables"]) == {"moe_perf", "gemm_perf"}
@@ -280,6 +307,42 @@ def test_write_collection_meta_omits_absent_optional_runtime_fields(tmp_path):
     assert "image_digest" not in doc["runtime"]
 
 
+def test_write_collection_meta_preserves_pinned_source_and_abi(tmp_path):
+    runtime_meta = {
+        **RUNTIME_META,
+        "source_commit": "1" * 40,
+        "abi": {
+            "deep_ep": "d4f41e4e93",
+            "nvshmem": "3.3.24",
+            "nccl": ">=2.30.4",
+        },
+    }
+    meta_path = provenance.write_collection_meta(tmp_path, runtime_meta, TABLES)
+    runtime = yaml.safe_load(meta_path.read_text(encoding="utf-8"))["runtime"]
+    assert runtime["source_commit"] == "1" * 40
+    assert runtime["abi"] == runtime_meta["abi"]
+
+
+def test_write_collection_meta_preserves_backend_runtime_evidence(tmp_path):
+    runtime_meta = {
+        **RUNTIME_META,
+        "live_abi": {"deep_ep_api": "ElasticBuffer", "nccl": "2.30.4"},
+        "transport": {"allow_mnnvl": True, "allow_nvlink": True},
+        "backend_capability": {
+            "backend": "deepep_v2",
+            "topology_source": "nccl_lsa",
+            "num_scaleout_ranks": "2",
+            "num_scaleup_ranks": "4",
+        },
+    }
+    meta_path = provenance.write_collection_meta(tmp_path, runtime_meta, TABLES)
+    runtime = yaml.safe_load(meta_path.read_text(encoding="utf-8"))["runtime"]
+
+    assert runtime["live_abi"] == runtime_meta["live_abi"]
+    assert runtime["transport"] == runtime_meta["transport"]
+    assert runtime["backend_capability"] == runtime_meta["backend_capability"]
+
+
 def test_write_collection_meta_deterministic_key_order(tmp_path):
     meta_path = provenance.write_collection_meta(tmp_path, RUNTIME_META, TABLES)
     text = meta_path.read_text(encoding="utf-8")
@@ -289,8 +352,14 @@ def test_write_collection_meta_deterministic_key_order(tmp_path):
 
     all_lines = text.splitlines()
     runtime_start = all_lines.index("runtime:") + 1
-    runtime_lines = all_lines[runtime_start : runtime_start + 4]
-    assert [line.split(":")[0].strip() for line in runtime_lines] == ["framework", "version", "image", "image_digest"]
+    runtime_lines = all_lines[runtime_start : runtime_start + 5]
+    assert [line.split(":")[0].strip() for line in runtime_lines] == [
+        "framework",
+        "version",
+        "image",
+        "image_variant",
+        "image_digest",
+    ]
 
     # tables render in sorted (not insertion) order.
     tables_section = text.split("tables:", 1)[1]

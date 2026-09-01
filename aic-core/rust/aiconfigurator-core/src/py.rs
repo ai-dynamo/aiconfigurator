@@ -14,9 +14,7 @@
 //!   releases the GIL around the Rust compute via [`Python::allow_threads`],
 //!   so the Rust compute runs without holding the GIL.
 //! * **Rust → Python → Rust (embedded path).** [`AicEngineBuilder`] is the
-//!   preferred Rust entry point. The flat [`build_aic_engine`] function remains
-//!   as a source-compatibility adapter for callers such as the Dynamo Mocker.
-//!   Both cross into Python once to run
+//!   Rust entry point. It crosses into Python once to run
 //!   `aiconfigurator_core.sdk.engine.compile_engine`, then build an [`Engine`]
 //!   from the returned bincode bytes. After that the `predict_*` hot path is
 //!   pure Rust with no GIL.
@@ -24,7 +22,8 @@
 //! Two error conversions live inline here (NOT in `common/error.rs`, which must
 //! stay free of the pyo3 dependency):
 //! * `AicError → PyErr` (`aic_to_py`) for the `#[pymethods]` boundary.
-//! * `PyErr → AicError` (inline in [`build_aic_engine`]) for the embedded path.
+//! * `PyErr → AicError` (inline in [`compile_engine_from_request`]) for the
+//!   embedded path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,8 +35,8 @@ use pyo3::types::PyType;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{
-    Engine, PerOpSolValue, PerOpValue, RuntimeConfig, StaticMode, StaticResult,
-    DEFAULT_STATIC_STRIDE,
+    Engine, PerOpSolValue, PerOpValue, PerOpValueWithMetadata, RuntimeConfig, StaticMode,
+    StaticResult, DEFAULT_STATIC_STRIDE,
 };
 use crate::{BackendKind, DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
@@ -59,6 +58,7 @@ fn _build_smoke() -> u32 {
 static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static MISSING_SYSTEM_FLOPS_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static SOL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 
 /// Resolve (and memoize) one sdk error class; `None` when the sdk is not
 /// importable, so the caller falls back to `PyValueError`.
@@ -93,6 +93,9 @@ fn sdk_error_type(
 /// * `AicError::MissingSystemFlops` raises
 ///   `aiconfigurator_core.sdk.errors.MissingSystemFlopsError` (strict per-dtype
 ///   `*_tc_flops` resolution — a `ValueError` subclass on the Python side);
+/// * `AicError::SolNotImplemented` raises
+///   `aiconfigurator_core.sdk.errors.SolNotImplementedError` (the analytic SOL
+///   path has no implementation for a required operator);
 /// * everything else stays `PyValueError`.
 ///
 /// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
@@ -108,6 +111,8 @@ fn aic_to_py(e: AicError) -> PyErr {
         ))
     } else if matches!(e, AicError::MissingSystemFlops(_)) {
         Some((&MISSING_SYSTEM_FLOPS_ERROR, "MissingSystemFlopsError"))
+    } else if matches!(e, AicError::SolNotImplemented(_)) {
+        Some((&SOL_NOT_IMPLEMENTED_ERROR, "SolNotImplementedError"))
     } else {
         None
     };
@@ -188,7 +193,7 @@ pub struct AicEngine {
 
 impl AicEngine {
     /// Internal constructor shared by [`AicEngine::from_spec`] and
-    /// [`build_aic_engine`].
+    /// [`AicEngineBuilder::build`].
     fn new(engine: Engine) -> Self {
         AicEngine {
             inner: Arc::new(engine),
@@ -463,6 +468,52 @@ impl AicEngine {
             .map_err(aic_to_py)
     }
 
+    /// Internal metadata-bearing counterpart of `run_static_per_op`; each
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn _run_static_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
+    ) -> PyResult<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>)> {
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .run_static_per_op_with_metadata(&rt, mode, stride)
+        })
+        .map_err(aic_to_py)
+    }
+
     /// `mixed_step_breakdown` with the per-op values kept: returns
     /// ``(shared_non_attention, context_attention, decode_attention)`` lists
     /// of ``(name, latency_ms, energy_wms, source)`` tuples. The
@@ -498,6 +549,43 @@ impl AicEngine {
         .map_err(aic_to_py)
     }
 
+    /// Internal metadata-bearing counterpart of `mixed_step_breakdown_per_op`;
+    /// each fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn _mixed_step_breakdown_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(
+        Vec<PerOpValueWithMetadata>,
+        Vec<PerOpValueWithMetadata>,
+        Vec<PerOpValueWithMetadata>,
+    )> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown_per_op_with_metadata(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
     /// `decode_step_latency` with the per-op values kept: returns a list of
     /// ``(name, latency_ms, energy_wms, source)`` tuples for one
     /// generation-only step.
@@ -514,6 +602,30 @@ impl AicEngine {
         py.allow_threads(|| {
             self.inner
                 .decode_step_per_op(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `decode_step_per_op`; each
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn _decode_step_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<Vec<PerOpValueWithMetadata>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.decode_step_per_op_with_metadata(
+                gen_tokens,
+                isl,
+                osl,
+                gen_seq_imbalance_correction_scale,
+            )
         })
         .map_err(aic_to_py)
     }
@@ -650,14 +762,34 @@ impl AicEngine {
         })
         .map_err(aic_to_py)
     }
+
+    /// Engine-side table view (PR-6): the raw collected data plane for one
+    /// retired Python loader, in that loader's exact nested-dict shape.
+    ///
+    /// ``attribute`` is the PerfDatabase attribute the loader used to fill
+    /// (``"_gemm_data"``, ...; the DSV4 sparse sub-tables address as
+    /// ``"_dsv4_sparse_kernel_data.<sub>"``). Returns ``None`` exactly when
+    /// the Python loader returned ``None`` (every source file missing);
+    /// otherwise an insertion-ordered JSON object whose string keys the
+    /// Python side rehydrates into enum/int/tuple keys per family. Views are
+    /// folded fresh from the parquet sources on every call — they are the
+    /// diagnostic/enumeration surface, not the query path, and deliberately
+    /// bypass the query grids' load-time normalizations (SOL clamping etc.).
+    fn table_view_json(&self, py: Python<'_>, attribute: &str) -> PyResult<Option<String>> {
+        py.allow_threads(|| {
+            crate::perf_database::table_view::table_view_json(self.inner.database(), attribute)
+        })
+        .map_err(aic_to_py)
+    }
 }
 
 /// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
 /// op-transfer). Python's `compile_engine` builds the `EngineSpec` as a JSON
 /// string (externally-tagged `Op` variants + `EngineConfig`) — JSON is the
 /// debuggable wire and the only format Python can produce — and calls this to
-/// get the bincode bytes that `AicEngine.from_spec` / `build_aic_engine`
-/// consume. `serde_json` round-trips `EngineConfig`'s `#[serde(flatten)]`
+/// get the bincode bytes that `AicEngine::from_spec` /
+/// [`AicEngineBuilder::build`] consume. `serde_json` round-trips
+/// `EngineConfig`'s `#[serde(flatten)]`
 /// cleanly (only bincode rejected it; that is exactly why `to_bincode`
 /// re-encodes `engine` as JSON inside the bincode payload).
 #[pyfunction]
@@ -667,11 +799,131 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
     spec.to_bincode().map_err(aic_to_py)
 }
 
+/// Constant per-op weight bytes for a JSON op list (PR-6): the batch FFI
+/// behind Python's `Operation.get_weights`. Weights are structural (computed
+/// from op fields alone, never from perf tables), so this is a module-level
+/// function — no engine handle, no database. Input is the same
+/// externally-tagged `Vec<Op>` JSON `evaluate_ops_json` takes (built by
+/// `engine.build_ops_json`); output is one f64 per op, in order.
+#[pyfunction]
+fn weights_ops_json(ops_json: &str) -> PyResult<Vec<f64>> {
+    let ops: Vec<crate::operators::Op> = serde_json::from_str(ops_json)
+        .map_err(|e| PyValueError::new_err(format!("ops JSON decode: {e}")))?;
+    Ok(ops.iter().map(crate::operators::Op::weight_bytes).collect())
+}
+
+/// The GEMM per-quant achieved-util LEVEL table, `(memory, compute, level)`
+/// rows (PR-6): the single source behind Python's former
+/// `_GEMM_QUANT_UTIL_LEVEL` mirror — Python rebuilds its dict from this, so
+/// the two sides can never drift again (#1524-class sync pain).
+#[pyfunction]
+fn gemm_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::gemm::GEMM_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The MoE per-quant achieved-util LEVEL table — see `gemm_quant_util_levels`.
+#[pyfunction]
+fn moe_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::moe::MOE_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The table-view attribute registry, `(attribute, [source basenames])` rows
+/// (PR-6): the single source behind the Python side's `VIEW_KEY_LAYERS` /
+/// baseline-codec attribute inventories — a completeness test set-compares
+/// them against this export so the four formerly hand-synced sites can never
+/// drift silently again (same pattern as `gemm_quant_util_levels`).
+#[pyfunction]
+fn table_view_attributes() -> Vec<(String, Vec<String>)> {
+    crate::perf_database::table_view::TABLE_VIEW_ATTRIBUTES
+        .iter()
+        .map(|(attribute, basenames)| {
+            (
+                attribute.to_string(),
+                basenames.iter().map(|b| b.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Shared-layer source resolution report for ONE op-file basename (the
+/// deprecation-cleanup PR: the engine owns resolution,
+/// `perf_database/source_resolution.rs`). Returns JSON
+/// `{"records": [{version, path, channel, exists, ks_filter}...],
+///   "warnings": [{kind, args}...]}` — the Python `PerfDatabase` rebuilds its
+/// `data_provenance` diagnostics from `records` and re-emits `warnings`
+/// through its established logging registries. Resolution is a pure function
+/// of the tree, so this report always matches what the engine's own load
+/// resolved. `primary_path` preserves the retired Python resolver's
+/// caller-supplied-primary contract; `None` resolves it internally. Strict
+/// failures (malformed sidecar metadata with `strict=true`) raise
+/// `ValueError` with the resolver's message, mirroring the retired Python
+/// `_parse_reuse_yaml` / `_version_dir_state` errors.
+#[pyfunction]
+#[pyo3(signature = (systems_root, system_data_root, backend, version, op_file_basename, primary_path=None, enable_shared_layer=true, strict=false))]
+#[allow(clippy::too_many_arguments)]
+fn resolve_op_sources_report_json(
+    py: Python<'_>,
+    systems_root: &str,
+    system_data_root: &str,
+    backend: &str,
+    version: &str,
+    op_file_basename: &str,
+    primary_path: Option<&str>,
+    enable_shared_layer: bool,
+    strict: bool,
+) -> PyResult<String> {
+    let ctx = crate::perf_database::ResolveCtx {
+        systems_root: PathBuf::from(systems_root),
+        system_data_root: PathBuf::from(system_data_root),
+        backend: backend.to_string(),
+        version: version.to_string(),
+        enable_shared_layer,
+        strict,
+    };
+    let report = py
+        .allow_threads(|| {
+            crate::perf_database::resolve_one(
+                &ctx,
+                op_file_basename,
+                primary_path.map(std::path::Path::new),
+            )
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// The engine's spec schema version (single owner since the pyo3 op
+/// unification; Python reads it for diagnostics instead of declaring a twin).
+#[pyfunction]
+fn engine_spec_schema_version() -> u32 {
+    crate::ENGINE_SPEC_SCHEMA_VERSION
+}
+
+/// Serialize a sequence of engine-backed op objects to the externally-tagged
+/// OpSpec JSON array `AicEngine.evaluate_ops_json` consumes. Refuses retired
+/// tombstone ops (recursively) — the single gate on the one surface where
+/// ops leave Python as a spec (the compile path assembles its spec JSON
+/// through this same array).
+#[pyfunction]
+fn ops_json_from_ops(ops: &Bound<'_, PyAny>) -> PyResult<String> {
+    let ops = crate::py_ops::ops_from_sequence(ops)?;
+    crate::py_ops::reject_retired_ops(&ops).map_err(PyValueError::new_err)?;
+    serde_json::to_string(&ops).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Deserialize one externally-tagged opspec JSON document into an
+/// engine-backed op object (the FPMForwardOp adapter's bridge).
+#[pyfunction]
+fn op_from_spec_json(py: Python<'_>, spec_json: &str) -> PyResult<Py<PyAny>> {
+    crate::py_ops::op_from_spec_json(py, spec_json)
+}
+
 /// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
-/// The builder and the flat compatibility function both normalize into this
-/// representation before the one-time Python compile. Keeping this type private
-/// lets the public builder evolve without creating a second public config API.
+/// The public builder and the crate-internal `EngineConfig` path both normalize
+/// into this representation before the one-time Python compile. Keeping this
+/// type private lets the public builder evolve without creating a second public
+/// config API.
 #[derive(Clone, Debug)]
 struct EngineBuildRequest {
     model_path: String,
@@ -698,9 +950,7 @@ struct EngineBuildRequest {
 ///
 /// Only the model, system, and backend are required. Parallelism defaults to
 /// one, speculative decoding defaults to disabled, and all other options defer
-/// to Python's `compile_engine` defaults. New callers should use this builder.
-/// [`build_aic_engine`] remains available as a source-compatibility adapter for
-/// existing callers through 0.10 and is planned for removal in version 0.11.0.
+/// to Python's `compile_engine` defaults.
 #[derive(Clone, Debug)]
 pub struct AicEngineBuilder {
     request: EngineBuildRequest,
@@ -825,7 +1075,7 @@ impl AicEngineBuilder {
 
     /// Compile the Python engine specification once and return a Rust handle.
     pub fn build(self) -> Result<AicEngine, AicError> {
-        build_aic_engine_impl(self.request)
+        build_engine_from_request(self.request)
     }
 }
 
@@ -874,76 +1124,8 @@ mod builder_tests {
     }
 }
 
-/// Compatibility Rust → Python → Rust embedded build entry point.
-///
-/// A plain `pub` Rust fn (NOT a `#[pyfunction]`): Rust callers (e.g. the Dynamo
-/// Mocker) call it with flat scalars. It crosses into Python exactly once to
-/// run `aiconfigurator_core.sdk.engine.compile_engine`, which walks the model's
-/// op lists and returns bincoded [`crate::engine::spec::EngineSpec`] bytes. It
-/// then builds the [`Engine`] from those bytes (via
-/// [`Engine::from_spec_bytes`], which does `from_bincode` +
-/// `PerfDatabase::load` + `Engine::build`). The call shape is
-/// `with_gil → import → call_method1("compile_engine", ...) →
-/// extract::<Vec<u8>>() → build`.
-///
-/// The flat arg list matches the `compile_engine` signature. `systems_path` is
-/// the Rust-side perf-DB root (it is also forwarded to `compile_engine` so the
-/// two stay aligned).
-///
-/// The full Rust → Python → Rust round-trip is validated end-to-end by
-/// `tests/embedded_round_trip.rs`.
-///
-/// # Compatibility
-///
-/// This flat function remains source-compatible through the 0.10 release for
-/// existing consumers. New code should use [`AicEngineBuilder`]. The flat
-/// function is planned for removal in version 0.11.0.
-// `pub` and re-exported from `lib.rs` for embedded callers (the Dynamo Mocker,
-// `tests/embedded_round_trip.rs`).
-#[allow(clippy::too_many_arguments)]
-pub fn build_aic_engine(
-    model_path: &str,
-    system: &str,
-    backend: &str,
-    backend_version: Option<&str>,
-    tp_size: u32,
-    pp_size: u32,
-    attention_dp_size: u32,
-    moe_tp_size: Option<u32>,
-    moe_ep_size: Option<u32>,
-    gemm_quant_mode: Option<&str>,
-    moe_quant_mode: Option<&str>,
-    kvcache_quant_mode: Option<&str>,
-    fmha_quant_mode: Option<&str>,
-    comm_quant_mode: Option<&str>,
-    nextn: u32,
-    kv_block_size: Option<u32>,
-    systems_path: Option<&str>,
-) -> Result<AicEngine, AicError> {
-    build_aic_engine_impl(EngineBuildRequest {
-        model_path: model_path.to_owned(),
-        system: system.to_owned(),
-        backend: backend.to_owned(),
-        backend_version: backend_version.map(str::to_owned),
-        tp_size,
-        pp_size,
-        attention_dp_size,
-        moe_tp_size,
-        moe_ep_size,
-        gemm_quant_mode: gemm_quant_mode.map(str::to_owned),
-        moe_quant_mode: moe_quant_mode.map(str::to_owned),
-        kvcache_quant_mode: kvcache_quant_mode.map(str::to_owned),
-        fmha_quant_mode: fmha_quant_mode.map(str::to_owned),
-        comm_quant_mode: comm_quant_mode.map(str::to_owned),
-        nextn,
-        kv_block_size,
-        systems_path: systems_path.map(str::to_owned),
-        forward_model: None,
-    })
-}
-
 /// Construct the public handle from the one canonical build request.
-fn build_aic_engine_impl(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
+fn build_engine_from_request(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
     let engine = compile_engine_from_request(request)?;
     Ok(AicEngine::new(engine))
 }
@@ -952,8 +1134,8 @@ fn build_aic_engine_impl(request: EngineBuildRequest) -> Result<AicEngine, AicEr
 /// `compile_engine` from one normalized request, then build an [`Engine`] from
 /// the returned bincode bytes (`from_bincode` + `PerfDatabase::load` +
 /// `Engine::build`).
-/// The builder, compatibility wrapper, and [`compile_engine_to_engine`] all use
-/// this function, so Python argument names and defaults cannot drift.
+/// The public builder and [`compile_engine_to_engine`] both use this function,
+/// so Python argument names and defaults cannot drift.
 fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, AicError> {
     let systems_root = resolve_systems_root(request.systems_path.as_deref())
         .map_err(|e| AicError::DataRoot(format!("resolve systems path: {e}")))?;
@@ -1050,8 +1232,8 @@ pub(crate) fn compile_engine_to_engine(
 }
 
 /// `DataType` → `GEMMQuantMode` enum name. `None` (auto-infer) for DataTypes
-/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4;
-/// `int8`→`int8_wo`, `int4`→`int4_wo`.
+/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4
+/// and w4a16_nvfp4; `int8`→`int8_wo`, `int4`→`int4_wo`.
 fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
     match dtype? {
         DataType::Bfloat16 => Some("bfloat16"),
@@ -1061,6 +1243,7 @@ fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
         DataType::Nvfp4 => Some("nvfp4"),
         DataType::Int8 => Some("int8_wo"),
         DataType::Int4 => Some("int4_wo"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
         // float16, w4afp8, w4a16_mxfp4, w4a8_mxfp4_mxfp8 have no GEMM enum name.
         _ => None,
     }
@@ -1077,6 +1260,7 @@ fn moe_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
         DataType::W4afp8 => Some("w4afp8"),
         DataType::W4a16Mxfp4 => Some("w4a16_mxfp4"),
         DataType::W4a8Mxfp4Mxfp8 => Some("w4a8_mxfp4_mxfp8"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
         _ => None,
     }
 }
@@ -1240,15 +1424,21 @@ impl PyForwardPassPerfModel {
 /// names from this inner module. This is distinct from `[lib] name` in
 /// `Cargo.toml`, which stays `aiconfigurator_core` and drives the ctypes dylib
 /// filename.
-///
-/// Note `build_aic_engine` is intentionally NOT added here: it is a Rust-only
-/// entry point for embedded callers, not part of the Python surface.
 #[pymodule]
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_bincode_from_json, m)?)?;
+    m.add_function(wrap_pyfunction!(weights_ops_json, m)?)?;
+    m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_op_sources_report_json, m)?)?;
+    m.add_function(wrap_pyfunction!(ops_json_from_ops, m)?)?;
+    m.add_function(wrap_pyfunction!(engine_spec_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(op_from_spec_json, m)?)?;
     m.add_class::<AicEngine>()?;
     m.add_class::<PyForwardPassPerfModel>()?;
+    crate::py_ops::register(m)?;
     Ok(())
 }
 
@@ -1275,9 +1465,29 @@ mod tests {
         pyo3::prepare_freethreaded_python();
     }
 
+    #[test]
+    fn w4a16_nvfp4_wire_dtype_maps_to_distinct_gemm_mode() {
+        assert_eq!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            gemm_quant_name(Some(&DataType::Int4))
+        );
+        assert_eq!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            moe_quant_name(Some(&DataType::Int4))
+        );
+    }
+
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
-    /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
+    /// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables.
     /// `Elementwise` is DB-free (pure mem-bandwidth SOL); `Gemm` and
     /// `ContextAttention` hit `gemm_perf` / `context_attention_perf`, both of
     /// which exist for this fixture. Mirrors a MiniMax-shaped context graph
@@ -1348,7 +1558,7 @@ mod tests {
             system_name: "b200_sxm".to_string(),
             systems_path: None,
             backend: BackendKind::Vllm,
-            backend_version: Some("0.19.0".to_string()),
+            backend_version: Some("0.24.0".to_string()),
             forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
@@ -1366,7 +1576,9 @@ mod tests {
                 kv_cache_dtype: None,
             },
             speculative: None,
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
+            tolerate_dirless_version: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
@@ -1374,7 +1586,7 @@ mod tests {
     }
 
     /// Build bincoded `EngineSpec` bytes from hand-built op lists. The lists
-    /// query the real b200_sxm/vllm/0.19.0 perf tables so the binding
+    /// query the real b200_sxm/vllm/0.24.0 perf tables so the binding
     /// pass-through numbers are real, not synthetic.
     fn fixture_spec_bytes() -> Vec<u8> {
         let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());
@@ -1592,6 +1804,14 @@ mod tests {
             check(
                 AicError::EmpiricalNotImplemented("no basis".to_string()),
                 "EmpiricalNotImplementedError",
+            );
+            check(
+                AicError::MissingSystemFlops("no fp4 throughput".to_string()),
+                "MissingSystemFlopsError",
+            );
+            check(
+                AicError::SolNotImplemented("no SOL decomposition".to_string()),
+                "SolNotImplementedError",
             );
 
             // Non-typed variants stay ValueError regardless of the sdk.

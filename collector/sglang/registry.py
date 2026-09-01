@@ -124,13 +124,17 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_context_module_skip_indexer_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_CONTEXT_MODULE_SKIP_INDEXER,
-        # The only registered GLM-5.2 artifact is NVFP4 (SM100+); the exact
-        # reuse-layer path is hardware-validated on SM100 and — via the B300
-        # probe (2026-07-13, pipeline 57747474: 8,506 rows, skip_indexer
-        # trtllm+flashmla buckets clean, 1 error) — on SM103. SM120 shares the
-        # full-module TRTLLM-GEN "Unsupported architecture" raise (RTX 6000
-        # Pro probe 2026-07-06); SM90 stays unvalidated.
-        unverified_sms=(90, 120),
+        # Hardware-validated on SM100, on SM103 via the B300 probe
+        # (2026-07-13, pipeline 57747474: 8,506 rows, skip_indexer
+        # trtllm+flashmla buckets clean, 1 error), and on SM90 via the
+        # h100/h200 probe collections (2026-08-14..15, pipelines
+        # 62700025 + 62872230: 67,532 context + 4,896 generation rows,
+        # fa3/flashmla_kv/flashmla_sparse buckets clean; failures were
+        # 24 init-OOM tasks on the 80 GB h100 and 12 guarded 1M-prefix
+        # IMA tasks — the same class the SM100 run records). SM120 shares
+        # the full-module TRTLLM-GEN "Unsupported architecture" raise
+        # (RTX 6000 Pro probe 2026-07-06).
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="dsa_generation_module_skip_indexer",
@@ -138,7 +142,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_generation_module_skip_indexer_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE_SKIP_INDEXER,
-        unverified_sms=(90, 120),
+        unverified_sms=(120,),
     ),
     # DeepSeek-V4 module-level data (csa/hca x ctx/gen = 4 ops, 1 file each).
     OpEntry(
@@ -285,6 +289,38 @@ REGISTRY: list[OpEntry] = [
         run_func="run_glm5_dsa_sparse_kernel_worker",
         perf_filename=PerfFile.GLM5_DSA_ATTN_MODULE,
         unverified_sms=(120,),
+    ),
+    # MiniMax-M3 MSA sparse-attention modules — requires the msa-family image
+    # pin (framework_manifest sglang families.msa → official v0.5.16, the
+    # first release with models/minimax_m3.py; the module declares
+    # __compat__ = "sglang>=0.5.16"). Hardware-validated per SM:
+    # SM90 (h100/h200 — SGLang's own M3 server-args override selects
+    # fa3 + page 128 and the Triton sparse path,
+    # arg_groups/overrides.py:521-537@v0.5.16), SM100/103
+    # (b200/b300/gb200/gb300 — same Triton sparse path on the official
+    # image; the fmha_sm100 upgrade is wheel-gated and kernel_source
+    # records what actually ran). SM89/SM120/SM121: v0.5.16's M3
+    # server-args handler has no CC-8.9/12 branch, the flashinfer+page-1
+    # default crashes at backend init, and serving cannot initialize —
+    # cases fail classified and no tables ship for those SMs (an earlier
+    # escape-hatch collection was withdrawn, review 4969690316); SM121
+    # additionally stays marked, mirroring the trtllm msa entries.
+    OpEntry(
+        op="msa_context_module",
+        module="collector.sglang.collect_msa_module",
+        get_func="get_msa_context_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_CONTEXT_MODULE,
+        unverified_sms=(121,),
+    ),
+    OpEntry(
+        op="msa_generation_module",
+        module="collector.sglang.collect_msa_module",
+        get_func="get_msa_generation_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_GENERATION_MODULE,
+        # See msa_context_module marker rationale.
+        unverified_sms=(121,),
     ),
     OpEntry(
         op="gdn",

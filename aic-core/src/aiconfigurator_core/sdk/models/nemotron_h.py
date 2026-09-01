@@ -41,13 +41,17 @@ class NemotronHModel(BaseModel):
             model_info["vocab"],
             model_info["context"],
             model_config,
+            backend_name=backend_name,
         )
         # extra_params is NemotronHConfig with hybrid layer configuration.
         model.set_hybrid_config(model_info["extra_params"])
         return model
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        # Framework backend, threaded to MoEDispatch (its comm flavor is a
+        # constructor field since the pyo3 op unification).
+        self._backend_name = backend_name
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
@@ -287,6 +291,7 @@ class NemotronHModel(BaseModel):
                         attention_dp_size,
                         True,
                         quant_mode=moe_quant_mode,
+                        backend=self._backend_name,
                     ),
                     ops.MoE(
                         "context_moe",
@@ -313,6 +318,7 @@ class NemotronHModel(BaseModel):
                         attention_dp_size,
                         False,
                         quant_mode=moe_quant_mode,
+                        backend=self._backend_name,
                     ),
                 ]
             )
@@ -577,6 +583,7 @@ class NemotronHModel(BaseModel):
                         attention_dp_size,
                         True,
                         quant_mode=moe_quant_mode,
+                        backend=self._backend_name,
                     ),
                     ops.MoE(
                         "generation_moe",
@@ -603,6 +610,7 @@ class NemotronHModel(BaseModel):
                         attention_dp_size,
                         False,
                         quant_mode=moe_quant_mode,
+                        backend=self._backend_name,
                     ),
                 ]
             )

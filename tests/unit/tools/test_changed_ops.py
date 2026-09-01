@@ -127,8 +127,7 @@ REGISTRY: list[OpEntry] = [
 ]
 """
 
-# A second sibling registry list the real vllm registry also has
-# (REGISTRY_XPU): must never be picked up by the parser.
+# A second inactive sibling registry list: must never be picked up by the parser.
 REGISTRY_PY_WITH_INACTIVE_SIBLING = (
     REGISTRY_PY
     + """
@@ -143,6 +142,46 @@ REGISTRY_INACTIVE: list[OpEntry] = [
 ]
 """
 )
+
+VLLM_REGISTRY_WITH_XPU_PY = """from collector.registry_types import OpEntry, PerfFile
+
+REGISTRY: list[OpEntry] = [
+        OpEntry(
+                op="gemm",
+                module="collector.vllm.collect_gemm",
+                get_func="get_gemm_test_cases",
+                run_func="run_gemm",
+                perf_filename=PerfFile.GEMM,
+        ),
+]
+
+REGISTRY_XPU: list[OpEntry] = [
+        OpEntry(
+                op="gemm",
+                module="collector.vllm.collect_gemm_xpu",
+                get_func="get_gemm_test_cases",
+                run_func="run_gemm",
+                perf_filename=PerfFile.GEMM,
+        ),
+]
+"""
+
+VLLM_MANIFEST_YAML = """schema_version: 2
+frameworks:
+    vllm:
+        source_repo: "https://example.com/vllm.git"
+        default:
+            version: "0.26.0+xpu"
+            images:
+                default: "example/vllm:xpu@sha256:{}"
+""".format("6" * 64)
+
+VLLM_CLOSURES_YAML = """collector.vllm.collect_gemm:
+    - collector/cases/base_ops/gemm.yaml
+collector.vllm.collect_gemm_xpu:
+    - collector/cases/base_ops/gemm.yaml
+    - collector/vllm/utils_xpu.py
+"""
 
 # A registry whose REGISTRY list contains a VersionRoute-versioned OpEntry
 # (no literal `module=`) — the shape _parse_registry_entries does not support
@@ -288,14 +327,32 @@ class TestCollectorCode:
         assert _diff_for(changed, "sglang", "attention").reasons == ("collector_code",)
 
     def test_inactive_sibling_registry_list_is_never_parsed(self, mod, repo):
-        # collector/vllm/registry.py has a real REGISTRY_XPU sibling list that
-        # importlib.import_module(...).REGISTRY never reads; this proves the
-        # ast-based parser matches that semantics instead of walking the file.
+        # The parser includes only named active registries; arbitrary sibling
+        # lists must not be picked up just because they contain OpEntry calls.
         _write_tree(repo, _default_files() | {"collector/sglang/registry.py": REGISTRY_PY_WITH_INACTIVE_SIBLING})
         base_sha = _commit_all(repo, "base")
         changed, unchanged = mod.compute_changed_ops(repo, base_sha, base_sha)
         families = {d.family for d in (*changed, *unchanged) if d.framework == "sglang"}
         assert families == {"gemm", "attention"}
+
+    def test_vllm_xpu_registry_module_edit_is_changed_op_input(self, mod, repo):
+        files = _default_files() | {
+            "collector/framework_manifest.yaml": VLLM_MANIFEST_YAML,
+            "collector/hash_closures.yaml": VLLM_CLOSURES_YAML,
+            "collector/vllm/registry.py": VLLM_REGISTRY_WITH_XPU_PY,
+            "collector/vllm/collect_gemm.py": "# collect_gemm v1\n",
+            "collector/vllm/collect_gemm_xpu.py": "# collect_gemm_xpu v1\n",
+            "collector/vllm/utils_xpu.py": "# utils_xpu v1\n",
+        }
+        _write_tree(repo, files)
+        base_sha = _commit_all(repo, "base")
+        files["collector/vllm/collect_gemm_xpu.py"] = "# collect_gemm_xpu v2\n"
+        _write_tree(repo, files)
+        head_sha = _commit_all(repo, "head")
+
+        changed, unchanged = mod.compute_changed_ops(repo, base_sha, head_sha)
+        assert _diff_for(changed, "vllm", "gemm").reasons == ("collector_code",)
+        assert [d for d in unchanged if d.framework == "vllm"] == []
 
     def test_shared_core_is_read_per_revision_not_from_live_checkout(self, mod, repo):
         # collector/provenance.py's SHARED_CORE at HEAD names one extra file
@@ -687,12 +744,36 @@ def _repo_root_is_git_checkout() -> bool:
     return probe.returncode == 0 and probe.stdout.strip() == "true"
 
 
+def _real_repo_has_changed_ops_worktree_changes() -> bool:
+    if not _repo_root_is_git_checkout():
+        return False
+    probe = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--",
+            "collector/hash_closures.yaml",
+            "collector/provenance.py",
+            "collector/vllm/registry.py",
+            "tools/perf_database/changed_ops.py",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(probe.stdout.strip())
+
+
 @pytest.mark.unit
 @pytest.mark.skipif(
     not _repo_root_is_git_checkout(),
     reason="needs the real repo checkout (the CI test image COPYs sources without .git)",
 )
 def test_real_repo_base_equals_head_is_all_unchanged(mod):
+    if _real_repo_has_changed_ops_worktree_changes():
+        pytest.skip("real-repo HEAD smoke needs changed_ops metadata committed or clean")
     changed, unchanged = mod.compute_changed_ops(REPO_ROOT, "HEAD", "HEAD")
     assert changed == []
     assert len(unchanged) > 0

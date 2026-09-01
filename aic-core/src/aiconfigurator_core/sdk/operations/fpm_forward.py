@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from aiconfigurator_core.sdk.operations.base import Operation
+from aiconfigurator_core.sdk.operations.base import PythonOperation
 
 _PHASES = ("prefill", "decode")
 
@@ -83,8 +83,10 @@ def _norm_identity(value) -> str:
     return str(value)
 
 
-class FPMForwardOp(Operation):
+class FPMForwardOp(PythonOperation):
     """One whole-model forward pass for a single phase (prefill or decode)."""
+
+    _ENGINE_QUERY_SHAPE = "module"
 
     def __init__(
         self,

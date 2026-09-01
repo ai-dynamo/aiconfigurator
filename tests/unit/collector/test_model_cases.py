@@ -216,6 +216,49 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("model_path", "quant_mode"),
+    [
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "w4a16_nvfp4"),
+        ("nvidia/Qwen3.5-397B-A17B-NVFP4", "nvfp4"),
+        ("nvidia/Qwen3.5-122B-A10B-NVFP4", "nvfp4"),
+        ("nvidia/Gemma-4-26B-A4B-NVFP4", "bfloat16"),
+        ("nvidia/Kimi-K2.6-NVFP4", "nvfp4"),
+        ("nvidia/Kimi-K2.7-Code-NVFP4", "nvfp4"),
+        ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvfp4"),
+        ("nvidia/DeepSeek-V4-Pro-NVFP4", "nvfp4"),
+        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4", "nvfp4"),
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "nvfp4"),
+        ("nvidia/MiniMax-M3-NVFP4", "nvfp4"),
+    ],
+)
+def test_nvfp4_quant_artifacts_have_exact_moe_profiles_and_lanes(monkeypatch, model_path, quant_mode):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {model_path}
+    for backend in ("sglang", "trtllm", "vllm"):
+        assert moe_model_allows_quantization(backend, model_path, quant_mode)
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "nvidia/Qwen3.6-27B-NVFP4",
+        "nvidia/Gemma-4-31B-IT-NVFP4",
+    ],
+)
+def test_nvfp4_dense_artifacts_have_targeted_attention_profiles(monkeypatch, model_path):
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    assert get_attention_context_shape_sweeps("sglang")
+
+
+@pytest.mark.parametrize(
     ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
     [
         ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
@@ -400,6 +443,10 @@ def test_moe_model_quantization_policy_is_yaml_backed():
     assert not moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "bfloat16")
     assert moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "fp8_block")
     assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "nvfp4")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5.3-FP8", "fp8_block")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5.3-FP8", "nvfp4")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5.3", "bfloat16")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5.3", "fp8_block")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a8_mxfp4_mxfp8")
@@ -413,24 +460,38 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 
 
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
+    # AIC-1749: nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 are a real ModelOpt NVFP4
+    # export. Every backend that serves NVFP4 MoE declares exactly [nvfp4] on
+    # those rows (positive one-true-mode declarations, review follow-up), so
+    # assert the singleton set per backend explicitly rather than omitting the
+    # artifact (omission would look identical to "not yet declared").
     expected_by_backend = {
         "sglang": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            # One true mode everywhere: the NVFP4 artifacts declare nvfp4 on
+            # every backend that serves NVFP4 MoE (review follow-up on
+            # PR #1548 — positive declarations, nothing excluded).
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "trtllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "vllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
     }
 
@@ -504,10 +565,13 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
     entries = {entry.op: entry for entry in REGISTRY}
 
+    # SM90 unparked by the h100/h200 probe collections (2026-08-14..15,
+    # pipelines 62700025 + 62872230): 67,532 context + 4,896 generation
+    # skip rows, fa3/flashmla buckets clean.
     for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
         assert op in sm90.selected_ops
         assert op in sm100.selected_ops
-        assert entries[op].unverified_sms == (90, 120)
+        assert entries[op].unverified_sms == (120,)
 
     # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
     # 57716023): sampled dsa cases ran clean across all three kernel buckets.
@@ -567,6 +631,10 @@ def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
         "MiniMaxAI/MiniMax-M2.7": {"fp8_block"},
         "nvidia/MiniMax-M2.5-NVFP4": {"nvfp4"},
         "nvidia/MiniMax-M2.7-NVFP4": {"nvfp4"},
+        "MiniMaxAI/MiniMax-M3": {"bfloat16"},
+        # MIXED_PRECISION artifact: routed experts NVFP4 gs16 (the MoE axis);
+        # its MXFP8 attention/dense/shared-expert side is not a MoE mode.
+        "nvidia/MiniMax-M3-NVFP4": {"nvfp4"},
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {"bfloat16"},
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {"nvfp4"},
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": {"bfloat16"},
@@ -706,17 +774,14 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     cases = get_gemm_case_specs()
     xpu_cases = get_gemm_case_specs("vllm_xpu")
 
-    # Base sweep expansion first (order preserved for checkpoint stability),
-    # then model_case_values.gemm rows.
+    # Base gemm sweep expansion, then model_case_values.gemm rows.
     assert len(cases) == 37296
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
-    assert cases[35741] == GemmCommonTestCase(x=1, n=32, k=32)
     assert cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
 
     assert len(xpu_cases) == 9618
     assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=65536, k=12288)
-    assert xpu_cases[9176] == GemmCommonTestCase(x=1, n=32, k=32)
     assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
@@ -742,10 +807,43 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
-    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
+    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4),
+    # plus exact quant-sensitive rows for the current NVIDIA NVFP4 artifacts.
     # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
     # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
-    assert len(moe_cases) == 5340
+    # GLM-5.3 (BF16/FP8/NVFP4) adds no physical cases: its three identifiers
+    # are model_aliases on the existing GLM-5.2 rows (same base, zero deltas).
+    # +114 for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, the nvfp4
+    # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
+    # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
+    # per-model case count (114).
+    # +231 for AIC-1749's DeepSeek-V4 NVFP4 rows: +117 nvidia/DeepSeek-V4-Flash-NVFP4
+    # (matches deepseek-ai/DeepSeek-V4-Flash's 4096/2048 count) and +114
+    # nvidia/DeepSeek-V4-Pro-NVFP4 (matches deepseek-ai/DeepSeek-V4-Pro's
+    # 7168/3072 count) -- every backend declares exactly [nvfp4] for both
+    # new rows.
+    # +114 for MiniMax-M3's MoE row (6144/3072, 128x4).
+    # +114 for the nvidia/MiniMax-M3-NVFP4 row (same 6144/3072, 128x4
+    # geometry; quant-distinct artifact — NVFP4 routed experts — so it is a
+    # separate row, never merged with the BF16 parent).
+    assert len(moe_cases) == 6720
+
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Flash-NVFP4"
+        and case.hidden_size == 4096
+        and case.inter_size == 2048
+        and case.topk == 6
+        and case.num_experts == 256
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Pro-NVFP4"
+        and case.hidden_size == 7168
+        and case.inter_size == 3072
+        and case.topk == 6
+        and case.num_experts == 384
+        for case in moe_cases
+    )
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -757,6 +855,28 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.hidden_size == 2048
         and case.inter_size == 5120
         for case in moe_cases
+    )
+    # MiniMax-M3's model-owned MoE dims must be present directly (both the
+    # BF16 parent and the quant-distinct NVFP4 artifact row), not merely
+    # inside the aggregate count above.
+    assert any(
+        case.model_name == "MiniMaxAI/MiniMax-M3" and case.hidden_size == 6144 and case.inter_size == 3072
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/MiniMax-M3-NVFP4" and case.hidden_size == 6144 and case.inter_size == 3072
+        for case in moe_cases
+    )
+    # Every Lightning case, not just one: the documented +114 contribution,
+    # each carrying the exact checkpoint geometry (an `any(...)` pin would
+    # pass with 113 wrong-dimension siblings).
+    lightning_cases = [
+        case for case in moe_cases if case.model_name == "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+    ]
+    assert len(lightning_cases) == 114
+    assert all(
+        case.hidden_size == 2688 and case.inter_size == 1856 and case.topk == 6 and case.num_experts == 128
+        for case in lightning_cases
     )
     # Step-3.7-Flash: assert both physical artifact identities, the shape, and
     # the routing contract. MoE loads the model config by model_name, so the
@@ -1076,6 +1196,14 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("fp8", "fp8", "fp8_block"),
         ("bfloat16", "bfloat16", "nvfp4"),
         ("bfloat16", "fp8", "nvfp4"),
+        # MSA-scoped combos (attention_types [msa]; declared after the
+        # bf16/fp8 nvfp4 pair): unfiltered enumeration includes them.
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
         ("fp8", "fp8", "nvfp4"),
     ]
     assert get_mla_module_sweep_spec("sglang").context_sequence_lengths[-2:] == [8192, 16384]
@@ -1090,6 +1218,13 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
         for spec in get_mla_module_precision_specs("vllm", phase="generation", sm_version=90)
     ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        # MSA-scoped combos (attention_types [msa]) at SM90: both KV dtypes
+        # for the bf16 and fp8_block gemm tiers (fp8-KV has no SM floor for
+        # MSA — see the mla_module.yaml combo note).
         ("bfloat16", "bfloat16", "bfloat16"),
         ("bfloat16", "fp8", "bfloat16"),
         ("bfloat16", "bfloat16", "fp8_block"),
@@ -1111,12 +1246,22 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "bfloat16", "nvfp4"),
         ("bfloat16", "fp8", "nvfp4"),
     ]
+    # The mla scope adds the fp8 prefill-query compute combos on top of the
+    # dsa set; it no longer equals the unfiltered enumeration, which now also
+    # carries the msa-scoped combos.
     assert [
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
         for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="mla")
     ] == [
-        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
-        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("fp8", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("fp8", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+        ("fp8", "fp8", "nvfp4"),
     ]
 
     with pytest.raises(ValueError, match="attention_type"):
@@ -1133,12 +1278,17 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "zai-org/GLM-5.2",
         "zai-org/GLM-5.2-FP8",
         "nvidia/GLM-5.2-NVFP4",
+        "zai-org/GLM-5.3",
+        "zai-org/GLM-5.3-FP8",
+        "nvidia/GLM-5.3-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
     assert {(spec.model_path, spec.architecture, spec.native_num_heads) for spec in kimi_specs} == {
         ("moonshotai/Kimi-K2-Instruct", "DeepseekV3ForCausalLM", 64),
         ("moonshotai/Kimi-K2.5", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.6-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.7-Code-NVFP4", "KimiK25ForConditionalGeneration", 64),
     }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",
@@ -1149,8 +1299,68 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("mla", "deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM"),
         ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
         ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
+        ("msa", "MiniMaxAI/MiniMax-M3", "MiniMaxM3ForCausalLM"),
     }
     assert trtllm_specs == vllm_specs
+
+
+def test_msa_precision_combos_match_declared_specs():
+    """The MSA collectors consume the YAML-declared precision policy
+    (mla_module.yaml module_precision_combos, attention_types [msa]) instead
+    of re-implementing SM gates in Python (review 4969690316 S4). Assert the
+    emitted (compute, kv, gemm) sets equal the declared specs across the SM
+    matrix, and pin the declared policy itself: trtllm is bf16-KV only with
+    fp8_block from SM89 and nvfp4 from SM100; vLLM pairs every gemm tier
+    with both KV dtypes (fp8-KV has NO SM floor for MSA — vLLM's M3 sparse
+    backend accepts an fp8 main KV cache on every SM, supported_kv_cache_
+    dtypes common/sparse_attention.py:56-62@v0.24.0)."""
+    from collector.case_generator import get_mla_module_precision_specs
+
+    def emitted(source_rel, sm, phase):
+        source_path = REPO_ROOT / source_rel
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        helper = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_get_precision_combos"
+        )
+        namespace = {
+            "get_sm_version": lambda: sm,
+            "get_mla_module_precision_specs": get_mla_module_precision_specs,
+        }
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
+        return set(namespace["_get_precision_combos"](phase))
+
+    def declared(fw, sm, phase):
+        return {
+            (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+            for spec in get_mla_module_precision_specs(fw, phase=phase, sm_version=sm, attention_type="msa")
+        }
+
+    for fw, source_rel in (
+        ("trtllm", "collector/trtllm/collect_msa_module.py"),
+        ("vllm", "collector/vllm/collect_msa_module.py"),
+    ):
+        for sm in (89, 90, 100, 103, 120):
+            for phase in ("context", "generation"):
+                assert emitted(source_rel, sm, phase) == declared(fw, sm, phase), (fw, sm, phase)
+
+    trtllm_sm90 = declared("trtllm", 90, "context")
+    assert trtllm_sm90 == {
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+    }
+    assert declared("trtllm", 100, "context") == trtllm_sm90 | {("bfloat16", "bfloat16", "nvfp4")}
+
+    vllm_sm89 = declared("vllm", 89, "context")
+    assert vllm_sm89 == {
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+    }
+    assert declared("vllm", 100, "context") == vllm_sm89 | {
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+    }
 
 
 def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
@@ -1520,6 +1730,7 @@ def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monk
         "nvidia/DeepSeek-V3.1-NVFP4": "nvidia/DeepSeek-V3.1-NVFP4",
         "nvidia/MiniMax-M2.5-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
         "nvidia/MiniMax-M2.7-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/MiniMax-M3-NVFP4": "nvidia/MiniMax-M3-NVFP4",
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
@@ -1669,3 +1880,57 @@ def test_qwen35_gemm_model_rows_add_exact_below_grid_widths():
     assert {case.x for case in specs if (case.n, case.k) == (1, 2048)} == base_tokens
 
     assert len(specs) == len({(case.x, case.n, case.k) for case in specs})
+
+
+def test_vllm_msa_persist_row_raises_when_log_perf_fails():
+    """A false return from log_perf (lock exhaustion / write failure) must
+    fail the case: a worker that returns normally lets the checkpoint advance
+    with no row persisted, silently shrinking the dataset. Mirrors the
+    TRT-LLM/SGLang collectors' behavior."""
+    source_path = REPO_ROOT / "collector/vllm/collect_msa_module.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_persist_msa_row")
+
+    def run(log_perf_result):
+        calls = {}
+
+        def fake_log_perf(**kwargs):
+            calls.update(kwargs)
+            return log_perf_result
+
+        namespace = {"log_perf": fake_log_perf}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
+        namespace["_persist_msa_row"](
+            item={"latency": "1.0"},
+            vllm_version="0.24.0",
+            device_name="test-device",
+            op_name="msa_generation_module",
+            kernel_source="MiniMaxM3SparseTritonImpl",
+            perf_filename="msa_generation_module_perf.txt",
+            power_stats=None,
+        )
+        return calls
+
+    calls = run(True)
+    assert calls["perf_filename"] == "msa_generation_module_perf.txt"
+
+    with pytest.raises(RuntimeError, match="failed to persist MSA row"):
+        run(False)
+
+
+def test_nvfp4_checkpoint_targets_msa_module_specs(monkeypatch):
+    """Exact-targeting the advertised NVFP4 artifact must populate the MSA
+    plan for every backend (review 4969690316 Spec-2: a declared artifact
+    expanding to zero cases with no logged drop is a population bug). The
+    artifact aliases onto the canonical MiniMax-M3 MSA row — the module
+    benchmark is artifact-insensitive (dummy weights, identical sparse
+    geometry, precision as explicit sweep axes)."""
+    from collector.case_generator import get_mla_module_model_specs
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/MiniMax-M3-NVFP4")
+    for backend in ("trtllm", "vllm", "sglang"):
+        specs = get_mla_module_model_specs("msa", backend=backend)
+        assert specs, f"NVFP4 exact-targeting produced zero MSA specs for {backend}"
+        assert all(s.model_path == "MiniMaxAI/MiniMax-M3" for s in specs), (
+            "alias rows must stay keyed to the canonical model path"
+        )

@@ -14,6 +14,9 @@ model_paths:
   - zai-org/GLM-5.2
   - zai-org/GLM-5.2-FP8
   - nvidia/GLM-5.2-NVFP4
+  - zai-org/GLM-5.3
+  - zai-org/GLM-5.3-FP8
+  - nvidia/GLM-5.3-NVFP4
 include_base: false
 description: >
   GLM-5 DSA/MoE model-centric collection plan.
@@ -129,6 +132,8 @@ model_case_values:
           allowed_modes: [nvfp4]
       wideep: true
     - model_path: zai-org/GLM-5.2
+      model_aliases:
+        - zai-org/GLM-5.3
       hidden_size: 6144
       inter_size: 2048
       topk: 8
@@ -147,6 +152,8 @@ model_case_values:
           allowed_modes: [bfloat16]
       wideep: true
     - model_path: zai-org/GLM-5.2-FP8
+      model_aliases:
+        - zai-org/GLM-5.3-FP8
       hidden_size: 6144
       inter_size: 2048
       topk: 8
@@ -165,6 +172,8 @@ model_case_values:
           allowed_modes: [fp8_block]
       wideep: true
     - model_path: nvidia/GLM-5.2-NVFP4
+      model_aliases:
+        - nvidia/GLM-5.3-NVFP4
       hidden_size: 6144
       inter_size: 2048
       topk: 8
@@ -196,6 +205,9 @@ model_case_values:
         - zai-org/GLM-5.2
         - zai-org/GLM-5.2-FP8
         - nvidia/GLM-5.2-NVFP4
+        - zai-org/GLM-5.3
+        - zai-org/GLM-5.3-FP8
+        - nvidia/GLM-5.3-NVFP4
       attention_type: dsa
       native_num_heads: 64
 

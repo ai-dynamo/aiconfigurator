@@ -25,12 +25,58 @@ frameworks:
         version: "0.5.16"
         images:
           default: "lmsysorg/sglang@sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b"
+      # MiniMax-M3 (minimax_m3.py + minimax_sparse_ops) landed in the official
+      # v0.5.16 release; the stock 0.5.14 default has no M3. Pin the official
+      # tag for the msa family only (NOT the kimi-k3 branch build above, which
+      # is a different container).
+      msa:
+        version: "0.5.16"
+        images:
+          default: "lmsysorg/sglang:v0.5.16@sha256:7b6a35df9839fd593a94a1eaee82d7777f472225d9f3ad1f8a2e0cb2bd1785d0"
   trtllm:
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
     default:
       version: "1.3.0rc20"
       images:
         default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"
+    families:
+      # trtllm FP4 (w4a8_mxfp4_mxfp8) MoE rows show non-monotonic
+      # num_tokens segments (4096->8192, 12288->16384 dips) on all four
+      # Blackwell systems. An rc23 re-collection reproduced the dips
+      # (2026-08-08; exact consumer-key join vs rc20: median ratio
+      # 1.003-1.013, median |per-row delta| 2.4-2.9%, ~25% of rows >5% —
+      # benchmark run-to-run spread, not a systematic shift), so the dips
+      # are REAL, reproducible kernel behavior (per-bucket tactic/tile-wave
+      # quantization), not a campaign artifact. Evidence: GitLab
+      # aic-auto-collector (project 205688) pipelines 61692150-61692160
+      # (moe re-collection, 2026-08-08); DSV4 attention campaigns ran as
+      # pipelines 61771569-61838704 on feat/sbatch-partition-override. The DSV4 moe shapes stay collected on this
+      # runtime for version coherence with the DSV4 attention family; the
+      # remaining moe shapes reuse rc20 via the declared reuse.yaml channel.
+      moe:
+        version: "1.3.0rc23"
+        images:
+          default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"
+      # DeepSeek-V4 attention modules require trtllm>=1.3.0rc21 (the model
+      # class and sparse/deepseek_v4 backend first ship there; see
+      # collector/trtllm/collect_dsv4_attn.py __compat__). The catalog family
+      # also carries the DSA modules (dsa_*_module), so trtllm DSA collection
+      # moves to this runtime with it — DSA on rc23 smoke-verified on SM90
+      # (H20) at bring-up; the rc20 serving citations in collect_mla_module
+      # are re-audited on this bump per layer_permissions.md.
+      sparse_attention:
+        version: "1.3.0rc23"
+        images:
+          default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"
+      # MiniMax-M3: the true-sparse fmha_sm100 backend (implementation="msa",
+      # SM100/103-only) landed in rc23; rc20 has only the Triton reference
+      # path (measured identical-or-worse on SM90 at rc23, so the existing
+      # existing SM90 msa data stays at rc20). Pin the msa family to rc23 for the
+      # Blackwell collection.
+      msa:
+        version: "1.3.0rc23"
+        images:
+          default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"
   vllm:
     source_repo: "https://github.com/vllm-project/vllm.git"
     default:
@@ -39,9 +85,22 @@ frameworks:
         default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
         cu129: "vllm/vllm-openai:v0.24.0-cu129@sha256:6b005c78cd17a1f0215f31e95d183833f4dfd6167c4473241b80d1c8843b91e8"
     families:
-      # Kimi-K3 KDA kernels exist only on the vLLM kimi-k3 branch
-      # (official preview image, CUDA 13 build with fused_kda_decode +
-      # FlashKDA; setuptools-scm version 0.1.dev19262+gb6bbf29dd).
+      # Kimi-K3 KDA kernels exist on the official kimi-k3 preview image
+      # (CUDA 13 build with fused_kda_decode + FlashKDA; setuptools-scm
+      # version 0.1.dev19262+gb6bbf29dd) and upstreamed in v0.27.0 — but the
+      # family pin STAYS on the preview until the coordinated consumer fix
+      # lands (review jasonqinzhou #1559, comment 3808798129): at 0.27.0 the
+      # DS conv-state layout makes is_fused_kda_decode_supported false, so
+      # serving decode runs causal_conv1d_update +
+      # fused_recurrent_kda_packed_decode + explicit gated RMSNorm, while
+      # KimiK3Model._build_generation_ops still prices every vLLM non-spec
+      # decode as fused_kda_decode and drops the norm. The 0.27.0 gb300 kda
+      # rows collected by this PR are checked in as evidence
+      # (systems/data/gb300/kda/vllm/0.27.0); until the consumer routes by
+      # version, loading that version fills 44 fused_kda_decode rows from
+      # this preview sibling via the shared layer and misprices generation
+      # KDA. Re-pin when the consumer emits the conv-update + packed
+      # decode pair (and blocks preview fused fill) for 0.27.0+.
       kda:
         version: "0.1.dev19262"
         images:
@@ -67,6 +126,17 @@ frameworks:
       # sha256:d61e062d" observation was the manifest list's arm64 entry,
       # not a new build. On aarch64 hosts (gb200/gb300) resolve the arm64
       # entry of the same tag and re-verify the version string before use.)
+  vllm_xpu:
+    base_framework: vllm
+    data_backend: vllm
+    notes: >
+      Intel XPU collector runtime. This is intentionally separate from stock
+      CUDA vLLM because the XPU collectors depend on vLLM 0.26.0 plus the
+      matching vllm-xpu-kernels runtime contract.
+    default:
+      version: "0.26.0"
+      images:
+        default: "vllm/vllm-openai-xpu:v0.26.0@sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52"
   wideep_sglang:
     base_framework: sglang
     collector_dir: "collector/wideep/sglang"
@@ -91,6 +161,38 @@ frameworks:
     notes: >
       Requires an SGLang image with DeepSeek-V4/DeepEP modules; stock
       lmsysorg/sglang images may not include them.
+  wideep_vllm:
+    base_framework: vllm
+    collector_dir: "collector/wideep/vllm"
+    data_backend: vllm
+    default:
+      version: "0.24.0"
+      source_commit: "ee0da84ab9e04ac7610e28580af62c365e898389"
+      abi:
+        build_mode: "official-v0.24.0-image"
+        torch: "2.11.0"
+        cuda: "13.0.2"
+        deep_ep: "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
+        nvshmem: "3.3.24"
+      backend_abi:
+        deepep_ht:
+          deep_ep_api: "Buffer"
+        deepep_ll:
+          deep_ep_api: "Buffer"
+        deepep_v2:
+          build_mode: "official-v0.24.0-image+deepep-v2-overlay"
+          deep_ep: "b306af06afd412c88e51e71802951606e40b7358"
+          deep_ep_api: "ElasticBuffer"
+          nccl: "2.30.4"
+      images:
+        default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
+    notes: >
+      The official multi-arch v0.24.0 index is the configured image identity;
+      launchers resolve and attest its platform child at runtime. HT/LL use the
+      legacy Buffer API. V2 uses the separately attested b306af0 ElasticBuffer
+      overlay and NCCL 2.30.4. Four-GPU GB scale-up groups additionally require
+      the checked-in legacy topology patch; every overlay records its wheel and
+      patch SHA256.
   wideep_trtllm:
     base_framework: trtllm
     collector_dir: "collector/wideep/trtllm"
@@ -99,3 +201,20 @@ frameworks:
       version: "1.3.0rc20"
       images:
         default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"
+  trtllm_a2a:
+    source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
+    default:
+      version: "1.3.0rc11"
+      source_commit: "14efb6ac673c0cbe828e1206cc5c7d5748d05ffa"
+      abi:
+        build_mode: "source-wheel-over-pinned-base"
+        deep_ep: "5be51b228a7c82dbdb213ea58e77bffd12b38af8"
+        nvshmem: "3.2.5-1"
+        nvshmem_archive_sha256: "eb2c8fb3b7084c2db86bd9fd905387909f1dfd483e7b45f7b3c3d5fcf5374b5a"
+      images:
+        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"
+    notes: >
+      The rc20 image is an immutable build base only. Collection must build
+      and attest source_commit 14efb6ac (package version 1.3.0rc11), including
+      its vendored DeepEP/NVSHMEM ABI; rows from the bundled rc20 package are
+      rejected for this workload.

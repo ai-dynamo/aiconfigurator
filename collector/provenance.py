@@ -50,6 +50,8 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
     {
         "collector.sglang.collect_dsv4_megamoe",
         "collector.wideep.sglang.collect_moe_a2a",
+        "collector.wideep.vllm.collect_moe_a2a",
+        "collector.wideep.trtllm.collect_moe_a2a",
         "collector.network.slurm.collect_trtllm_alltoall",
     }
 )
@@ -57,14 +59,44 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
 STATUS_COMPLETE = "complete"
 STATUS_PARTIAL = "partial"
 
-_RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_variant", "image_digest")
-_TABLE_FIELD_ORDER = ("collector_ref", "collector_hash", "case_plan_hash", "collected_at", "rows", "status")
+_RUNTIME_FIELD_ORDER = (
+    "framework",
+    "version",
+    "image",
+    "image_variant",
+    "image_digest",
+    "source_commit",
+    "abi",
+    "live_abi",
+    "transport",
+    "backend_capability",
+    "backend_abis",
+    "backend_capabilities",
+)
+_TABLE_FIELD_ORDER = (
+    "collector_ref",
+    "collector_hash",
+    "case_plan_hash",
+    "collected_at",
+    "rows",
+    "classified_failures",
+    "status",
+)
+
+
+def _registry_lists(registry_module) -> tuple[list, ...]:
+    registries = [registry_module.REGISTRY]
+    registry_xpu = getattr(registry_module, "REGISTRY_XPU", None)
+    if registry_xpu is not None:
+        registries.append(registry_xpu)
+    return tuple(registries)
 
 
 def enumerate_registry_modules() -> set[str]:
     """Return every collector module referenced by an OpEntry in any of the five
     registries enumerated by ``framework_manifest._REGISTRY_MODULES`` (sglang,
-    trtllm, vllm, wideep_sglang, wideep_trtllm).
+    trtllm, vllm, wideep_sglang, wideep_trtllm), plus active sibling registries
+    such as vLLM's ``REGISTRY_XPU``.
     """
     import importlib
 
@@ -72,12 +104,13 @@ def enumerate_registry_modules() -> set[str]:
 
     modules: set[str] = set()
     for registry_module_path in _REGISTRY_MODULES.values():
-        registry = importlib.import_module(registry_module_path).REGISTRY
-        for entry in registry:
-            if entry.module:
-                modules.add(entry.module)
-            for route in entry.versions:
-                modules.add(route.module)
+        registry_module = importlib.import_module(registry_module_path)
+        for registry in _registry_lists(registry_module):
+            for entry in registry:
+                if entry.module:
+                    modules.add(entry.module)
+                for route in entry.versions:
+                    modules.add(route.module)
     return modules
 
 
@@ -165,10 +198,23 @@ def case_plan_hash(case_ids: list[str]) -> str:
 
 
 def derive_table_status(*, unresolved_failed_count: int, had_module_failure: bool) -> str:
-    """complete unless the table's checkpoint holds unresolved failures or a
-    ModuleCollectionFailure was recorded for one of its producing ops.
+    """complete unless a ModuleCollectionFailure was recorded for one of the
+    table's producing ops.
+
+    Owner decision (tianhaox, 2026-08-08, PR #1486): recorded per-case
+    failures do NOT demote a table. failure_handling.md's core doctrine is
+    that a classified failure is DATA — deterministic framework limits (OOM
+    at sweep extremes, kernel grid caps) land in the failure log by design,
+    and demoting the table for them made every honest campaign
+    unpublishable. The anti-false-success guarantees are unaffected and live
+    elsewhere: a run that dies mid-way never finalizes (parquet without a
+    matching ``tables`` entry fails the coverage gate / strict loader), and
+    an op that produced zero rows still demotes via ``had_module_failure``.
+    ``unresolved_failed_count`` is retained for observability at call sites
+    (logged, recorded in error summaries) but no longer affects status.
     """
-    if unresolved_failed_count > 0 or had_module_failure:
+    del unresolved_failed_count  # observability-only; see docstring
+    if had_module_failure:
         return STATUS_PARTIAL
     return STATUS_COMPLETE
 

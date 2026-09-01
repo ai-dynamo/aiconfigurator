@@ -84,7 +84,7 @@ Backend pairs whose latest tables disagree on shape columns are NOT force-
 joined: extra columns that are constant in their table are dropped (recorded
 in the pair-summary align_notes); otherwise the pair is skipped and reported as `schema_mismatch`.
 
-Shape-key convention follows check_kernel_source.py: every column that is not
+Shape-key convention follows perf_data_layout.py: every column that is not
 a meta column ({framework, version, device, op_name, kernel_source}) and not
 a latency column is part of the shape key. Sweep columns get log2-bucketed to
 form the local-baseline bucket key.
@@ -116,7 +116,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_facts import load_backend_map, translate
-from check_kernel_source import _META_COLUMNS, _iter_data_files
+from perf_data_layout import META_COLUMNS, iter_data_files
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ logger = logging.getLogger(__name__)
 # several tables store multiple logical operations in one file (e.g.
 # mla_bmm_perf's mla_gen_pre/mla_gen_post) and their shapes must never be
 # compared across op_name values.
-_SHAPE_EXCLUDED_META = _META_COLUMNS - {"op_name"}
+_SHAPE_EXCLUDED_META = META_COLUMNS - {"op_name"}
 
 # Single latency columns, tried in order.
 _SINGLE_LATENCY_COLUMNS = ("latency", "avg_ms")
@@ -222,7 +222,7 @@ def _version_key(version: str) -> tuple:
 
 def _iter_op_tables(data_root: Path) -> Iterable[tuple[str, str, str, str, Path]]:
     """(system, backend, version, op_file, path) via the sibling tool's dual-layout walker."""
-    for system, backend, version, path in _iter_data_files(data_root):
+    for system, backend, version, path in iter_data_files(data_root):
         yield system, backend, version, path.name, path
 
 
@@ -1365,7 +1365,8 @@ def render_markdown(
         "Below speed-of-light (physically impossible measurements)",
         "system | op_file | backend | dtype | points | worst x of SOL | worst example",
         [
-            f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['gemm_dtype']} | "
+            f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | "
+            f"{a.get('gemm_dtype') or a.get('moe_dtype', '')} | "
             f"{a['points']} | {a['worst_fraction_of_sol']:.2f} | "
             f"{_fmt_shape(a['example_shape'])}: {a['example_latency']:.4g} vs SOL {a['example_sol']:.4g}"
             for a in sorted(v["below_sol"], key=lambda x: x["worst_fraction_of_sol"])

@@ -13,8 +13,14 @@ import pytest
 
 from aiconfigurator.sdk import common, rust_engine_step
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
+from aiconfigurator.sdk.performance_result import MoECommFallback
 
 pytestmark = pytest.mark.unit
+
+_CONTEXT_FALLBACK_PAYLOAD = ("context", "deepep_ht", 32, 8, 8, 1)
+_GENERATION_FALLBACK_PAYLOAD = ("generation", "deepep_ll", 32, 8, 8, 1)
+_CONTEXT_FALLBACK = MoECommFallback(*_CONTEXT_FALLBACK_PAYLOAD)
+_GENERATION_FALLBACK = MoECommFallback(*_GENERATION_FALLBACK_PAYLOAD)
 
 
 def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch) -> None:
@@ -22,9 +28,6 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
-    # The retired escape hatch is a deprecation no-op: the config value is
-    # ignored and the env's "rust" wins the re-resolution.
-    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
 
 
 def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
@@ -34,43 +37,24 @@ def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
     database = _real_database()
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
-    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
     # Unknown values fail closed instead of silently picking an engine.
     with pytest.raises(ValueError, match="engine_step_backend"):
         rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
 
 
-def test_python_backend_value_warns_once_and_noops(monkeypatch, caplog) -> None:
-    """The one-release deprecation contract: ``"python"`` is accepted, warns
-    exactly once per process, and routes to the compiled engine anyway."""
+def test_python_backend_value_is_removed(monkeypatch) -> None:
+    """The deprecated ``"python"`` no-op completed its one-release window
+    (deprecation-cleanup PR): the value now fails closed like any other
+    unknown backend, from both the config and the environment."""
     monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
-    rust_engine_step._python_step_fallback_reset()
     database = _real_database()
 
-    with caplog.at_level("WARNING", logger="aiconfigurator_core.sdk.rust_engine_step"):
-        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-    deprecations = [r for r in caplog.records if "deprecated" in r.message]
-    assert len(deprecations) == 1
-    # A no-op is not a python-step use: telemetry must not count it.
-    assert "explicit_python" not in rust_engine_step.python_step_fallback_counts()
-    # "No-op" means AS IF UNSET — the non-PerfDatabase delegation still
-    # applies (an early True would upgrade the retired escape hatch into an
-    # explicit-rust request and bypass the synthetic-database delegation).
-    assert not rust_engine_step.should_use_rust_engine_step(
-        RuntimeConfig(engine_step_backend="python"),
-        SimpleNamespace(system="mock", backend="vllm", version="1.0.0"),
-    )
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
 
-
-def test_invalid_env_behind_deprecated_python_config_is_named_in_the_error(monkeypatch) -> None:
-    """Config ``"python"`` re-resolves to the env; when THAT value is invalid,
-    the error must name the re-resolved value actually being rejected, not
-    the config's retired ``"python"``."""
-    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "auto")
-    rust_engine_step._python_step_fallback_reset()
-    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
-        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), _real_database())
+    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
 
 
 def _real_database():
@@ -251,31 +235,70 @@ def test_fold_per_op_accumulates_duplicate_names_and_merges_sources() -> None:
         ("attention", 1.0, 0.5, "silicon"),
     ]
 
-    latency, energy, source = rust_engine_step._fold_per_op(entries)
+    latency, energy, source, fallbacks = rust_engine_step._fold_per_op(entries)
     assert latency == {"gemm": 5.0, "attention": 2.0}
     assert energy == {"gemm": 15.0, "attention": 1.0}
     assert source == {"gemm": "mixed", "attention": "silicon"}
+    assert fallbacks == ()
     assert latency.keys() == energy.keys() == source.keys()
 
-    scaled_latency, scaled_energy, _ = rust_engine_step._fold_per_op(entries, scale=2.0)
+    scaled_latency, scaled_energy, _, _ = rust_engine_step._fold_per_op(entries, scale=2.0)
     assert scaled_latency == {"gemm": 10.0, "attention": 4.0}
     assert scaled_energy == {"gemm": 30.0, "attention": 2.0}
 
 
+def test_fold_per_op_preserves_every_ordered_fallback_record() -> None:
+    entries = [
+        (
+            "moe_dispatch",
+            2.0,
+            0.0,
+            "estimated",
+            [_GENERATION_FALLBACK_PAYLOAD, _CONTEXT_FALLBACK_PAYLOAD, _GENERATION_FALLBACK_PAYLOAD],
+        ),
+        ("attention", 1.0, 0.0, "silicon", None),
+    ]
+
+    _, _, _, fallbacks = rust_engine_step._fold_per_op(entries)
+
+    assert fallbacks == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
+
+
+def test_fold_per_op_reads_inline_first_fallback_metadata() -> None:
+    entries = [
+        (
+            "moe_dispatch",
+            2.0,
+            0.0,
+            "estimated",
+            (
+                _GENERATION_FALLBACK_PAYLOAD,
+                [_CONTEXT_FALLBACK_PAYLOAD, _GENERATION_FALLBACK_PAYLOAD],
+            ),
+        )
+    ]
+
+    _, _, _, fallbacks = rust_engine_step._fold_per_op(entries)
+
+    assert fallbacks == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
+
+
 def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> None:
     """The static helper maps ``RuntimeConfig`` onto
-    ``EngineHandle.run_static_per_op`` and folds the per-op entries into
-    real-name latency / energy / source dicts, applying
+    ``EngineHandle._run_static_per_op_with_metadata`` and folds the per-op
+    entries into real-name latency / energy / source dicts, applying
     ``latency_correction_scale`` per key to latency AND energy."""
     calls = []
 
     class _FakeHandle:
-        def run_static_per_op(self, **kwargs):
+        def _run_static_per_op_with_metadata(self, **kwargs):
             calls.append(kwargs)
-            # (context entries, generation entries): (name, latency_ms, energy_wms, source)
             return (
-                [("context_qkv_gemm", 4.0, 40.0, "silicon"), ("context_attention", 6.0, 0.0, "empirical")],
-                [("generation_qkv_gemm", 6.0, 12.0, "silicon")],
+                [
+                    ("context_qkv_gemm", 4.0, 40.0, "silicon"),
+                    ("context_moe_dispatch", 6.0, 0.0, "estimated", _CONTEXT_FALLBACK_PAYLOAD),
+                ],
+                [("generation_moe_dispatch", 6.0, 12.0, "estimated", _GENERATION_FALLBACK_PAYLOAD)],
             )
 
         def last_provenance(self):
@@ -293,6 +316,7 @@ def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> N
         generation_energy,
         context_source,
         generation_source,
+        fallbacks,
     ) = rust_engine_step.estimate_static_latency_breakdown_with_rust(
         model,
         database,
@@ -303,13 +327,14 @@ def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> N
     )
 
     # Real op names, latency AND energy scaled by 1.5 per key.
-    assert context_latency == {"context_qkv_gemm": 6.0, "context_attention": 9.0}
-    assert generation_latency == {"generation_qkv_gemm": 9.0}
-    assert context_energy == {"context_qkv_gemm": 60.0, "context_attention": 0.0}
-    assert generation_energy == {"generation_qkv_gemm": 18.0}
+    assert context_latency == {"context_qkv_gemm": 6.0, "context_moe_dispatch": 9.0}
+    assert generation_latency == {"generation_moe_dispatch": 9.0}
+    assert context_energy == {"context_qkv_gemm": 60.0, "context_moe_dispatch": 0.0}
+    assert generation_energy == {"generation_moe_dispatch": 18.0}
     # Real provenance tags cross the FFI (no synthetic "rust" source).
-    assert context_source == {"context_qkv_gemm": "silicon", "context_attention": "empirical"}
-    assert generation_source == {"generation_qkv_gemm": "silicon"}
+    assert context_source == {"context_qkv_gemm": "silicon", "context_moe_dispatch": "estimated"}
+    assert generation_source == {"generation_moe_dispatch": "estimated"}
+    assert fallbacks == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
 
     # The runtime config is forwarded verbatim (the Rust engine performs the
     # stride quadrature + (nextn+1) scaling internally).
@@ -336,10 +361,10 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
             mixed_calls.append((args, kwargs))
             return 8.5
 
-        def mixed_step_breakdown_per_op(self, *args, **kwargs):
+        def _mixed_step_breakdown_per_op_with_metadata(self, *args, **kwargs):
             breakdown_calls.append((args, kwargs))
             return (
-                [("context_mlp", 5.0, 50.0, "silicon")],
+                [("context_mlp", 5.0, 50.0, "estimated", _CONTEXT_FALLBACK_PAYLOAD)],
                 [("context_attention", 2.0, 20.0, "silicon")],
                 [("generation_attention", 1.5, 15.0, "silicon")],
             )
@@ -400,10 +425,11 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
         "component_energy_wms": {"shared_non_attention": 50.0, "context_attention": 20.0, "decode_attention": 15.0},
         "per_op_latency_ms": {"context_mlp": 5.0, "context_attention (scaled)": 2.0, "generation_attention": 1.5},
         "per_op_source": {
-            "context_mlp": "silicon",
+            "context_mlp": "estimated",
             "context_attention (scaled)": "silicon",
             "generation_attention": "silicon",
         },
+        "moe_comm_fallbacks": (_CONTEXT_FALLBACK,),
     }
     assert breakdown_calls == [
         (
@@ -420,7 +446,7 @@ def test_mixed_step_breakdown_bridge_shapes_missing_attention_passes(monkeypatch
     the Python branch's default ``"silicon"`` source."""
 
     class _FakeHandle:
-        def mixed_step_breakdown_per_op(self, *args, **kwargs):
+        def _mixed_step_breakdown_per_op_with_metadata(self, *args, **kwargs):
             return (
                 [("qkv_gemm", 3.0, 30.0, "silicon"), ("mlp", 2.0, 0.0, "empirical")],
                 [("context_attention", 4.0, 8.0, "empirical")],
@@ -469,17 +495,16 @@ def test_mixed_step_breakdown_bridge_shapes_missing_attention_passes(monkeypatch
 
 
 def test_decode_step_breakdown_folds_per_op_entries(monkeypatch) -> None:
-    """The decode bridge returns ``(latency_ms, energy_wms, per_op_latency,
-    per_op_source)`` folded from ``EngineHandle.decode_step_per_op`` — the
-    exact shape ``_get_genonly_step_latency`` produces on the Python step."""
+    """The decode bridge returns latency, energy, per-op data, and executed
+    fallback provenance from ``EngineHandle.decode_step_per_op``."""
     calls = []
 
     class _FakeHandle:
-        def decode_step_per_op(self, *args, **kwargs):
+        def _decode_step_per_op_with_metadata(self, *args, **kwargs):
             calls.append((args, kwargs))
             return [
                 ("generation_attention", 2.0, 20.0, "silicon"),
-                ("generation_mlp", 1.0, 4.0, "empirical"),
+                ("generation_mlp", 1.0, 4.0, "estimated", _GENERATION_FALLBACK_PAYLOAD),
             ]
 
         def last_provenance(self):
@@ -487,18 +512,21 @@ def test_decode_step_breakdown_folds_per_op_entries(monkeypatch) -> None:
 
     monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle())
 
-    latency_ms, energy_wms, per_op_latency, per_op_source = rust_engine_step.estimate_decode_step_breakdown_with_rust(
-        _dense_model(),
-        SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0"),
-        gen_tokens=7,
-        isl=256,
-        osl=256,
+    latency_ms, energy_wms, per_op_latency, per_op_source, fallbacks = (
+        rust_engine_step.estimate_decode_step_breakdown_with_rust(
+            _dense_model(),
+            SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0"),
+            gen_tokens=7,
+            isl=256,
+            osl=256,
+        )
     )
 
     assert latency_ms == 3.0
     assert energy_wms == 24.0
     assert per_op_latency == {"generation_attention": 2.0, "generation_mlp": 1.0}
-    assert per_op_source == {"generation_attention": "silicon", "generation_mlp": "empirical"}
+    assert per_op_source == {"generation_attention": "silicon", "generation_mlp": "estimated"}
+    assert fallbacks == (_GENERATION_FALLBACK,)
     assert calls == [((7, 256, 256), {"gen_seq_imbalance_correction_scale": 1.0})]
 
 
@@ -579,7 +607,7 @@ def test_rust_provenance_tier_forwarded_into_python_capture(monkeypatch) -> None
         def __init__(self, tier):
             self._tier = tier
 
-        def run_static_per_op(self, **kwargs):
+        def _run_static_per_op_with_metadata(self, **kwargs):
             return ([("context_attention", 10.0, 0.0, "silicon")], [("generation_attention", 6.0, 0.0, "silicon")])
 
         def mixed_step_latency(self, *args, **kwargs):
@@ -644,6 +672,30 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
 
     assert config["weight_dtype"] == "bfloat16"
     assert config["moe_dtype"] == "w4a16_mxfp4"
+
+
+def test_engine_config_json_preserves_w4a16_nvfp4_weight_and_moe_profiles() -> None:
+    model = SimpleNamespace(
+        model_path="Test/W4A16Nvfp4",
+        architecture="Qwen3ForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=None,
+            moe_ep_size=None,
+            gemm_quant_mode=common.GEMMQuantMode.w4a16_nvfp4,
+            moe_quant_mode=common.MoEQuantMode.w4a16_nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    config = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert config["weight_dtype"] == "w4a16_nvfp4"
+    assert config["moe_dtype"] == "w4a16_nvfp4"
 
 
 def test_configure_data_roots_passes_systems_path_through(tmp_path, monkeypatch) -> None:
@@ -800,7 +852,7 @@ def test_forward_pass_perf_model_native_default_directional_bounds_end_to_end() 
         "model_name": "Qwen/Qwen3-32B",
         "system_name": "h200_sxm",
         "backend": "trtllm",
-        "backend_version": "1.3.0rc10",
+        "backend_version": "1.3.0rc20",
         "tp_size": 4,
         "pp_size": 1,
         "moe_tp_size": None,
@@ -901,7 +953,7 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
         "model_name": "this/model-does-not-exist-xyz",
         "system_name": "h200_sxm",
         "backend": "trtllm",
-        "backend_version": "1.3.0rc10",
+        "backend_version": "1.3.0rc20",
         "tp_size": 1,
         "pp_size": 1,
         "moe_tp_size": None,
@@ -926,41 +978,38 @@ def test_sparse_cp_ops_emit_cp_fields_in_spec():
     _query_cp compositions), so the specs carry cp_size (+ window_size for
     dsv4 HCA) instead of refusing compilation. Both engines compute when the
     sparse tables exist and fail loud identically when they don't -- logical
-    parity does not wait for data."""
+    parity does not wait for data. Since the pyo3 op unification the op
+    serializes ITSELF (`_spec_json`); the pin now reads the real wire."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.operations import ContextDeepSeekV4AttentionModule
 
-    class _Dsv4Op:
-        _name = "context_attention"
-        _scale_factor = 1.0
-        _compress_ratio = 4
-        _num_heads = 64
-        _native_heads = 64
-        _tp_size = 1
-        _cp_size = 2
-        _window_size = 2048
-        # Structural dims the emitter forwards for the Rust-side SOL
-        # (real ops always carry these via _BaseDeepSeekV4AttentionModule).
-        _hidden_size = 7168
-        _q_lora_rank = 1536
-        _o_lora_rank = 1024
-        _head_dim = 512
-        _rope_head_dim = 64
-        _index_n_heads = 64
-        _index_head_dim = 128
-        _index_topk = 1024
-        _o_groups = 16
-        from aiconfigurator.sdk import common
-
-        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
-        _kv_cache_dtype = None
-        _fmha_quant_mode = common.FMHAQuantMode.bfloat16
-        _gemm_quant_mode = common.GEMMQuantMode.fp8_block
-
-    # exercised via the dict builder directly to avoid registry wiring
-    from aiconfigurator.sdk.engine import _dsv4_module
-
-    spec = _dsv4_module(_Dsv4Op(), architecture="DeepseekV4ForCausalLM")
+    op = ContextDeepSeekV4AttentionModule(
+        "context_attention",
+        1.0,
+        64,  # num_heads (per-rank)
+        64,  # native_heads
+        1,  # tp_size
+        7168,  # hidden_size
+        1536,  # q_lora_rank
+        1024,  # o_lora_rank
+        512,  # head_dim
+        64,  # rope_head_dim
+        64,  # index_n_heads
+        128,  # index_head_dim
+        1024,  # index_topk
+        2048,  # window_size
+        4,  # compress_ratio -> Csa
+        16,  # o_groups (rank-local)
+        common.KVCacheQuantMode.fp8,
+        common.FMHAQuantMode.bfloat16,
+        common.GEMMQuantMode.fp8_block,
+        architecture="DeepseekV4ForCausalLM",
+        cp_size=2,
+    )
+    spec = json.loads(op._spec_json())["Dsv4Context"]
     assert spec["cp_size"] == 2
     assert spec["window_size"] == 2048
+    assert spec["attn_kind"] == "Csa"
 
 
 def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
@@ -1092,24 +1141,20 @@ def test_op_conversion_error_raises_typed_and_memoized(monkeypatch):
 
 
 def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
-    """The WideEP MLA table axis is per-rank heads; the Python query converts
-    ``num_heads = 128 // tp_size`` (mla.py). The spec emitter must apply the
-    same conversion — emitting raw tp_size makes Rust query the wrong table
-    slice (tp=8 would read the heads=8 extrapolation instead of heads=16)."""
+    """The WideEP MLA table axis is per-rank heads; the retired Python query
+    converted ``num_heads = 128 // tp_size`` (mla.py). The Rust constructor
+    must apply the same conversion — emitting raw tp_size makes the engine
+    query the wrong table slice (tp=8 would read the heads=8 extrapolation
+    instead of heads=16)."""
     from aiconfigurator.sdk import common
-    from aiconfigurator.sdk.engine import _wideep_context_mla, _wideep_generation_mla
+    from aiconfigurator.sdk.operations import WideEPContextMLA, WideEPGenerationMLA
 
-    class _WideEpOp:
-        _name = "context_attention"
-        _scale_factor = 1.0
-        _tp_size = 8
-        _cp_size = 1
-        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
-        _fmha_quant_mode = common.FMHAQuantMode.fp8_block
-        _attn_backend = "flashinfer"
-
-    ctx_spec = _wideep_context_mla(_WideEpOp())
-    gen_spec = _wideep_generation_mla(_WideEpOp())
+    ctx = WideEPContextMLA("context_attention", 1.0, 8, common.KVCacheQuantMode.fp8, common.FMHAQuantMode.fp8_block)
+    gen = WideEPGenerationMLA(
+        "generation_attention", 1.0, 8, common.KVCacheQuantMode.fp8, common.FMHAQuantMode.fp8_block
+    )
+    ctx_spec = json.loads(ctx._spec_json())["WideEpContextMla"]
+    gen_spec = json.loads(gen._spec_json())["WideEpGenerationMla"]
     assert ctx_spec["num_heads"] == 16  # 128 // 8, NOT tp_size=8
     assert gen_spec["num_heads"] == 16
 
@@ -1127,7 +1172,6 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     field sets exactly — source of truth:
     ``rust/aiconfigurator-core/src/operators/moe_a2a.rs::MoeAllToAllOp`` and
     ``rust/aiconfigurator-core/src/operators/moe_expert_compute.rs::MoeExpertComputeOp``."""
-    from aiconfigurator.sdk.engine import _to_opspec
     from aiconfigurator.sdk.operations import MoEAllToAll, MoEExpertCompute
 
     a2a = MoEAllToAll(
@@ -1144,7 +1188,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         sms=20,
         attention_tp_size=1,
     )
-    a2a_spec = _to_opspec(a2a, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
+    a2a_spec = json.loads(a2a._spec_json())
     assert set(a2a_spec) == {"MoeAllToAll"}
     # rust `MoeAllToAllOp` fields (operators/moe_a2a.rs), verbatim.
     assert frozenset(a2a_spec["MoeAllToAll"]) == frozenset(
@@ -1181,7 +1225,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         is_gated=True,
         enable_eplb=True,
     )
-    ep_spec = _to_opspec(ep, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
+    ep_spec = json.loads(ep._spec_json())
     assert set(ep_spec) == {"MoeExpertCompute"}
     # rust `MoeExpertComputeOp` fields (operators/moe_expert_compute.rs), verbatim.
     assert frozenset(ep_spec["MoeExpertCompute"]) == frozenset(
@@ -1236,7 +1280,7 @@ def _h200_sglang_wideep_paths() -> list[str]:
 )
 def test_large_ep_op_graph_compiles_natively(caplog):
     """AIC-1601 (PR 2.5): the large-EP ops (MoEAllToAll / MoEExpertCompute) now have
-    ``_to_opspec`` branches and Rust mirrors, so a large-EP model compiles
+    Rust op constructors and wire mirrors, so a large-EP model compiles
     into the Rust engine natively — the documented Python-step fallback this
     test used to pin is retired. A rust-routed static run must answer with
     the scalar engine-step keys and match the Python step on the same
@@ -1266,7 +1310,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         num_gpus_per_node=8,
     )
     model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
-    database = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    # Current slot: the wideEP tables backfill from their 0.5.6.post2/0.5.9/
+    # 0.5.10/0.5.12 sole-source dirs while gemm/attention resolve on the
+    # primary — the production large-EP query shape.
+    database = get_database("h200_sxm", "sglang", "0.5.14")
 
     # (1) The op graph compiles into an EngineSpec carrying the tagged
     # large-EP variants, with the per-phase comm backends the config set.
@@ -1276,7 +1323,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
             model_path="deepseek-ai/DeepSeek-R1",
             system="h200_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
             kv_block_size=None,
             systems_path=None,
             nextn=0,
@@ -1324,17 +1371,160 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         rust_generation = sum(generation_latency.values())
         assert rust_context > 0.0 and rust_generation > 0.0
 
-        # (4) Parity with the Python step on the same config at rel <= 0.01
-        # (the PR 2.5 bar; the per-op oracles hold 1e-9, so this graph-level
-        # comparison has plenty of headroom).
-        python_runtime_config = RuntimeConfig(
-            batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="python"
+        # (Step 4 of the original test — "parity with the Python step" via
+        # engine_step_backend="python" — retired with the value: since the
+        # PR-3 no-op it had become a vacuous rust-vs-rust self-comparison,
+        # and the value itself is gone after the deprecation window. The
+        # per-op oracle parity for this graph lives in parity_tests/.)
+    finally:
+        rust_engine_step._engine_handle_cache_clear()
+
+
+@pytest.mark.integration
+def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_parser, monkeypatch, caplog):
+    """The production-shaped EP32/node8 request must identify the EP8/node1
+    silicon rows the Rust query actually used, while keeping generic per-op
+    source tags as ``estimated``."""
+    import logging
+
+    from aiconfigurator.cli.api import cli_estimate
+    from aiconfigurator.cli.estimate_detail_report import format_estimate_detail_report
+    from aiconfigurator.cli.main import _run_estimate_mode
+    from aiconfigurator.sdk.models import get_model
+    from aiconfigurator.sdk.perf_database import get_database
+
+    rust_engine_step._engine_handle_cache_clear()
+    try:
+        captured_results = []
+
+        def _capture_real_estimate(**kwargs):
+            result = cli_estimate(**kwargs)
+            captured_results.append(result)
+            return result
+
+        monkeypatch.setattr("aiconfigurator.cli.api.cli_estimate", _capture_real_estimate)
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "deepseek-ai/DeepSeek-R1",
+                "--system",
+                "gb200",
+                "--backend",
+                "sglang",
+                "--backend-version",
+                "0.5.16",
+                "--estimate-mode",
+                "static",
+                "--database-mode",
+                "SILICON",
+                "--isl",
+                "1024",
+                "--osl",
+                "32",
+                "--batch-size",
+                "1",
+                "--tp-size",
+                "1",
+                "--pp-size",
+                "1",
+                "--attention-dp-size",
+                "32",
+                "--moe-tp-size",
+                "1",
+                "--moe-ep-size",
+                "32",
+                "--gemm-quant-mode",
+                "fp8_block",
+                "--moe-quant-mode",
+                "fp8_block",
+                "--kvcache-quant-mode",
+                "fp8",
+                "--fmha-quant-mode",
+                "fp8_block",
+            ]
         )
-        python_summary = backend.run_static(model, database, python_runtime_config, mode="static", stride=32)
-        python_context = sum(python_summary.get_context_latency_dict().values())
-        python_generation = sum(python_summary.get_generation_latency_dict().values())
-        assert rust_context == pytest.approx(python_context, rel=0.01)
-        assert rust_generation == pytest.approx(python_generation, rel=0.01)
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator.cli.main"):
+            _run_estimate_mode(args)
+        result = captured_results[0]
+
+        expected = (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
+        assert result.moe_comm_fallbacks == expected
+        assert result.summary is not None
+        assert result.summary.get_moe_comm_fallbacks() == expected
+        assert result.summary.get_context_source_dict()["context_moe_dispatch"] == "estimated"
+        assert result.summary.get_generation_source_dict()["generation_moe_dispatch"] == "estimated"
+        assert (
+            "Estimated MoE communication latency used fallback silicon data: "
+            "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data." in caplog.messages
+        )
+
+        config = ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=32,
+            moe_tp_size=1,
+            moe_ep_size=32,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+            moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+            num_gpus_per_node=4,
+        )
+        model = get_model("deepseek-ai/DeepSeek-R1", config, "sglang")
+        database = get_database("gb200", "sglang", "0.5.16")
+        handle = rust_engine_step._cached_engine_handle(model, database)
+
+        def _fallback_payloads(entries):
+            payloads = []
+            for entry in entries:
+                metadata = entry[4]
+                if metadata is None:
+                    continue
+                assert isinstance(metadata, tuple) and len(metadata) == 2
+                first, additional = metadata
+                assert isinstance(first, tuple) and isinstance(additional, list)
+                payloads.append(first)
+                payloads.extend(additional)
+            return payloads
+
+        public_context, public_generation = handle.run_static_per_op(
+            batch_size=1,
+            isl=1024,
+            osl=32,
+            mode="static",
+            stride=32,
+        )
+        metadata_context, metadata_generation = handle._run_static_per_op_with_metadata(
+            batch_size=1,
+            isl=1024,
+            osl=32,
+            mode="static",
+            stride=32,
+        )
+        assert all(len(entry) == 4 for entry in (*public_context, *public_generation))
+        assert all(len(entry) == 5 for entry in (*metadata_context, *metadata_generation))
+        assert {payload[0] for payload in _fallback_payloads(metadata_context)} == {"context"}
+        assert {payload[0] for payload in _fallback_payloads(metadata_generation)} == {"generation"}
+
+        public_shared, _, _ = handle.mixed_step_breakdown_per_op(1024, 1, 1024, 32)
+        metadata_shared, metadata_context_attention, metadata_decode_attention = (
+            handle._mixed_step_breakdown_per_op_with_metadata(1024, 1, 1024, 32)
+        )
+        assert all(len(entry) == 4 for entry in public_shared)
+        assert {payload[0] for payload in _fallback_payloads(metadata_shared)} == {"context"}
+        assert not any(entry[4] is not None for entry in (*metadata_context_attention, *metadata_decode_attention))
+
+        public_decode = handle.decode_step_per_op(1, 1024, 32)
+        metadata_decode = handle._decode_step_per_op_with_metadata(1, 1024, 32)
+        assert all(len(entry) == 4 for entry in public_decode)
+        assert {payload[0] for payload in _fallback_payloads(metadata_decode)} == {"generation"}
+
+        detail = format_estimate_detail_report(result, detail="source")
+        assert "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data" in detail
+        assert "generation/deepep_ll: requested EP32/node8; using EP8/node1 silicon data" in detail
+
     finally:
         rust_engine_step._engine_handle_cache_clear()
 

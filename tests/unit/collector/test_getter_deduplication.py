@@ -387,10 +387,18 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
 
     # 1887 pre-Kimi-K3, +39 K3 w4a16_mxfp4 cases (grouped-topk mapping for
     # model_type kimi_linear), +99 Step-3.7-Flash executions after identical
-    # physical invocations are deduplicated by their consumer key, and +42
-    # Nemotron Super FP8 cases.
-    assert len(cases) == 2067
-    assert sum(len(case[1]) for case in cases) == 55809
+    # physical invocations are deduplicated by their consumer key, +42
+    # Nemotron Super FP8 cases, and +39 for MiniMax-M3's MoE row
+    # (6144/3072, 128x4, bf16).
+    assert len(cases) == 2106
+    assert sum(len(case[1]) for case in cases) == 56862
+    # MiniMax-M3's declared MoE geometry must be present as its own rows —
+    # a generator defect could drop it while unrelated cases preserve the
+    # aggregate counts above. (case[:8] = moe_type, num_tokens, hidden,
+    # inter, topk, num_experts, tp, ep.)
+    assert any(case[2] == 6144 and case[3] == 3072 and case[4] == 4 and case[5] == 128 for case in cases), (
+        "MiniMax-M3 MoE row (6144/3072, topk4, 128 experts) missing from the vLLM SM90 getter"
+    )
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —
@@ -504,6 +512,30 @@ def test_vllm_moe_declares_representable_parallel_topologies(monkeypatch):
     assert all(tp == 1 or ep == 1 for tp, ep in topologies)
     assert any(tp > 1 and ep == 1 for tp, ep in topologies)
     assert any(tp == 1 and ep > 1 for tp, ep in topologies)
+
+
+def test_common_moe_population_can_declare_a_required_ep_world(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    baseline = get_common_moe_test_cases(backend="vllm")
+
+    for ep_size in (8, 16, 32):
+        constrained = get_common_moe_test_cases(
+            backend="vllm",
+            required_expert_parallel_size=ep_size,
+        )
+        assert constrained
+        baseline_shapes = {
+            (case.hidden_size, case.inter_size, case.topk, case.num_experts, case.model_name) for case in baseline
+        }
+        assert {
+            (case.hidden_size, case.inter_size, case.topk, case.num_experts, case.model_name) for case in constrained
+        } <= baseline_shapes
+        assert all(case.num_experts % ep_size == 0 for case in constrained)
+
+    with pytest.raises(ValueError, match="required_expert_parallel_size must be positive"):
+        get_common_moe_test_cases(backend="vllm", required_expert_parallel_size=0)
 
 
 def test_vllm_moe_cuda_graph_fails_closed():

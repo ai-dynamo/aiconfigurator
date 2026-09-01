@@ -464,7 +464,7 @@ class TestEncoderMemoryInSummary:
     def _stub_engine_step(monkeypatch):
         """Stub the compiled-engine bridge so run_static needs no perf data.
 
-        The step boundary moved from per-op ``op.query()`` (formerly stubbed
+        The step boundary moved from per-op ``op._engine_query()`` (formerly stubbed
         with MagicMocks) to the rust bridge functions after the Python step
         path was removed; these tests are about the encoder MEMORY plumbing,
         so the step values are fixed dummies.
@@ -482,6 +482,7 @@ class TestEncoderMemoryInSummary:
                 {"generation_attention": 0.0},
                 {"context_attention": "silicon"},
                 {"generation_attention": "silicon"},
+                (),
             ),
         )
 
@@ -513,6 +514,7 @@ class TestEncoderMemoryInSummary:
         from types import SimpleNamespace
         from unittest.mock import MagicMock
 
+        from aiconfigurator.sdk.backends import base_backend as base_backend_module
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
         model = get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
@@ -526,8 +528,12 @@ class TestEncoderMemoryInSummary:
             },
         )
         self._stub_engine_step(monkeypatch)
-        for op in model.encoder_ops:
-            op.query = MagicMock(side_effect=AssertionError("encoder op should be skipped without image dimensions"))
+        # The encoder work boundary is `_run_encoder_phase_with_rust` (the
+        # retired per-op `op.query` no longer exists, so stubbing it would
+        # assert nothing). Raising here catches a regression where run_static
+        # evaluates encoder work despite zero image dimensions.
+        encoder_phase = MagicMock(side_effect=AssertionError("encoder phase must be skipped without image dimensions"))
+        monkeypatch.setattr(base_backend_module.BaseBackend, "_run_encoder_phase_with_rust", encoder_phase)
 
         rc = RuntimeConfig(batch_size=1, isl=512, osl=64)
         backend = TRTLLMBackend()
@@ -535,8 +541,7 @@ class TestEncoderMemoryInSummary:
 
         assert summary.get_encoder_latency_dict() == {}
         assert summary.get_encoder_memory() == {}
-        for op in model.encoder_ops:
-            op.query.assert_not_called()
+        encoder_phase.assert_not_called()
 
     def test_vl_model_with_images_has_encoder_memory(self, model_config, monkeypatch):
         """VL model with num_images>0: encoder_memory must contain weights/activations/kvcache."""

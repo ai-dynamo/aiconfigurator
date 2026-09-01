@@ -25,6 +25,7 @@ CORE_SDK_LEAF_MODULES = [
     "config",
     "config_builders",
     "engine",
+    "engine_table_view",
     "errors",
     "inference_summary",
     "memory",
@@ -66,13 +67,16 @@ CORE_SDK_LEAF_MODULES = [
     "operations.overlap",
     "operations.util_empirical",
     "perf_database",
-    "perf_interp.config",
-    "perf_interp.engine",
+    # perf_interp.* retired with the Python per-call query stack (#1357 PR-5):
+    # per-op interpolation lives in the compiled engine.
     "performance_result",
     "rust_engine_step",
     "step_estimate",
     "system_spec",
     "utils",
+    "work_delta.field",
+    "work_delta.planner",
+    "work_delta.solver",
 ]
 
 
@@ -109,7 +113,7 @@ def test_legacy_leaf_module_is_canonical_module(module_suffix: str) -> None:
     assert sys.modules[legacy_name] is sys.modules[canonical_name]
 
 
-@pytest.mark.parametrize("package_suffix", ["models", "operations", "perf_interp"])
+@pytest.mark.parametrize("package_suffix", ["models", "operations"])
 def test_legacy_package_reexports_canonical_public_surface(package_suffix: str) -> None:
     """Package facades preserve child wrappers and export canonical objects."""
     legacy_package = importlib.import_module(f"aiconfigurator.sdk.{package_suffix}")
@@ -156,7 +160,8 @@ def test_operations_baseline_exports_survive() -> None:
     window — never a side effect.
     """
     baseline = {
-        "Mamba2",  # deprecated composite, kept exported for the compat window
+        # (Mamba2 removed deliberately: the deprecated composite's window
+        #  closed with the deprecation-cleanup PR.)
         "FPMForwardOp",
         "Mamba2Kernel",
         "GDNKernel",

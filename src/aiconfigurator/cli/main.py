@@ -13,7 +13,11 @@ import pandas as pd
 import yaml
 
 from aiconfigurator import __version__
-from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
+from aiconfigurator.cli.estimate_detail_report import (
+    detail_requests_time,
+    format_estimate_detail_report,
+    format_moe_comm_fallback,
+)
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
@@ -26,15 +30,28 @@ from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
     ExperimentOutcome,
+    MissingSystemFlopsError,
     NoFeasibleConfigError,
+    PerfDataNotAvailableError,
+    SolNotImplementedError,
     is_expected_cli_error,
 )
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
+
+_SOL_DETAIL_UNAVAILABLE_ERRORS = (
+    PerfDataNotAvailableError,
+    EmpiricalNotImplementedError,
+    MissingSystemFlopsError,
+    SolNotImplementedError,
+)
 
 
 def _latest_support_matrix_version(
@@ -146,11 +163,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     common_parser.add_argument(
         "--engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
         help="Engine-step latency backend. The compiled Rust engine is the only step "
-        "executor; 'python' is DEPRECATED and now a no-op (it warns once and runs on "
-        "the compiled engine anyway — accepted for one release cycle, then removed).",
+        "executor ('rust'); the deprecated 'python' no-op was removed after its "
+        "one-release window.",
     )
     common_parser.add_argument(
         "--forward-model",
@@ -220,6 +237,16 @@ def _positive_float(value: str) -> float:
     if not (math.isfinite(f) and f > 0):
         raise argparse.ArgumentTypeError(f"must be a positive finite number, got {value!r}")
     return f
+
+
+def _memory_fraction(value: str) -> float:
+    """Argparse type for finite GPU memory fractions in ``(0, 1]``."""
+    import math
+
+    fraction = float(value)
+    if not (math.isfinite(fraction) and 0 < fraction <= 1):
+        raise argparse.ArgumentTypeError(f"must be a finite number in (0, 1], got {value!r}")
+    return fraction
 
 
 def _validate_model_path(model_path: str) -> str:
@@ -369,8 +396,9 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -808,6 +836,30 @@ def _add_estimate_mode_arguments(parser):
         help="System name for disagg decode workers. Defaults to --system if omitted.",
     )
     parser.add_argument(
+        "--prefill-free-gpu-memory-fraction",
+        type=_memory_fraction,
+        default=None,
+        help="Prefill worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for prefill.",
+    )
+    parser.add_argument(
+        "--decode-free-gpu-memory-fraction",
+        type=_memory_fraction,
+        default=None,
+        help="Decode worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for decode.",
+    )
+    parser.add_argument(
+        "--prefill-max-seq-len",
+        type=int,
+        default=None,
+        help="Prefill worker maximum sequence length (disagg). Overrides --max-seq-len for prefill.",
+    )
+    parser.add_argument(
+        "--decode-max-seq-len",
+        type=int,
+        default=None,
+        help="Decode worker maximum sequence length (disagg). Overrides --max-seq-len for decode.",
+    )
+    parser.add_argument(
         "--backend",
         choices=[backend.value for backend in common.BackendName],
         type=str,
@@ -821,8 +873,9 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -1407,6 +1460,25 @@ def _database_mode_requires_declared_perf_database(database_mode: str | None) ->
     }
 
 
+def _resolve_version_for_matching(system_name: str, backend_name: str, backend_version: str | None) -> str | None:
+    """Alias-aware form of a requested version for membership checks.
+
+    `get_supported_databases` enumerates resolved LITERALS, so every
+    comparison against it must resolve the requested alias per
+    (system, backend) first — otherwise `--backend-version current` is
+    rejected while its literal passes. Raw versions pass through untouched
+    (allow_unlisted: matching decides membership, not the slot gate);
+    unresolvable aliases (gate off / slot unpopulated) fall back to the raw
+    string so the membership check fails with the normal guidance.
+    """
+    if backend_version is None:
+        return None
+    try:
+        return perf_database.resolve_query_version(system_name, backend_name, backend_version, allow_unlisted=True)
+    except (ValueError, KeyError):
+        return backend_version
+
+
 def _ensure_backend_version_available(
     system_name: str,
     backend_name: str,
@@ -1434,7 +1506,35 @@ def _ensure_backend_version_available(
         raise SystemExit(1)
 
     versions = supported.get(system_name, {}).get(backend_name, [])
+    if backend_version in ("current", "previous", "next"):
+        # An alias that fails to resolve deserves the alias-specific error
+        # ("has no 'previous' version; available slots: ..."), not the
+        # generic missing-directory guidance that circularly suggests aliases.
+        try:
+            backend_version = perf_database.resolve_query_version(system_name, backend_name, backend_version)
+        except ValueError as e:
+            # User-facing gate message: no traceback wanted, so not
+            # logger.exception.
+            logger.error("%s", e)  # noqa: TRY400
+            raise SystemExit(1) from e
+    else:
+        backend_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
     if backend_version is None or backend_version in versions:
+        return
+
+    # Old-style raw-version escape: the loader-level unlisted-version gate
+    # (perf_database resolve) honors this variable; the precheck must not be
+    # stricter than the loader, or the documented escape is unreachable.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        logger.warning(
+            "AIC_ALLOW_UNLISTED_VERSIONS is set: querying raw version %s/%s on %s "
+            "outside the queryable slots %s. This data is not maintained to the "
+            "queryable bar; results may have partial op coverage.",
+            backend_name,
+            backend_version,
+            system_name,
+            versions,
+        )
         return
 
     systems_paths = perf_database.get_systems_paths()
@@ -1459,12 +1559,16 @@ def _ensure_backend_version_available(
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
-            "Fix: switch --backend-version to one of the available versions, "
-            "remove --backend-version to use latest, "
-            "or add a declared version directory with %s (legacy: %s) when this version "
-            "intentionally reuses shared-layer data.",
-            perf_database.REUSE_YAML_MARKER,
-            perf_database.SHARED_LAYER_REUSE_MARKER,
+            "Fix: switch --backend-version to one of the available slot versions "
+            "or the aliases current / previous / next, or remove "
+            "--backend-version to use current. Versions outside the slots "
+            "are data coordinates, not queryable versions "
+            "(see systems/query_versions.yaml).",
+        )
+        logger.error(
+            "Old-style raw-version query (data outside the slots is not "
+            "maintained to the queryable bar): re-run the same command with "
+            "AIC_ALLOW_UNLISTED_VERSIONS=1.",
         )
     else:
         logger.error("Available versions: none")
@@ -1547,8 +1651,8 @@ def build_default_tasks(
         moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
             deprecated and ignored; 'megamoe' is a real kernel selection).
         engine_step_backend: Engine-step latency backend. The compiled Rust
-            engine is the only step executor; "python" is a deprecated no-op
-            (warns once, runs on the compiled engine anyway).
+            engine is the only step executor; "rust" is the only accepted
+            value (the deprecated "python" no-op was removed).
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
             keeps the default. Both evaluate on the compiled engine ("fpm"
             through its native FpmForward operation).
@@ -1561,6 +1665,8 @@ def build_default_tasks(
     Returns:
         Task objects keyed by serving mode and, when requested, backend.
     """
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
+
     # Deprecated large-EP knobs: warn once, then ignore (the flag is NOT
     # forwarded to the tasks; an explicit moe_backend value still passes
     # through unchanged — 'deepep_moe' is inert in modeling, 'megamoe' real).
@@ -1594,6 +1700,7 @@ def build_default_tasks(
             sys_backends = supported.get(system, {})
             if not requires_declared_perf_database:
                 sys_versions = sys_backends.get(backend_name, [])
+                resolved_bv = _resolve_version_for_matching(system, backend_name, backend_version)
                 if not sys_versions:
                     logger.warning(
                         "No measured database for backend %s on system=%s; including it for %s estimates.",
@@ -1601,7 +1708,7 @@ def build_default_tasks(
                         system,
                         database_mode,
                     )
-                elif backend_version is not None and backend_version not in sys_versions:
+                elif resolved_bv is not None and resolved_bv not in sys_versions:
                     logger.warning(
                         "No measured database version %s for backend %s on system=%s; including it for %s estimates.",
                         backend_version,
@@ -1614,7 +1721,9 @@ def build_default_tasks(
             if backend_name not in sys_backends:
                 logger.warning("Skipping backend %s: not supported for system %s.", backend_name, system)
                 continue
-            if backend_version is not None and backend_version not in sys_backends.get(backend_name, []):
+            if backend_version is not None and _resolve_version_for_matching(
+                system, backend_name, backend_version
+            ) not in sys_backends.get(backend_name, []):
                 logger.warning(
                     "Skipping backend %s: version %s not available for system %s.",
                     backend_name,
@@ -1642,7 +1751,8 @@ def build_default_tasks(
             systems_to_check = [("prefill", system), ("decode", decode_system)]
         for role, sys_name in systems_to_check:
             versions = supported.get(sys_name, {}).get(backend, [])
-            if backend_version is not None and versions and backend_version not in versions:
+            resolved_bv = _resolve_version_for_matching(sys_name, backend, backend_version)
+            if resolved_bv is not None and versions and resolved_bv not in versions:
                 logger.warning(
                     "No measured database version %s for %s system=%s backend=%s; using %s estimates.",
                     backend_version,
@@ -1672,7 +1782,10 @@ def build_default_tasks(
                 decode_system,
             )
             return False
-        if backend_version is not None and backend_version not in decode_versions:
+        if (
+            backend_version is not None
+            and _resolve_version_for_matching(decode_system, backend_name, backend_version) not in decode_versions
+        ):
             logger.warning(
                 "Skipping disagg for backend %s: version %s not available for decode system %s.",
                 backend_name,
@@ -2436,6 +2549,27 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
 
     if estimate_mode not in ("agg", "disagg"):
         raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
+    if any(
+        fraction is not None
+        for fraction in (
+            args.prefill_free_gpu_memory_fraction,
+            args.decode_free_gpu_memory_fraction,
+        )
+    ):
+        raise SystemExit(
+            "--prefill-free-gpu-memory-fraction and --decode-free-gpu-memory-fraction "
+            "are not supported with --enable-epd; use --free-gpu-memory-fraction."
+        )
+    if any(
+        max_seq_len is not None
+        for max_seq_len in (
+            args.prefill_max_seq_len,
+            args.decode_max_seq_len,
+        )
+    ):
+        raise SystemExit(
+            "--prefill-max-seq-len and --decode-max-seq-len are not supported with --enable-epd; use --max-seq-len."
+        )
     workload = dict(
         enable_epd=True,
         backend_version=args.backend_version,
@@ -2522,6 +2656,7 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             **encoder_kwargs,
         )
     row = apply_row_power_coverage_gate(row)
+    _warn_moe_comm_fallbacks(row)
     logger.info("EPD %s single-point estimate:", estimate_mode)
     keys = (
         "ttft",
@@ -2548,6 +2683,16 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             logger.info("  %-16s unavailable (%.0f%% power-data coverage)", key, row.get("power_coverage", 0.0) * 100)
             continue
         logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
+
+
+def _warn_moe_comm_fallbacks(result) -> None:
+    """Warn when an estimate executed against substitute MoE topology data."""
+    fallbacks = result.get(MOE_COMM_FALLBACKS_COLUMN, ()) if isinstance(result, dict) else result.moe_comm_fallbacks
+    for fallback in fallbacks:
+        logger.warning(
+            "Estimated MoE communication latency used fallback silicon data: %s.",
+            format_moe_comm_fallback(fallback),
+        )
 
 
 def _run_estimate_mode(args):
@@ -2639,6 +2784,10 @@ def _run_estimate_mode(args):
             decode_moe_ep_size=args.decode_moe_ep_size,
             decode_batch_size=args.decode_batch_size,
             decode_num_workers=args.decode_num_workers,
+            prefill_free_gpu_memory_fraction=args.prefill_free_gpu_memory_fraction,
+            decode_free_gpu_memory_fraction=args.decode_free_gpu_memory_fraction,
+            prefill_max_seq_len=args.prefill_max_seq_len,
+            decode_max_seq_len=args.decode_max_seq_len,
         )
     elif estimate_mode == "afd":
         # gpus_per_node and f_tp_size are intentionally derived from the
@@ -2660,14 +2809,19 @@ def _run_estimate_mode(args):
         )
 
     result = cli_estimate(**estimate_kwargs)
+    _warn_moe_comm_fallbacks(result)
     sol_result = None
+    sol_detail_error = None
     if needs_sol_detail:
         if args.database_mode == common.DatabaseMode.SOL.name:
             sol_result = result
         else:
             sol_estimate_kwargs = dict(estimate_kwargs)
             sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
-            sol_result = cli_estimate(**sol_estimate_kwargs)
+            try:
+                sol_result = cli_estimate(**sol_estimate_kwargs)
+            except _SOL_DETAIL_UNAVAILABLE_ERRORS as exc:
+                sol_detail_error = str(exc)
 
     print("\n" + "=" * 60)
     print(f"  Performance Estimate ({result.mode})")
@@ -2829,6 +2983,8 @@ def _run_estimate_mode(args):
             report = format_estimate_detail_report(result, sol_result, detail=detail_arg)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
+        if sol_detail_error is not None:
+            report = f"SOL comparison unavailable: {sol_detail_error}\n\n{report}"
         if report:
             print("\n" + "-" * 60)
             print(f"  Detailed Breakdown ({detail_arg})")

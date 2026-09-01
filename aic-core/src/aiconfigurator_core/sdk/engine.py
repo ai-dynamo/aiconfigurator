@@ -10,18 +10,21 @@ layer (``sdk/models/*.py``) to build a model, walks its
 plain-data ``OpSpec`` wire form, and ships the whole thing across the boundary
 as a bincode-serialised ``EngineSpec``.
 
-The wire is shaped in two hops:
+Since the pyo3 op unification the ``Operation`` objects the model layer
+builds ARE engine ops (Rust pyclasses; ``operations/*.py`` keeps thin
+data-plane shells). Serialization is therefore Rust-to-Rust:
 
-1. Python builds an ``EngineSpec`` as a JSON-serialisable dict — the ``Op``
-   variants are externally tagged (``{"Gemm": {<fields>}}``), matching serde's
-   default enum encoding, and the field names match the Rust struct field
-   names. JSON is the debuggable wire; a misnamed field or a wrong phase-pair
-   tag shows up as a ``serde_json`` decode error.
-2. The Rust ``engine_spec_bincode_from_json`` ``#[pyfunction]`` decodes that
-   JSON into an ``EngineSpec`` and re-encodes it as bincode bytes (Python can't
-   bincode; serde_json round-trips ``EngineConfig``'s flattened layout where
-   bincode can't). Those bytes are what ``AicEngine.from_spec`` /
-   ``build_aic_engine`` consume.
+1. Each op serializes itself to the externally-tagged ``OpSpec`` wire form
+   (``{"Gemm": {<fields>}}``) via the Rust ``_spec_json`` /
+   ``ops_json_from_ops`` surfaces — there is no Python field-by-field
+   serializer left to drift. The one Python-side op (``FPMForwardOp``, a
+   whole-model orchestration wrapper) converts through a small adapter dict
+   + ``op_from_spec_json``.
+2. The Rust ``engine_spec_bincode_from_json`` ``#[pyfunction]`` decodes the
+   assembled ``EngineSpec`` JSON and re-encodes it as bincode bytes (JSON is
+   the debuggable wire; serde_json round-trips ``EngineConfig``'s flattened
+   layout where bincode can't). Those bytes are what ``AicEngine.from_spec``
+   and the Rust ``AicEngineBuilder`` consume.
 
 ``EngineHandle`` wraps the compiled bytes plus an ``AicEngine`` and exposes the
 per-call surface (``run_static`` / ``predict_*_latency`` / ``mixed_step_latency``
@@ -41,42 +44,13 @@ from typing import Any
 import aiconfigurator_core
 from aiconfigurator_core.sdk.config_builders import apply_nextn, build_model_config
 from aiconfigurator_core.sdk.models import get_model
-from aiconfigurator_core.sdk.operations import (
-    GEMM,
-    NCCL,
-    P2P,
-    ContextAttention,
-    ContextDeepSeekV4AttentionModule,
-    ContextDSAModule,
-    ContextMLA,
-    ContextMSAModule,
-    CustomAllReduce,
-    DeepSeekV4MegaMoEModule,
-    DeepSeekV4MHCModule,
-    ElementWise,
-    Embedding,
-    EncoderAttention,
-    FallbackOp,
-    FPMForwardOp,
-    GDNKernel,
-    GenerationAttention,
-    GenerationDeepSeekV4AttentionModule,
-    GenerationDSAModule,
-    GenerationMLA,
-    GenerationMSAModule,
-    KDAKernel,
-    Mamba2Kernel,
-    MLABmm,
-    MLAModule,
-    MoE,
-    MoEAllToAll,
-    MoEDispatch,
-    MoEExpertCompute,
-    OverlapOp,
-    WideEPContextMLA,
-    WideEPGenerationMLA,
-)
-from aiconfigurator_core.sdk.operations.dsa import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS
+from aiconfigurator_core.sdk.operations import FPMForwardOp
+from aiconfigurator_core.sdk.operations.base import Operation
+
+PerOpValue = tuple[str, float, float, str]
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
 
 # Reuse the exact quant-mode -> Rust ``DataType`` serde-string mappers the live
 # ctypes bridge uses, so the compiled ``EngineConfig`` decodes the same way.
@@ -124,7 +98,18 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `MoeExpertCompute` variants appended after `FpmForward`, and
 #   `MoeExpertComputeOp` carries the
 #   `enable_eplb` legacy-fidelity field.
-ENGINE_SPEC_SCHEMA_VERSION = 11
+# - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
+#   bincode op-layout change (same class as v5/v7/v8/v10; serde(default)
+#   only covers the JSON wire, bincode is positional).
+# - 13 (deprecation-cleanup PR): the engine owns shared-layer source
+#   resolution. `EngineConfig` dropped the Python-resolved `perf_db_sources`
+#   map (a bincode config-layout change) and gained `enable_shared_layer` /
+#   `strict_provenance` policy flags; the engine re-derives every table's
+#   source list from the perf-data tree
+#   (`perf_database/source_resolution.rs`).
+# Single owner: the Rust crate constant. Python re-exports it for
+# diagnostics/tests instead of declaring a twin to keep in sync.
+ENGINE_SPEC_SCHEMA_VERSION = aiconfigurator_core.engine_spec_schema_version()
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -135,657 +120,58 @@ class OpConversionError(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
-# Per-op conversion: Python Operation -> externally-tagged OpSpec dict.
-#
-# Each helper returns the inner field dict (Rust struct field names). The
-# dispatch table below wraps it in `{"<VariantTag>": <fields>}`. All values
-# read directly off the Python instance attributes (every field is a
-# build-time instance attr); the few cat-2 derived fields
-# (Elementwise.bytes_per_token, DSv4.attn_kind, MoeDispatch.flavor)
-# replicate the Rust model-builder derivation.
+# Op -> wire. Ops are Rust objects; conversion is delegated to the engine.
 # --------------------------------------------------------------------------- #
 
 
-def _quant_name(quant_mode: Any) -> str:
-    """Python quant-mode enum member -> the Rust serde `snake_case` string.
+def _fpm_spec_dict(op: FPMForwardOp) -> dict:
+    """The ``FpmForward`` OpSpec dict for the one Python-side op class.
 
-    The Python enum member ``.name`` (e.g. ``fp8_block``, ``int8_wo``) is
-    exactly the string the Rust `#[serde(rename_all = "snake_case")]` quant
-    enums expect, so this is a direct pass-through.
-    """
-    return quant_mode.name
-
-
-def _gemm(op: GEMM) -> dict:
+    ``FPMForwardOp`` is a whole-model orchestration wrapper (its per-op
+    roofline sources live in ``sol_ops``); it stays Python because its fields
+    are compile products, not silicon tables. The identity strings were
+    normalized by ``_norm_identity`` at op construction; Rust compares them
+    verbatim."""
     return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "n": op._n,
-        "k": op._k,
-        "quant_mode": _quant_name(op._quant_mode),
-        "scale_num_tokens": op._scale_num_tokens,
-        "low_precision_input": op._low_precision_input,
-        "seq_split": op._seq_split,
-        "below_grid_sol": op._below_grid_sol,
-    }
-
-
-def _embedding(op: Embedding) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "vocab_size": op._row_size,
-        "hidden_size": op._column_size,
-        # Embedding has no quant mode; Rust types it as GemmQuantMode and the
-        # query ignores it (memory-only op). Bfloat16 is the neutral value the
-        # Rust builders use for embeddings.
-        "quant_mode": "bfloat16",
-        "seq_split": op._seq_split,
-    }
-
-
-def _elementwise(op: ElementWise) -> dict:
-    # `scale_num_tokens` rides the wire as its own field so the Rust op can
-    # reproduce Python's integer order exactly (`x //= scale` THEN the CP
-    # ceil-split). Folding it into bytes_per_token (the old encoding) is only
-    # exact when the divisor divides the token count.
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "bytes_per_token": float(op._dim_in * 2 + op._dim_out * 2),
-        "scale_num_tokens": op._scale_num_tokens if op._scale_num_tokens else 1,
-        "seq_split": op._seq_split,
-    }
-
-
-def _context_attention(op: ContextAttention) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "n": op._n,
-        "n_kv": op._n_kv,
-        "head_size": op._head_size,
-        "window_size": op._window_size,
-        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        "use_qk_norm": op._use_qk_norm,
-        "cp_size": op._cp_size,
-    }
-
-
-def _generation_attention(op: GenerationAttention) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "n": op._n,
-        "n_kv": op._n_kv,
-        "head_size": op._head_size,
-        "window_size": op._window_size,
-        "kv_cache_dtype": _quant_name(op._kv_cache_dtype),
-    }
-
-
-def _encoder_attention(op: EncoderAttention) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "n": op._n,
-        "head_size": op._head_size,
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        # Partial-RoPE extra (Qwen3-VL uses 0.5); Rust adds
-        # `factor * 2 * mem_op(Q+K bytes) * 1.1` on top of the table latency.
-        "partial_rotary_factor": float(getattr(op, "_partial_rotary_factor", 0.0) or 0.0),
-    }
-
-
-def _context_mla(op: ContextMLA) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": op._num_heads,
-        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        "cp_size": op._cp_size,
-    }
-
-
-def _generation_mla(op: GenerationMLA) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": op._num_heads,
-        "kv_cache_dtype": _quant_name(op._kv_cache_dtype),
-    }
-
-
-def _mla_module(op: MLAModule) -> dict:
-    spec = {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": op._num_heads,
-        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
-    }
-    # Emitted only when set: keeps specs from legacy builders byte-identical
-    # (the Rust field is #[serde(default)]; Rust bincode always serializes it, #1458).
-    if op._native_num_heads is not None:
-        spec["native_num_heads"] = op._native_num_heads
-    return spec
-
-
-def _mla_bmm(op: MLABmm) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": op._num_heads,
-        "quant_mode": _quant_name(op._quant_mode),
-        "is_pre": op._if_pre,
-    }
-
-
-def _moe(op: MoE) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._hidden_size,
-        "inter_size": op._inter_size,
-        "topk": op._topk,
-        "num_experts": op._num_experts,
-        "moe_tp_size": op._moe_tp_size,
-        "moe_ep_size": op._moe_ep_size,
-        "attention_dp_size": op._attention_dp_size,
-        "quant_mode": _quant_name(op._quant_mode),
-        "workload_distribution": op._workload_distribution,
-        "is_gated": op._is_gated,
-        # SGLang MoE routing (Python `MoE.query` sglang branch). The
-        # deepep_moe value is retired on the Rust side (AIC-1601 — it raises a
-        # typed retired-op error); the field stays on the wire because EPLB
-        # corrects the prefill token count to int(x * 0.8).
-        "moe_backend": op._moe_backend,
-        "enable_eplb": bool(op._enable_eplb),
-        "is_context": bool(op._is_context),
-    }
-
-
-def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
-    """Resolve the Rust `DispatchFlavor` variant for a dispatch op. The enum
-    has no serde rename, so emit the exact variant name:
-
-    - trtllm -> `TrtllmAlltoall` (the fine SM/NVL72 gating stays inside the
-      Rust `MoEDispatchOp::query`);
-    - everything else -> `CustomAllReduce`.
-
-    The sglang `moe_backend == "deepep_moe"` mapping to the DeepEP flavors
-    retired with AIC-1601 (large-EP comm is modeled by `MoEAllToAll`); those
-    Rust variants no longer exist — but Python still routes a direct/custom
-    `MoEDispatch(moe_backend="deepep_moe")` through the DeepEP tables, so
-    serializing that op as `CustomAllReduce` would silently change the
-    communication algorithm in the native engine. Raise `OpConversionError`
-    instead: the established contract for graphs the native engine cannot
-    represent, which delegates the step back to Python.
-    """
-    if backend == "deepep_moe":
-        raise OpConversionError(
-            "MoEDispatch(moe_backend='deepep_moe') has no native variant (retired with "
-            "AIC-1601; large-EP comm is modeled by MoEAllToAll) — delegating to the Python step"
-        )
-    if backend == "trtllm":
-        return "TrtllmAlltoall"
-    return "CustomAllReduce"
-
-
-def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
-    # Python `MoEDispatch._quant_mode` may be None (kwarg); Rust types it as a
-    # required MoeQuantMode. Default to bfloat16 (the neutral value) when unset,
-    # matching the Rust builders which pass the model's moe quant mode.
-    quant = op._quant_mode
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._hidden_size,
-        "topk": op._topk,
-        "num_experts": op._num_experts,
-        "moe_tp_size": op._moe_tp_size,
-        "moe_ep_size": op._moe_ep_size,
-        "attention_dp_size": op._attention_dp_size,
-        "pre_dispatch": op._pre_dispatch,
-        "attn_ar_modeled": op._attn_ar_modeled,
-        "backend": backend,
-        "flavor": _dispatch_flavor(backend, op),
-        # Retained on the wire (the Rust struct still carries the field);
-        # inert since the DeepEP dispatch branches retired (AIC-1601).
-        "scale_num_tokens": op._scale_num_tokens,
-        "comm_quant": "half",
-        "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
-        "attn_cp_size": op._attn_cp_size,
-        "is_context": op._is_context,
-        # Retained on the wire (the Rust struct still carries the field);
-        # inert since the DeepEP dispatch branches retired (AIC-1601).
-        "sms": op._sms,
-    }
-
-
-def _custom_all_reduce(op: CustomAllReduce) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._h,
-        "tp_size": op._tp_size,
-        "quant": "half",
-        "seq_split": op._seq_split,
-    }
-
-
-def _nccl(op: NCCL) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._num_elements_per_token,
-        "num_gpus": op._num_gpus,
-        # Pass the op's real comm dtype through (every current model builder
-        # passes half, but the NCCL op supports int8/fp8 and the Rust enum
-        # carries them). CustomAllReduce / MoEDispatch stay "half" by
-        # construction — Python hardcodes CommQuantMode.half at their query
-        # sites, so "half" IS the parity value there.
-        "dtype": op._comm_quant_mode.name,
-        "operation": op._nccl_op,
-        "seq_split": op._seq_split,
-    }
-
-
-def _p2p(op: P2P) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "pp_size": op._pp_size,
-        "hidden_size": op._h,
-        "seq_split": op._seq_split,
-    }
-
-
-def _msa_module(op: ContextMSAModule | GenerationMSAModule) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": op._num_heads,
-        "num_kv_heads": op._num_kv_heads,
-        "hidden_size": op._hidden_size,
-        "head_dim": op._head_dim,
-        "v_head_dim": op._v_head_dim,
-        "index_n_heads": op._index_n_heads,
-        "index_head_dim": op._index_head_dim,
-        "index_topk": op._index_topk,
-        "block_size": op._block_size,
-        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
-        "dsa_architecture": op._dsa_architecture,
-        "dsa_scale_k": op._dsa_scale_k,
-    }
-
-
-def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str) -> dict:
-    # GenerationDSAModule stores `_kv_cache_dtype`; ContextDSAModule stores
-    # `_kvcache_quant_mode` + `_fmha_quant_mode`. The Rust `DsaModuleOp` carries
-    # both quant fields for either phase; fill the missing one with bfloat16
-    # (generation has no separate fmha mode in Python).
-    kv = getattr(op, "_kvcache_quant_mode", None) or getattr(op, "_kv_cache_dtype", None)
-    fmha = getattr(op, "_fmha_quant_mode", None)
-    arch = op._architecture or architecture
-    # `index_topk` is the top-k boundary used by the context piecewise / robust
-    # 3-D dispatch. Python sources it from `DSA_MODEL_DIMS[arch]` (defaulting to
-    # the default DSA architecture); mirror that so the Rust op-spec carries the
-    # same boundary. Field name MUST match the Rust `DsaModuleOp.index_topk`.
-    dims = DSA_MODEL_DIMS.get(arch, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": op._num_heads,
-        "cp_size": getattr(op, "_cp_size", 1) or 1,
-        "kv_cache_dtype": _quant_name(kv),
-        "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
-        "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
-        "architecture": arch,
-        "index_topk": int(dims["index_topk"]),
-        # GLM-5.2 shared-index amortization: per-layer cost is
-        # `full_frac*full + (1-full_frac)*skip` (see `ContextDSAModule.query`).
-        # 1.0 (DeepSeek-V3.2 / GLM-5) keeps the pure-full path.
-        "full_frac": float(getattr(op, "_full_frac", 1.0)),
-    }
-
-
-def _attn_kind_for_ratio(ratio: int) -> str:
-    """Mirror Rust `models/deepseek_v4.rs::attn_kind_for_ratio`:
-    compress_ratio 4 -> Csa, {0, 128} -> Hca. `AttnKind` has no serde rename.
-    """
-    return "Csa" if ratio == 4 else "Hca"
-
-
-def _dsv4_module(
-    op: ContextDeepSeekV4AttentionModule | GenerationDeepSeekV4AttentionModule,
-    *,
-    architecture: str,
-) -> dict:
-    kv = getattr(op, "_kvcache_quant_mode", None) or getattr(op, "_kv_cache_dtype", None)
-    fmha = getattr(op, "_fmha_quant_mode", None)
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "attn_kind": _attn_kind_for_ratio(op._compress_ratio),
-        "num_heads": op._num_heads,
-        "cp_size": getattr(op, "_cp_size", 1) or 1,
-        "window_size": getattr(op, "_window_size", None),
-        # native_heads (model total head count) selects the table slice;
-        # tp_size is the table's primary interpolation axis. See
-        # `perf_database::dsv4` / `load_context_dsv4_kind_module_data`.
-        "native_heads": op._native_heads,
-        "tp_size": op._tp_size,
-        "kv_cache_dtype": _quant_name(kv),
-        "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
-        "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
-        "architecture": architecture,
-        # Structural dims for the Rust-side analytic SOL (beyond-grid
-        # util-hold ratios). Python's op carries them from the model config
-        # (`_deepseek_v4_attention_sol` inputs); without them the Rust side
-        # would pin DeepSeek-V4-Pro dims and Flash's ratios would drift.
-        "hidden_size": op._hidden_size,
-        "q_lora_rank": op._q_lora_rank,
-        "o_lora_rank": op._o_lora_rank,
-        "head_dim": op._head_dim,
-        "rope_head_dim": op._rope_head_dim,
-        "index_n_heads": op._index_n_heads,
-        "index_head_dim": op._index_head_dim,
-        "index_topk": op._index_topk,
-        # Rank-LOCAL o_groups (the model pre-divides by tp).
-        "o_groups": op._o_groups,
-    }
-
-
-def _dsv4_megamoe(op: DeepSeekV4MegaMoEModule) -> dict:
-    """SGLang DeepSeek-V4 MegaMoE routed module (Python
-    ``DeepSeekV4MegaMoEModule``). One class serves both phases via
-    ``is_context``, so a single Rust variant carries the flag. Field names
-    match the Rust ``Dsv4MegaMoeOp``; ``workload_distribution`` is already
-    normalized by the ctor (``uniform`` -> ``balanced``)."""
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._hidden_size,
-        "inter_size": op._inter_size,
-        "topk": op._topk,
-        "num_experts": op._num_experts,
-        "moe_tp_size": op._moe_tp_size,
-        "moe_ep_size": op._moe_ep_size,
-        "quant_mode": _quant_name(op._quant_mode),
-        "workload_distribution": op._workload_distribution,
-        "is_context": op._is_context,
-        "source_policy": op._source_policy,
-        "pre_dispatch": op._pre_dispatch,
-        "num_fused_shared_experts": op._num_fused_shared_experts,
-        "kernel_source": op._kernel_source,
-        "kernel_dtype": op._kernel_dtype,
-    }
-
-
-def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        # op (pre/post/both) is part of the mHC table key — pre and post have
-        # distinct latencies. See `perf_database::mhc` / `_query_mhc_table`.
-        "op": op._op,
-        "hc_mult": op._hc_mult,
-        "hidden_size": op._hidden_size,
-        "architecture": architecture,
-        # SOL inputs for the Rust-side mHC roofline (beyond-range util-hold
-        # anchor; mirrors `_query_mhc_table.get_sol`).
-        "sinkhorn_iters": op._sinkhorn_iters,
-        "quant_mode": _quant_name(op._quant_mode),
-        # CP: token-major module, per-rank tokens = ceil(x / seq_split)
-        # (issue #1498 — the missing division was the DSV4 CSA CP divergence).
-        "seq_split": op._seq_split,
-    }
-
-
-def _mamba2(op: Mamba2Kernel) -> dict:
-    # Rust `Mamba2Op.d_model` == hidden_size (the Rust builders set `d_model: h`).
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "kernel_source": op._kernel_source,
-        "phase": op._phase,
-        "d_model": op._hidden_size,
-        "d_state": op._d_state,
-        "d_conv": op._d_conv,
-        "nheads": op._nheads,
-        "head_dim": op._head_dim,
-        "n_groups": op._n_groups,
-        "chunk_size": op._chunk_size,
-    }
-
-
-def _gdn(op: GDNKernel) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "kernel_source": op._kernel_source,
-        "phase": op._phase,
-        "d_model": op._d_model,
-        "d_conv": op._d_conv,
-        "num_k_heads": op._num_k_heads,
-        "head_k_dim": op._head_k_dim,
-        "num_v_heads": op._num_v_heads,
-        "head_v_dim": op._head_v_dim,
-    }
-
-
-def _kda(op: KDAKernel) -> dict:
-    return {**_gdn(op), "draft_tokens": op._draft_tokens}
-
-
-def _wideep_context_mla(op: WideEPContextMLA) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        # The op stores tp_size; the Rust table axis is per-rank heads. Mirror
-        # the Python query's conversion (mla.py: `num_heads = 128 // tp_size`,
-        # DeepSeek's 128 total heads).
-        "num_heads": 128 // op._tp_size,
-        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        "attn_backend": op._attn_backend,
-        "cp_size": op._cp_size,
-    }
-
-
-def _wideep_generation_mla(op: WideEPGenerationMLA) -> dict:
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "num_heads": 128 // op._tp_size,
-        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
-        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
-        "attn_backend": op._attn_backend,
-    }
-
-
-def _moe_all_to_all(op: MoEAllToAll) -> dict:
-    """Unified large-EP all-to-all comm phase (Python `MoEAllToAll`). Field
-    names match the Rust `MoeAllToAllOp` (operators/moe_a2a.rs); the crate has
-    no deny_unknown_fields, so a key drift here would silently fall back to
-    the serde default — the key-set tripwire in test_rust_engine_step.py pins
-    the exact set."""
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "phase": op._phase,
-        "comm_backend": op._comm_backend,
-        "comm_dtype": op._comm_dtype,
-        "hidden_size": op._hidden_size,
-        "topk": op._topk,
-        "num_experts": op._num_experts,
-        "moe_ep_size": op._moe_ep_size,
-        "node_num": op._node_num,
-        "sms": op._sms,
-        "attention_tp_size": op._attention_tp_size,
-    }
-
-
-def _moe_expert_compute(op: MoEExpertCompute) -> dict:
-    """Unified large-EP expert compute (Python `MoEExpertCompute`). Field names match the
-    Rust `MoeExpertComputeOp` (operators/moe_expert_compute.rs). `kernel_source` crosses the wire
-    verbatim (null when unpinned — the production case): the Rust op ports
-    every `_resolve_kernel_source` leg and resolves at query time, so nothing
-    is pre-baked here. `num_slots` is the ctor-resolved value (Python already
-    collapsed None -> num_experts)."""
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._hidden_size,
-        "inter_size": op._inter_size,
-        "topk": op._topk,
-        "num_experts": op._num_experts,
-        "moe_ep_size": op._moe_ep_size,
-        "quant_mode": _quant_name(op._quant_mode),
-        "workload_distribution": op._workload_distribution,
-        "attention_dp_size": op._attention_dp_size,
-        "inference_phase": op._inference_phase,
-        "num_slots": op._num_slots,
-        "kernel_source": op._kernel_source,
-        "is_gated": bool(op._is_gated),
-        "enable_eplb": bool(op._enable_eplb),
-    }
-
-
-def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> dict:
-    """Convert one Python ``Operation`` to its externally-tagged ``OpSpec`` dict.
-
-    Dispatches on the concrete Python class. Phase-pair variants
-    (``MLAModule`` -> ``MlaModuleContext`` / ``MlaModuleGeneration``) and the
-    recursive composites (``OverlapOp`` / ``FallbackOp``) are handled here.
-    """
-
-    def recurse(child: Any) -> dict:
-        return _to_opspec(child, backend=backend, architecture=architecture, database=database)
-
-    # Recursive composites first.
-    if isinstance(op, OverlapOp):
-        return {
-            "Overlap": {
-                "name": op._name,
-                "group_a": [recurse(c) for c in op._group_a],
-                "group_b": [recurse(c) for c in op._group_b],
-            }
+        "FpmForward": {
+            "name": op._name,
+            "phase": op._phase,
+            "model_path": op._model_path,
+            "match_identity": list(op._match_identity),
+            "weight_bytes": op._weight_bytes,
+            "sol_ops": [json.loads(_as_engine_op(c)._spec_json()) for c in op._sol_ops],
         }
-    if isinstance(op, FallbackOp):
-        return {
-            "Fallback": {
-                "name": op._name,
-                "primary": recurse(op._primary),
-                "fallback": [recurse(c) for c in op._fallback],
-            }
-        }
+    }
 
-    # Whole-model FPM op (forward_model="fpm"): recursive like the composites —
-    # `sol_ops` carries the model's original granular list as the roofline
-    # source. The identity strings were normalized by _norm_identity at op
-    # construction; Rust compares them verbatim.
+
+def _as_engine_op(op: Any) -> Operation:
+    """Return the engine-backed form of ``op``.
+
+    Engine ops (Rust ``Operation`` subclasses, i.e. every family shell) pass
+    through; ``FPMForwardOp`` converts via its adapter dict +
+    ``op_from_spec_json``. Anything else — the AFD orchestration ops, ad-hoc
+    stand-ins — raises ``OpConversionError``, the established contract for
+    graphs the native engine cannot represent."""
+    if isinstance(op, Operation):
+        return op
     if isinstance(op, FPMForwardOp):
-        return {
-            "FpmForward": {
-                "name": op._name,
-                "phase": op._phase,
-                "model_path": op._model_path,
-                "match_identity": list(op._match_identity),
-                "weight_bytes": op._weight_bytes,
-                "sol_ops": [recurse(c) for c in op._sol_ops],
-            }
-        }
-
-    # MLAModule: one class, two Rust variants by phase.
-    if isinstance(op, MLAModule):
-        tag = "MlaModuleContext" if op._is_context else "MlaModuleGeneration"
-        return {tag: _mla_module(op)}
-
-    # DSA / DSv4: separate Python classes per phase.
-    if isinstance(op, ContextDSAModule):
-        return {"DsaContext": _dsa_module(op, architecture=architecture)}
-    if isinstance(op, GenerationDSAModule):
-        return {"DsaGeneration": _dsa_module(op, architecture=architecture)}
-    if isinstance(op, ContextMSAModule):
-        return {"MsaContext": _msa_module(op)}
-    if isinstance(op, GenerationMSAModule):
-        return {"MsaGeneration": _msa_module(op)}
-    if isinstance(op, ContextDeepSeekV4AttentionModule):
-        return {"Dsv4Context": _dsv4_module(op, architecture=architecture)}
-    if isinstance(op, GenerationDeepSeekV4AttentionModule):
-        return {"Dsv4Generation": _dsv4_module(op, architecture=architecture)}
-    # Rust `Op::Dsv4MegaMoe` is APPENDED after `Fallback` (bincode enum
-    # indices are positional; appending shifts nothing), so no
-    # ENGINE_SPEC_SCHEMA_VERSION bump.
-    if isinstance(op, DeepSeekV4MegaMoEModule):
-        return {"Dsv4MegaMoe": _dsv4_megamoe(op)}
-
-    # WideEP variants (must precede their non-WideEP base classes if any).
-    if isinstance(op, WideEPContextMLA):
-        return {"WideEpContextMla": _wideep_context_mla(op)}
-    if isinstance(op, WideEPGenerationMLA):
-        return {"WideEpGenerationMla": _wideep_generation_mla(op)}
-
-    # Unified large-EP ops (AIC-1601): one Python class per table, the phase
-    # is a constructor field. Rust `Op::MoeAllToAll` / `Op::MoeExpertCompute` are
-    # APPENDED after `FpmForward` (bincode enum indices are positional;
-    # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
-    if isinstance(op, MoEAllToAll):
-        return {"MoeAllToAll": _moe_all_to_all(op)}
-    if isinstance(op, MoEExpertCompute):
-        return {"MoeExpertCompute": _moe_expert_compute(op)}
-
-    # Plain (single-variant) ops.
-    if isinstance(op, GEMM):
-        return {"Gemm": _gemm(op)}
-    if isinstance(op, Embedding):
-        return {"Embedding": _embedding(op)}
-    if isinstance(op, ElementWise):
-        return {"Elementwise": _elementwise(op)}
-    if isinstance(op, ContextAttention):
-        return {"ContextAttention": _context_attention(op)}
-    if isinstance(op, GenerationAttention):
-        return {"GenerationAttention": _generation_attention(op)}
-    if isinstance(op, EncoderAttention):
-        return {"EncoderAttention": _encoder_attention(op)}
-    if isinstance(op, ContextMLA):
-        return {"ContextMla": _context_mla(op)}
-    if isinstance(op, GenerationMLA):
-        return {"GenerationMla": _generation_mla(op)}
-    if isinstance(op, MLABmm):
-        return {"MlaBmm": _mla_bmm(op)}
-    if isinstance(op, MoEDispatch):
-        return {"MoeDispatch": _moe_dispatch(op, backend=backend)}
-    if isinstance(op, MoE):
-        return {"Moe": _moe(op)}
-    if isinstance(op, CustomAllReduce):
-        return {"CustomAllReduce": _custom_all_reduce(op)}
-    if isinstance(op, NCCL):
-        return {"Nccl": _nccl(op)}
-    if isinstance(op, P2P):
-        return {"P2P": _p2p(op)}
-    if isinstance(op, DeepSeekV4MHCModule):
-        return {"Mhc": _mhc_module(op, architecture=architecture)}
-    if isinstance(op, Mamba2Kernel):
-        return {"Mamba2": _mamba2(op)}
-    if isinstance(op, KDAKernel):
-        # Must precede the GDNKernel check: KDAKernel subclasses GDNKernel and
-        # would otherwise be silently serialized as Gdn (wrong table + a bf16
-        # SOL byte model for an fp32-state kernel).
-        return {"Kda": _kda(op)}
-    if isinstance(op, GDNKernel):
-        return {"Gdn": _gdn(op)}
-
+        return aiconfigurator_core.op_from_spec_json(json.dumps(_fpm_spec_dict(op)))
     raise OpConversionError(
         f"no OpSpec conversion for {type(op).__module__}.{type(op).__name__} (op name={getattr(op, '_name', '?')!r})"
     )
+
+
+def _ops_json(ops: Any) -> str:
+    """OpSpec JSON array via the Rust ``ops_json_from_ops`` gate (which
+    refuses retired tombstone ops recursively — the ``deepep_moe`` dispatch
+    flavor — exactly where the retired Python ``_to_opspec`` used to raise)."""
+    engine_ops = [_as_engine_op(op) for op in ops]
+    try:
+        return aiconfigurator_core.ops_json_from_ops(engine_ops)
+    except ValueError as exc:
+        if "no native variant" in str(exc):
+            raise OpConversionError(str(exc)) from None
+        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -793,48 +179,56 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
 # --------------------------------------------------------------------------- #
 
 
-def _compute_perf_db_sources(database: Any) -> dict:
-    """Resolve the shared-layer (sibling/cross-version) source list per op file
-    from the Python ``database``, so the Rust core can load the SAME rows Python
-    does under SILICON/HYBRID.
-
-    Returns ``{op_file_basename: [[abs_path, [kernel_sources] | None], ...]}``.
-    ``_build_op_sources`` returns just ``[(primary, None)]`` when the shared
-    layer is off or an op has no inheritable siblings, so the Rust side falls
-    back to its primary ``data_root`` behaviour for those. Returns ``{}`` when a
-    database is unavailable or introspection fails (Rust then uses its
-    single-``data_root`` default). Discovery stays here (single source of truth)
-    rather than being reimplemented in Rust.
-    """
+def _shared_layer_flag(database: Any) -> bool | None:
+    """The database view's shared-layer flag for the wire, ``None`` when no
+    database is bound (the engine then derives it from ``database_mode``,
+    mirroring ``_shared_layer_enabled``). The engine resolves per-op sources
+    ITSELF (schema v13, ``perf_database/source_resolution.rs``); Python only
+    ships the policy bit — including explicit ``shared_layer=`` overrides
+    regression harnesses use to pin per-version behavior."""
     if database is None:
-        return {}
-    try:
-        from aiconfigurator_core.sdk.common import PerfDataFilename
-        from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
+        return None
+    flag = getattr(database, "enable_shared_layer", None)
+    return None if flag is None else bool(flag)
 
-        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        out: dict[str, list] = {}
-        for filename_enum in PerfDataFilename:
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, filename_enum.value
-            )
-            sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-            out[filename_enum.value] = [
-                [os.path.abspath(path), (sorted(ks) if ks is not None else None)] for path, ks in sources
-            ]
-        return out
-    except Exception:
-        logger.warning(
-            "Failed to resolve shared-layer perf-DB sources for %s/%s/%s; the "
-            "compiled engine will load PRIMARY-ONLY rows while Python uses the "
-            "shared layer in the same run — cross-engine drift is possible. "
-            "Investigate rather than ignore.",
-            getattr(database, "system", "?"),
-            getattr(database, "backend", "?"),
-            getattr(database, "version", "?"),
-            exc_info=True,
-        )
-        return {}
+
+def _strict_provenance_flag(database: Any) -> bool:
+    """The database view's fail-closed provenance mode for the wire (absent
+    database -> False, matching a bare load)."""
+    return bool(getattr(database, "strict_provenance", False)) if database is not None else False
+
+
+def _literal_backend_version(
+    system: str,
+    backend: str,
+    backend_version: str | None,
+    systems_path: str | None,
+    database: Any,
+) -> str | None:
+    """Resolve the version the ``EngineSpec`` carries to a LITERAL directory name.
+
+    The Rust side reloads the perf database from this string
+    (``AicEngine.from_spec`` and the native ``AicEngineBuilder`` path used by
+    the Dynamo Mocker) and resolves no slot aliases — slot semantics
+    (``current`` / ``previous`` / ``next``) live in the python layer only.
+    Preference order: the loaded database's own version (the ground truth for
+    what the spec was compiled against), then slot resolution of the request
+    (an omitted version means the ``current`` slot). Slot-policy errors
+    (unlisted versions, unpopulated aliases) PROPAGATE — the spec builder is
+    a user-level surface and must not smuggle ungated coordinates onto the
+    wire. Trees without a slots file (synthetic/external) keep the ungated
+    passthrough.
+    """
+    resolved = getattr(database, "version", None) if database is not None else None
+    if resolved:
+        return str(resolved)
+    from aiconfigurator_core.sdk import perf_database
+
+    slots = perf_database.get_version_slots(system, backend, systems_paths=systems_path)
+    if slots is None:
+        return backend_version
+    requested = "current" if backend_version is None else backend_version
+    return perf_database.resolve_query_version(system, backend, requested, systems_paths=systems_path)
 
 
 def _engine_config_dict(
@@ -872,7 +266,9 @@ def _engine_config_dict(
         "system_name": system,
         "systems_path": systems_path,
         "backend": backend,
-        "backend_version": backend_version,
+        # Always a literal version directory name, never a slot alias — the
+        # Rust side reloads the perf database from this string verbatim.
+        "backend_version": _literal_backend_version(system, backend, backend_version, systems_path, database),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
@@ -886,10 +282,11 @@ def _engine_config_dict(
         "moe_dtype": _rust_moe_quant_to_dtype(getattr(cfg, "moe_quant_mode", None)),
         "activation_dtype": _rust_quant_to_dtype(getattr(cfg, "fmha_quant_mode", None)),
         "kv_cache_dtype": _rust_quant_to_dtype(getattr(cfg, "kvcache_quant_mode", None)),
-        # Shared-layer (sibling/cross-version) per-op perf-data sources, resolved
-        # in Python so the Rust core inherits the same rows. Empty/absent = Rust
-        # uses its single-``data_root`` default (back-compat with old specs).
-        "perf_db_sources": _compute_perf_db_sources(database),
+        # Shared-layer policy bits only (schema v13): the engine resolves
+        # per-op sources itself (`perf_database/source_resolution.rs`), so the
+        # wire carries the flag, not the resolved map.
+        "enable_shared_layer": _shared_layer_flag(database),
+        "strict_provenance": _strict_provenance_flag(database),
         # Perf-database query mode + enabled empirical transfer kinds, read off
         # the live database view so the compiled engine answers HYBRID/EMPIRICAL
         # queries the same way the Python step does. Presets are resolved here
@@ -897,6 +294,11 @@ def _engine_config_dict(
         # is always explicit kind tokens, ``None`` = the default ALL policy.
         "database_mode": _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Directory-less fleet-`next` marker (design §14): set only when the
+        # loaded database rode backward fill without a local version
+        # directory, so the Rust reload skips its missing-directory gate for
+        # exactly this identity.
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn at the top level
@@ -966,7 +368,7 @@ def compile_engine(
 ) -> bytes:
     """Compile a model into bincoded ``EngineSpec`` bytes.
 
-    Signature matches the kwargs ``build_aic_engine`` (Rust) passes. Reuses
+    Signature matches the kwargs the Rust ``AicEngineBuilder`` passes. Reuses
     ``cli/api._build_model_config`` + ``sdk/models.get_model`` (quant inferred
     inside ``get_model``) to build the model, then walks ``encoder_ops`` (vision
     decomposed), ``context_ops`` and ``generation_ops`` into OpSpecs and returns
@@ -994,17 +396,19 @@ def compile_engine(
     apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
-    # The database supplies the shared-layer perf sources, the query mode and
-    # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
-    # and tolerate failure; the Rust core falls back to its own defaults.
-    database = _maybe_load_database(system, backend, backend_version, systems_path)
+    # Slot policy FIRST, tolerance second: resolve the requested version to a
+    # literal (raising on unlisted versions / unpopulated aliases) before the
+    # tolerant database load — `_maybe_load_database` forgives LOAD failures
+    # (the Rust core falls back to its own defaults), never policy violations.
+    literal_version = _literal_backend_version(system, backend, backend_version, systems_path, None)
+    database = _maybe_load_database(system, backend, literal_version, systems_path)
 
     spec_json = build_engine_spec_json(
         model,
         model_path=model_path,
         system=system,
         backend=backend,
-        backend_version=backend_version,
+        backend_version=literal_version,
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=model_config.nextn,
@@ -1014,22 +418,15 @@ def compile_engine(
     return bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
 
 
-def build_ops_json(
-    ops: Any,
-    *,
-    model: Any,
-    backend: str,
-    database: Any = None,
-) -> str:
+def build_ops_json(ops: Any) -> str:
     """Serialize an op list to the OpSpec JSON array the ad-hoc op-list
     evaluation FFI (``AicEngine.evaluate_ops_json``) consumes.
 
     Serves op lists deliberately NOT emitted into the compiled ``EngineSpec``
-    (the VL encoder phase). Raises ``OpConversionError`` for ops the spec
-    cannot express, exactly like the spec builder.
-    """
-    architecture = getattr(model, "architecture", "") or ""
-    return json.dumps([_to_opspec(op, backend=backend, architecture=architecture, database=database) for op in ops])
+    (the VL encoder phase) and the single-op plumbing. Raises
+    ``OpConversionError`` for ops the spec cannot express, exactly like the
+    spec builder."""
+    return _ops_json(ops)
 
 
 def build_engine_spec_json(
@@ -1049,11 +446,6 @@ def build_engine_spec_json(
     Separated from ``compile_engine`` so the op-transfer round-trip test can
     inspect the JSON (and the decoded ops) without going through bincode.
     """
-    architecture = getattr(model, "architecture", "") or ""
-
-    def conv(op: Any) -> dict:
-        return _to_opspec(op, backend=backend, architecture=architecture, database=database)
-
     # Vision encoder ops are intentionally NOT emitted into the spec.
     #
     # The compile path threads no image configuration (num_images_per_request,
@@ -1065,9 +457,9 @@ def build_engine_spec_json(
     # early-return). Emitting the encoder ops here would make the compiled engine
     # query them unconditionally (with wrong shapes), diverging from the Python
     # reference for VL models. Vision modeling in the compiled path is deferred
-    # until runtime image config is threaded through compile_engine.
-    context_ops = [conv(op) for op in model.context_ops]
-    generation_ops = [conv(op) for op in model.generation_ops]
+    # until runtime image config is threaded through compile_engine (#1567).
+    context_ops = json.loads(_ops_json(model.context_ops))
+    generation_ops = json.loads(_ops_json(model.generation_ops))
 
     spec = {
         "schema_version": ENGINE_SPEC_SCHEMA_VERSION,
@@ -1088,13 +480,20 @@ def build_engine_spec_json(
     return json.dumps(spec)
 
 
-def build_database_probe_spec_json(database: Any, *, systems_path: str | None = None) -> str:
+def build_database_probe_spec_json(
+    database: Any, *, systems_path: str | None = None, database_mode: str | None = None
+) -> str:
     """``EngineSpec`` JSON with EMPTY op lists: an engine bound to
     ``database``'s perf tables only (same shared-layer sources, query mode
     and transfer policy as the live Python view). Compiled by tools that
     evaluate ad-hoc op lists (``evaluate_ops_json`` /
     ``evaluate_ops_sol_json``) without a model — the sanity-check notebook
-    sources its per-op reference values through this."""
+    sources its per-op reference values through this.
+
+    ``database_mode`` overrides the view's own query mode (wire token, e.g.
+    ``"SOL"``): the table-view path probes estimate-only databases (a spec
+    yaml with no collected data) under the SOL mode token so their analytic
+    views stay servable."""
     engine: dict[str, Any] = {
         "schema_version": ENGINE_CONFIG_SCHEMA_VERSION,
         "model_name": "__database_probe__",
@@ -1113,9 +512,14 @@ def build_database_probe_spec_json(database: Any, *, systems_path: str | None = 
         "moe_dtype": None,
         "activation_dtype": None,
         "kv_cache_dtype": None,
-        "perf_db_sources": _compute_perf_db_sources(database),
-        "database_mode": _database_mode_name(database),
+        "enable_shared_layer": _shared_layer_flag(database),
+        "strict_provenance": _strict_provenance_flag(database),
+        "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Same dir-less-next tolerance as the model spec builder: a database
+        # get_database returned as valid must stay valid through the probe
+        # handle (table views, ad-hoc op-list evaluation).
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     spec = {
@@ -1125,6 +529,131 @@ def build_database_probe_spec_json(database: Any, *, systems_path: str | None = 
         "generation_ops": [],
     }
     return json.dumps(spec)
+
+
+# --------------------------------------------------------------------------- #
+# Model-less probe plumbing.
+#
+# A small LRU of probe engines keyed by database identity, serving the two
+# PERMANENT consumers that need engine values without a compiled model: the
+# table-view bindings (``engine_table_view.fetch_table_view``) and the
+# single-op evaluation helper behind the Python-side orchestration surfaces
+# (the AFD comm ops, the ``_sum_latency`` fallback loop). It is NOT a public
+# per-op query surface — the deprecated ``query_*``/``Operation.query`` shims
+# that once rode this plumbing were removed after their one-release window;
+# long-term callers use ``EngineHandle.evaluate_ops_json`` /
+# ``evaluate_ops_sol_json`` (op-list FFI) or the phase/run entry points.
+# --------------------------------------------------------------------------- #
+
+_PROBE_HANDLE_CACHE: dict[str, EngineHandle] = {}
+_PROBE_HANDLE_CACHE_MAX = 8
+# Bumped by _clear_probe_handle_cache. Consumers that memoize a probe-spec
+# KEY per database (engine_table_view.fetch_table_view) tag the memo with
+# this generation and re-resolve after any documented eviction lever fires,
+# so a cleared LRU can never be resurrected through a stale memoized key
+# (stale source map, stale SOL-mode decision).
+_PROBE_CACHE_GENERATION = 0
+
+
+def _require_real_database(database: Any) -> None:
+    """The probe engine loads perf tables from DISK by (system, backend,
+    version, sources): only a real ``PerfDatabase`` can be served. Synthetic
+    or duck-typed stand-ins must fail loudly here — silently answering from
+    disk while the caller believes its in-memory tables are being read would
+    be an incorrect-value bug. (A real instance whose loaded tables were
+    monkeypatched afterwards is undetectable; the engine answers from the
+    on-disk rows.)"""
+    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+    if not isinstance(database, PerfDatabase):
+        raise TypeError(
+            "the engine table view and the single-op plumbing route through the compiled "
+            f"engine, which loads perf tables from disk — got {type(database)!r} instead of "
+            "PerfDatabase. Evaluate ad-hoc data via EngineHandle.evaluate_ops_json on a real "
+            "database, or walk the raw loaded tables (database._<family>_data) directly."
+        )
+
+
+def _probe_spec_key(database: Any, mode_token: str | None) -> tuple[str, str | None]:
+    """The ``(probe-spec JSON, systems_path)`` pair for ``database`` — the LRU
+    key. The spec carries the load identity + data-resolution policy bits
+    (schema v13: the engine resolves per-op sources itself), so building the
+    key is cheap; callers that fetch many views per database
+    (``engine_table_view``) still memoize it to skip the JSON assembly."""
+    _require_real_database(database)
+    systems_path = getattr(database, "systems_root", None) or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    key = build_database_probe_spec_json(database, systems_path=systems_path, database_mode=mode_token)
+    return key, systems_path
+
+
+def _probe_handle_from_key(key: str, systems_path: str | None) -> EngineHandle:
+    """LRU half of ``_probe_handle_for``: every probe handle in the process
+    lives in ``_PROBE_HANDLE_CACHE`` (cap ``_PROBE_HANDLE_CACHE_MAX``), so the
+    eviction levers govern every pinned Rust perf-DB load."""
+    handle = _PROBE_HANDLE_CACHE.get(key)
+    if handle is None:
+        handle = EngineHandle(aiconfigurator_core.engine_spec_bincode_from_json(key), systems_path=systems_path)
+        while len(_PROBE_HANDLE_CACHE) >= _PROBE_HANDLE_CACHE_MAX:
+            _PROBE_HANDLE_CACHE.pop(next(iter(_PROBE_HANDLE_CACHE)))
+        _PROBE_HANDLE_CACHE[key] = handle
+    return handle
+
+
+def _probe_handle_for(database: Any, mode_token: str | None) -> EngineHandle:
+    """Cached model-less probe engine over ``database``'s live view, optionally
+    re-moded per call (``mode_token`` is the wire token, e.g. ``"SILICON"``).
+    The cache key is the probe spec JSON itself: it captures system, backend,
+    version, resolved per-op sources, query mode and transfer policy, so any
+    view change produces a distinct entry."""
+    key, systems_path = _probe_spec_key(database, mode_token)
+    return _probe_handle_from_key(key, systems_path)
+
+
+def _clear_probe_handle_cache() -> None:
+    """Same eviction contract as the engine-step handle LRU (each handle pins
+    a Rust-side perf-DB load); called from ``clear_all_op_caches``. Advancing
+    the generation invalidates per-database probe-spec memos too, so the next
+    fetch re-resolves sources (and the SOL-mode decision) from disk."""
+    global _PROBE_CACHE_GENERATION
+    _PROBE_CACHE_GENERATION += 1
+    _PROBE_HANDLE_CACHE.clear()
+
+
+def _evaluate_single_op(
+    database: Any,
+    op: Any,
+    *,
+    is_context: bool,
+    batch_size: int,
+    s: int,
+    prefix: int = 0,
+    x: int | None = None,
+    imbalance_correction_scale: float = 1.0,
+):
+    """Evaluate ONE Python ``Operation`` through the compiled engine, under
+    the database's live mode.
+
+    The permanent single-op plumbing behind the Python-side ORCHESTRATION
+    surfaces (the AFD comm ops' twin evaluation, the ``_sum_latency``
+    fallback loop). The retired per-call query shims used to ride this too,
+    with a per-call ``database_mode`` re-moding dimension (including the
+    ``SOL_FULL`` decomposition triple) — that dimension left with the shims;
+    per-call SOL decomposition is served by
+    ``EngineHandle.evaluate_ops_sol_json`` directly."""
+    from aiconfigurator_core.sdk.performance_result import PerformanceResult
+
+    ops_json = build_ops_json([op])
+    eval_kwargs = dict(
+        is_context=bool(is_context),
+        batch_size=int(batch_size),
+        s=int(s),
+        prefix=int(prefix),
+        imbalance_correction_scale=float(imbalance_correction_scale),
+        x=None if x is None else int(x),
+    )
+    handle = _probe_handle_for(database, None)
+    (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
+    return PerformanceResult(latency, energy=energy, source=source)
 
 
 def _maybe_load_database(system: str, backend: str, backend_version: str | None, systems_path: str | None) -> Any:
@@ -1266,13 +795,39 @@ class EngineHandle:
         gen_seq_imbalance_correction_scale: float = 1.0,
         mode: str = "static",
         stride: int = 32,
-    ) -> tuple[list[tuple[str, float, float, str]], list[tuple[str, float, float, str]]]:
+    ) -> tuple[list[PerOpValue], list[PerOpValue]]:
         """``run_static`` with the per-op values kept: ``(context, generation)``
         lists of ``(name, latency_ms, energy_wms, source)``, name-folded (each
         name appears once, accumulated with Python's phase-dict semantics;
         generation values are per-step-folded, then weighted by
         ``repeat_count``)."""
         return self._engine.run_static_per_op(
+            int(batch_size),
+            int(beam_width),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+            mode,
+            int(stride),
+        )
+
+    def _run_static_per_op_with_metadata(
+        self,
+        *,
+        batch_size: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        beam_width: int = 1,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+        mode: str = "static",
+        stride: int = 32,
+    ) -> tuple[list[_PerOpValueWithMetadata], list[_PerOpValueWithMetadata]]:
+        """Internal static per-op stream with inline-first fallback metadata."""
+        return self._engine._run_static_per_op_with_metadata(
             int(batch_size),
             int(beam_width),
             int(isl),
@@ -1294,14 +849,39 @@ class EngineHandle:
         seq_imbalance_correction_scale: float = 1.0,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> tuple[
-        list[tuple[str, float, float, str]],
-        list[tuple[str, float, float, str]],
-        list[tuple[str, float, float, str]],
+        list[PerOpValue],
+        list[PerOpValue],
+        list[PerOpValue],
     ]:
         """``mixed_step_breakdown`` with the per-op values kept:
         ``(shared_non_attention, context_attention, decode_attention)`` lists;
         context-attention entries arrive already divided by ``ceil(isl/ctx)``."""
         return self._engine.mixed_step_breakdown_per_op(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
+
+    def _mixed_step_breakdown_per_op_with_metadata(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+    ]:
+        """Internal mixed-step per-op stream with inline-first fallback metadata."""
+        return self._engine._mixed_step_breakdown_per_op_with_metadata(
             int(ctx_tokens),
             int(gen_tokens),
             int(isl),
@@ -1317,9 +897,21 @@ class EngineHandle:
         isl: int,
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """``decode_step_latency`` with the per-op values kept."""
         return self._engine.decode_step_per_op(
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )
+
+    def _decode_step_per_op_with_metadata(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> list[_PerOpValueWithMetadata]:
+        """Internal decode per-op stream with inline-first fallback metadata."""
+        return self._engine._decode_step_per_op_with_metadata(
             int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
         )
 
@@ -1332,7 +924,7 @@ class EngineHandle:
         prefix: int = 0,
         seq_imbalance_correction_scale: float = 1.0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Thin op-list evaluation over the compiled CONTEXT op list: evaluate
         the ops at ``indices`` (positions in the spec's ``context_ops``, which
         mirror ``model.context_ops`` order) at the context-phase shape.
@@ -1357,7 +949,7 @@ class EngineHandle:
         gen_seq_imbalance_correction_scale: float = 1.0,
         prefix: int = 0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Thin op-list evaluation over the compiled GENERATION op list at the
         decode-step shape (see :meth:`evaluate_context_ops`). The base decode
         walk carries no prefix; ``prefix`` exists for orchestrations that
@@ -1381,7 +973,7 @@ class EngineHandle:
         prefix: int = 0,
         imbalance_correction_scale: float = 1.0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against
         this engine's database — serves op lists deliberately NOT in the
         compiled spec (the VL encoder phase); the caller keeps the shape math."""

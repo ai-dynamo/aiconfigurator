@@ -54,6 +54,23 @@ pub struct DsaModuleOp {
     /// keeps the pure-full path — the skip table is never touched.
     #[serde(default = "default_full_frac")]
     pub full_frac: f64,
+    /// Per-projection-group weight quant modes (Python
+    /// `dsa_block_weights_bytes`'s `projection_quant_modes`): a checkpoint
+    /// fact — e.g. DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but
+    /// quantizes o_proj. `None` (pre-field specs) falls back to
+    /// `gemm_quant_mode` for all four groups, exactly like the Python op's
+    /// default. Weight-estimation only; the latency path never reads it.
+    #[serde(default)]
+    pub attn_projection_quant_modes: Option<DsaProjectionQuants>,
+}
+
+/// The four DSA projection groups' quant modes (weight bytes only).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DsaProjectionQuants {
+    pub q: GemmQuantMode,
+    pub kv: GemmQuantMode,
+    pub o: GemmQuantMode,
+    pub indexer: GemmQuantMode,
 }
 
 fn default_cp_size() -> u32 {
@@ -86,6 +103,67 @@ impl DsaModuleOp {
             index_topk,
             cp_size: 1,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
+        }
+    }
+
+    /// Python `operations/dsa.py::dsa_block_weights_bytes` × scale_factor:
+    /// per-layer per-rank DSA block weight bytes. q_a / kv_a(+mqa, incl. the
+    /// indexer K projection) and the indexer projections are replicated
+    /// across TP; q_b, the absorbed kv_b and o_proj shard by heads
+    /// (`num_heads` is already rank-local).
+    pub fn weight_bytes(&self) -> f64 {
+        let dims = crate::perf_database::dsa::dsa_dims(&self.architecture);
+        let h = dims.hidden_size as f64;
+        let q_lora = dims.q_lora_rank as f64;
+        let kv_lora = dims.kv_lora_rank as f64;
+        let qk = (dims.qk_nope_head_dim + dims.qk_rope_head_dim) as f64;
+        let v = dims.v_head_dim as f64;
+        let idx = (dims.index_head_dim * dims.index_n_heads) as f64;
+        let local_heads = f64::from(self.num_heads);
+        let quants = self
+            .attn_projection_quant_modes
+            .unwrap_or(DsaProjectionQuants {
+                q: self.gemm_quant_mode,
+                kv: self.gemm_quant_mode,
+                o: self.gemm_quant_mode,
+                indexer: self.gemm_quant_mode,
+            });
+        let q_params = h * q_lora + q_lora * local_heads * qk;
+        let kv_params = h * (kv_lora + dims.qk_rope_head_dim as f64)
+            + kv_lora * local_heads * (dims.qk_nope_head_dim as f64 + v);
+        let o_params = local_heads * v * h;
+        let indexer_params = q_lora * idx + h * dims.index_n_heads as f64;
+        let bytes = q_params * quants.q.mapping().memory
+            + kv_params * quants.kv.mapping().memory
+            + o_params * quants.o.mapping().memory
+            + indexer_params * quants.indexer.mapping().memory;
+        bytes * self.scale_factor
+    }
+
+    /// Amortization weight after the missing-skip-table degradation. Verbatim
+    /// mirror of Python `operations/dsa.py::_effective_full_frac`: the
+    /// `*_skip_indexer` rows are produced only by the sglang collector and only
+    /// from 0.5.14 on, so a (system, backend, version) whose parquet omits them
+    /// degrades to all-full (`w = 1.0`) instead of failing the query — the same
+    /// policy `models/deepseek_v32.py` already applies to backends with no skip
+    /// producer ("we just cannot model their saving without data, so we count
+    /// them as full"). PESSIMISTIC: the indexer is charged on every layer.
+    ///
+    /// KNOWN GAP (accepted, AIC-1747 review): the degradation is SILENT.
+    /// The crate has no logging facility (the "Rust has no logging"
+    /// convention recorded at `operators/dsv4.rs`), and since the per-call
+    /// Python query stack was retired behind engine-routed shims (PR-5/PR-6)
+    /// there is no Python query path left to carry the one-time warning the
+    /// pre-migration design emitted. Surfacing fidelity degradation belongs
+    /// to an engine-side degradation/provenance surface — tracked as
+    /// AIC-1767 (AIC-1753 owns the adjacent support-matrix reporting
+    /// tier). Do not "fix" this by adding a log crate to the hot path.
+    fn effective_full_frac(&self, has_skip_rows: bool) -> f64 {
+        if self.full_frac >= 1.0 || has_skip_rows {
+            self.full_frac
+        } else {
+            1.0
         }
     }
 
@@ -108,7 +186,20 @@ impl DsaModuleOp {
                 self.cp_size
             )));
         }
-        let w = self.full_frac;
+        // full_frac >= 1.0 (DeepSeek-V3.2 / GLM-5) and the analytic SOL modes
+        // never consult the skip table — short-circuit BEFORE the probe so it
+        // is not even evaluated for them (the "skip path never taken"
+        // invariant documented on `full_frac`). SOL is skip-aware directly
+        // (the get_sol ports zero the indexer terms), so it keeps the
+        // configured blend — mirrors the retired Python
+        // `_effective_full_frac` mode gate.
+        let w = if self.full_frac >= 1.0
+            || matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull)
+        {
+            self.full_frac
+        } else {
+            self.effective_full_frac(db.dsa.has_context_skip_rows()?)
+        };
         // CP (round-robin sequence split) prefill takes the sparse-delta
         // composition path (Python `ContextDSAModule.query` -> `_query_cp`
         // when `_cp_size > 1`). GLM-5.2 amortizes full/skip on the CP path
@@ -331,7 +422,15 @@ impl DsaModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let w = self.full_frac;
+        // Same short-circuit as query_context: no probe for full_frac >= 1.0
+        // or the analytic SOL modes.
+        let w = if self.full_frac >= 1.0
+            || matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull)
+        {
+            self.full_frac
+        } else {
+            self.effective_full_frac(db.dsa.has_generation_skip_rows()?)
+        };
         // `dsa_backend="trtllm"` mirrors Python's generation default
         // (`_query_generation_dsa_module_table(dsa_backend="trtllm")`).
         let q = |skip_indexer: bool| {
@@ -1009,6 +1108,7 @@ mod tests {
             index_topk: 2048,
             cp_size,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 
@@ -1107,8 +1207,8 @@ mod tests {
         let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        let db = PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0")
-            .expect("b200_sxm/vllm/0.19.0 must load");
+        let db = PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.24.0")
+            .expect("b200_sxm/vllm/0.24.0 must load");
         let op = glm_cp_op(8);
         let err = op.query_context(&db, 1, 16384, 0).unwrap_err();
         let msg = err.to_string();
@@ -1174,6 +1274,39 @@ mod tests {
         db
     }
 
+    /// Any shipped system at sglang 0.5.14 — the release that first split the
+    /// DSA tables into full + `*_skip_indexer` rows (and did not do so on
+    /// every system).
+    fn b200_db_on(system: &str, backend: &str, version: &str, mode: DatabaseMode) -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&root, system, backend, version).expect("db loads");
+        db.database_mode = mode;
+        db
+    }
+
+    fn sglang_db(system: &str, version: &str, mode: DatabaseMode) -> PerfDatabase {
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&systems_root, system, "sglang", version)
+            .unwrap_or_else(|e| panic!("{system} db must load: {e}"));
+        db.database_mode = mode;
+        db
+    }
+
+    /// GLM-5.2: 21 indexer-computing layers out of 78 (`index_topk_freq=4`,
+    /// `index_skip_topk_offset=3`) — the weight Python's
+    /// `_dsa_full_layer_fraction` derives from the checkpoint config.
+    const GLM52_FULL_FRAC: f64 = 21.0 / 78.0;
+
+    fn glm52_op(kv: KvCacheQuantMode, full_frac: f64) -> DsaModuleOp {
+        let mut op = dsa_op(GLM, 64, kv);
+        op.full_frac = full_frac;
+        op
+    }
+
     fn dsa_op(architecture: &str, num_heads: u32, kv: KvCacheQuantMode) -> DsaModuleOp {
         DsaModuleOp::new(
             "dsa_module",
@@ -1193,58 +1326,179 @@ mod tests {
         );
     }
 
-    /// Context EMPIRICAL parity on b200_sxm/vllm/0.19.0. Fired variants
-    /// (verified in Python):
-    /// - DSV32 h=128 prefix=0 off-grid s AND prefix=4096: the DSV32 slice
-    ///   collects prefix=[0] only, so BOTH anchor util at the prefix=0 slice
-    ///   with full_s = s + prefix -> `ctx_dsa_p0anchor_exact_head` (depth 2).
-    /// - GLM h=32 prefix=64: bracketed by the collected [0, 128] axis ->
-    ///   `ctx_dsa_exact_head` (depth 3, genuine prefix interpolation).
-    /// - GLM h=32 prefix=1000: beyond 128 -> `ctx_dsa_p0anchor_exact_head`.
-    /// - DSV32 h=96 (uncollected head) -> cross-head `ctx_dsa_p0anchor`
-    ///   (depth 3).
+    /// AIC-1747: the sglang 0.5.9–0.5.12-era tables ship `dsa_context_module`
+    /// / `dsa_generation_module` rows ONLY — the collector's `*_skip_indexer`
+    /// split never ran there (0.5.14's gap closed with the AIC-1747 probe
+    /// collection, PR #1556). GLM-5.2 (`full_frac` = 21/78) used to take the
+    /// skip branch and die on the whole sweep. The amortization must degrade
+    /// to all-full, mirroring Python `operations/dsa.py::_effective_full_frac`.
+    /// Vehicle: h200/vllm/0.24.0 — the one current-slot table that ships
+    /// full rows only (every sglang 0.5.14 table carries skip variants).
     #[test]
-    fn context_empirical_matches_python_oracles() {
-        let db = b200_db("vllm", "0.19.0", DatabaseMode::Empirical);
-        let cases: [(&str, u32, u32, u32, u32, f64); 5] = [
-            (DSV32, 128, 4, 3000, 0, 11.266464115749121),
-            (DSV32, 128, 2, 2048, 4096, 4.417586773123638),
-            (GLM, 32, 1, 512, 64, 2.62689536098129),
-            (GLM, 32, 1, 512, 1000, 0.514264970789275),
-            (DSV32, 96, 8, 1024, 0, 5.571143850099078),
-        ];
-        for (arch, heads, b, s, prefix, expected) in cases {
-            let op = dsa_op(arch, heads, KvCacheQuantMode::Bfloat16);
-            let result = op
-                .query_context(&db, b, s, prefix)
-                .expect("empirical query");
-            approx_rel_1e9(result.latency_ms, expected);
-            assert_eq!(result.source, Source::Empirical, "({arch}, h={heads})");
-        }
+    fn missing_skip_indexer_variant_degrades_amortization_to_all_full() {
+        let db = b200_db_on("h200_sxm", "vllm", "0.24.0", DatabaseMode::Silicon);
+        assert!(
+            !db.dsa.has_context_skip_rows().expect("probe"),
+            "h200/vllm/0.24.0 ships full rows only"
+        );
+        assert!(!db.dsa.has_generation_skip_rows().expect("probe"));
+
+        let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
+        let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
+
+        let degraded = glm52
+            .query_context(&db, 2, 4096, 512)
+            .expect("context query must not fail on a full-only table");
+        approx_rel_1e9(
+            degraded.latency_ms,
+            all_full
+                .query_context(&db, 2, 4096, 512)
+                .expect("all-full context")
+                .latency_ms,
+        );
+        // relative equality above IS the contract; no recorded-value pin.
+
+        let degraded_gen = glm52
+            .query_generation(&db, 2, 4096)
+            .expect("generation query must not fail on a full-only table");
+        approx_rel_1e9(
+            degraded_gen.latency_ms,
+            all_full
+                .query_generation(&db, 2, 4096)
+                .expect("all-full generation")
+                .latency_ms,
+        );
+        // relative equality above IS the contract; no recorded-value pin.
     }
 
-    /// Context EMPIRICAL parity on b200_sxm/sglang/0.5.14 (GLM-5, bf16 KV;
-    /// heads collected: 8/16/32/64 with a rich measured prefix axis):
-    /// - h=128 (uncollected) prefix=512 in range -> cross-head `ctx_dsa`
-    ///   (depth 4).
-    /// - h=64 prefix=10000 at a collected (prefix, s, b) point ->
-    ///   `ctx_dsa_exact_head` exact hit returns the measured latency.
+    /// The other half of AIC-1747: where the skip rows DO exist
+    /// (gb200/sglang/0.5.14 — anchored there because no in-flight data PR
+    /// touches that table, so the pins hold in either merge order with
+    /// #1556) the mixed amortization is untouched — the degradation must
+    /// never become the default. Pinned numerically so a silent collapse to
+    /// all-full fails here.
     #[test]
-    fn context_empirical_sglang_glm_matches_python_oracles() {
-        let db = b200_db("sglang", "0.5.14", DatabaseMode::Empirical);
-        let cross = dsa_op(GLM, 128, KvCacheQuantMode::Bfloat16);
-        let result = cross
-            .query_context(&db, 2, 4096, 512)
-            .expect("cross-head query");
-        approx_rel_1e9(result.latency_ms, 13.731357702671428);
-        assert_eq!(result.source, Source::Empirical);
+    fn present_skip_indexer_variant_keeps_mixed_amortization() {
+        let db = sglang_db("gb200", "0.5.14", DatabaseMode::Silicon);
+        assert!(
+            db.dsa.has_context_skip_rows().expect("probe"),
+            "gb200 ships both variants"
+        );
+        assert!(db.dsa.has_generation_skip_rows().expect("probe"));
 
-        let exact = dsa_op(GLM, 64, KvCacheQuantMode::Bfloat16);
-        let result = exact
-            .query_context(&db, 2, 4096, 10000)
-            .expect("exact-hit query");
-        approx_rel_1e9(result.latency_ms, 8.2065);
-        assert_eq!(result.source, Source::Empirical);
+        let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
+        let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
+
+        let mixed = glm52
+            .query_context(&db, 2, 4096, 512)
+            .expect("context query")
+            .latency_ms;
+        let full_only = all_full
+            .query_context(&db, 2, 4096, 512)
+            .expect("all-full context")
+            .latency_ms;
+        assert!(
+            mixed < full_only,
+            "skip layers must lower the amortized cost: {mixed} vs {full_only}"
+        );
+        // Exact blend identity: w*full + (1-w)*skip (full_frac = 0.0 is the
+        // pure-skip probe). Pinned too, so a data refresh that silently moves
+        // the amortization is caught either way.
+        let skip_only = glm52_op(KvCacheQuantMode::Bfloat16, 0.0)
+            .query_context(&db, 2, 4096, 512)
+            .expect("pure-skip context")
+            .latency_ms;
+        approx_rel_1e9(
+            mixed,
+            GLM52_FULL_FRAC * full_only + (1.0 - GLM52_FULL_FRAC) * skip_only,
+        );
+        approx_rel_1e9(mixed, 6.599784615384616);
+
+        let mixed_gen = glm52
+            .query_generation(&db, 2, 4096)
+            .expect("generation query")
+            .latency_ms;
+        let full_only_gen = all_full
+            .query_generation(&db, 2, 4096)
+            .expect("all-full generation")
+            .latency_ms;
+        assert!(mixed_gen < full_only_gen);
+        approx_rel_1e9(mixed_gen, 0.10149143817608174);
+    }
+
+    /// PR #1540 review follow-up: SOL is analytic and skip-aware directly
+    /// (the context get_sol port zeroes the indexer terms on skip layers), so
+    /// a full-only table must NOT degrade the configured blend there. Without
+    /// the mode gate the degraded op (w -> 1.0) collapses to the all-full SOL;
+    /// with it the blend keeps the cheaper skip layers and stays strictly
+    /// below. Generation SOL is not skip-aware (the indexer term is charged
+    /// unconditionally, matching Python), so its value is blend-neutral —
+    /// asserted only to not fail on the skip-less table.
+    #[test]
+    fn sol_mode_keeps_configured_amortization_on_full_only_table() {
+        let db = b200_db_on("h200_sxm", "vllm", "0.24.0", DatabaseMode::Sol);
+        assert!(
+            !db.dsa.has_context_skip_rows().expect("probe"),
+            "anchor must be full-only"
+        );
+
+        let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
+        let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
+
+        let mixed_sol = glm52
+            .query_context(&db, 2, 4096, 512)
+            .expect("SOL context query must not fail on a full-only table")
+            .latency_ms;
+        let full_sol = all_full
+            .query_context(&db, 2, 4096, 512)
+            .expect("all-full SOL context")
+            .latency_ms;
+        assert!(
+            mixed_sol < full_sol,
+            "SOL must keep the configured blend (degradation would collapse it to all-full): {mixed_sol} vs {full_sol}"
+        );
+        // Exact blend identity, same construction as the Silicon-mode mixed
+        // test: full_frac = 0.0 is the pure-skip SOL probe (the gate keeps
+        // configured fractions in SOL, so w stays 0.0 on the skip-less table).
+        let skip_sol = glm52_op(KvCacheQuantMode::Bfloat16, 0.0)
+            .query_context(&db, 2, 4096, 512)
+            .expect("pure-skip SOL context")
+            .latency_ms;
+        approx_rel_1e9(
+            mixed_sol,
+            GLM52_FULL_FRAC * full_sol + (1.0 - GLM52_FULL_FRAC) * skip_sol,
+        );
+
+        // Generation SOL is not skip-aware, so the blend is value-neutral:
+        // the mixed op must equal the all-full op exactly (and not fail).
+        let mixed_gen_sol = glm52
+            .query_generation(&db, 2, 4096)
+            .expect("SOL generation query must not fail on a full-only table")
+            .latency_ms;
+        let full_gen_sol = all_full
+            .query_generation(&db, 2, 4096)
+            .expect("all-full SOL generation")
+            .latency_ms;
+        approx_rel_1e9(mixed_gen_sol, full_gen_sol);
+    }
+
+    /// Context EMPIRICAL wiring on the sglang GLM tables: the cross-head
+    /// lane (h=128 uncollected) and the exact-head lane (h=64 collected)
+    /// both resolve through the empirical estimator. Structural only — the
+    /// estimator MATH is pinned on synthetic grids in `util_empirical` and
+    /// `perf_interp`; per-op end-to-end values are pinned by the parity
+    /// goldens.
+    #[test]
+    fn context_empirical_sglang_glm_wiring() {
+        let db = b200_db("sglang", "0.5.14", DatabaseMode::Empirical);
+        for heads in [128u32, 64] {
+            let op = dsa_op(GLM, heads, KvCacheQuantMode::Bfloat16);
+            let result = op
+                .query_context(&db, 2, 4096, 512)
+                .expect("empirical query");
+            assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
+            assert_eq!(result.source, Source::Empirical, "h={heads}");
+        }
     }
 
     /// HYBRID keeps the silicon answer whenever the silicon lookup resolves
@@ -1252,16 +1506,21 @@ mod tests {
     /// empirical layer must not preempt it.
     #[test]
     fn context_hybrid_prefers_silicon() {
-        let db = b200_db("vllm", "0.19.0", DatabaseMode::Hybrid);
+        // Precedence contract only (values live in the goldens): whenever the
+        // silicon lookup resolves, HYBRID must serve it — the empirical layer
+        // must not preempt. Cross-checked against the SILICON-mode answer.
+        let sil = b200_db("vllm", "0.24.0", DatabaseMode::Silicon);
+        let db = b200_db("vllm", "0.24.0", DatabaseMode::Hybrid);
         let op = dsa_op(DSV32, 128, KvCacheQuantMode::Bfloat16);
-        let exact = op
-            .query_context(&db, 4, 2048, 0)
-            .expect("silicon exact hit");
-        approx_rel_1e9(exact.latency_ms, 7.6471);
-        assert_eq!(exact.source, Source::Silicon);
-        let interior = op.query_context(&db, 4, 3000, 0).expect("silicon interp");
-        approx_rel_1e9(interior.latency_ms, 11.388627343749999);
-        assert_eq!(interior.source, Source::Silicon);
+        for (b, s) in [(4u32, 2048u32), (4, 3000)] {
+            let want = op.query_context(&sil, b, s, 0).expect("silicon answer");
+            let got = op.query_context(&db, b, s, 0).expect("hybrid answer");
+            assert_eq!(got.source, Source::Silicon, "(b={b}, s={s})");
+            assert!(
+                (got.latency_ms - want.latency_ms).abs() < 1e-12,
+                "hybrid must replay the silicon answer at (b={b}, s={s})"
+            );
+        }
     }
 
     /// An uncollected kv-quant slice (int8 on b200/vllm) is a typed silicon
@@ -1272,7 +1531,7 @@ mod tests {
     #[test]
     fn context_missing_slice_raises_empirical_not_implemented() {
         for mode in [DatabaseMode::Hybrid, DatabaseMode::Empirical] {
-            let db = b200_db("vllm", "0.19.0", mode);
+            let db = b200_db("vllm", "0.24.0", mode);
             let op = dsa_op(DSV32, 128, KvCacheQuantMode::Int8);
             let result = op.query_context(&db, 4, 3000, 0);
             assert!(
@@ -1282,41 +1541,16 @@ mod tests {
         }
     }
 
-    /// Generation EMPIRICAL parity on b200_sxm/vllm/0.19.0:
-    /// - h=128 off-grid (b=24, s=3000) and an exact collected hit
-    ///   (b=16, s=4097 -> measured 0.2698) on the exact head slice
-    ///   (`gen_dsa_exact_heads`, depth 2);
-    /// - h=96 (uncollected head) -> cross-head `gen_dsa` (depth 3).
+    /// Generation EMPIRICAL wiring on the sglang GLM tables (structural —
+    /// estimator math is pinned on synthetic grids; values in the goldens).
     #[test]
-    fn generation_empirical_matches_python_oracles() {
-        let db = b200_db("vllm", "0.19.0", DatabaseMode::Empirical);
-        let cases: [(u32, u32, u32, f64); 3] = [
-            (128, 24, 3000, 0.259452522778543),
-            (128, 16, 4097, 0.2698),
-            (96, 8, 5000, 0.20801465850337103),
-        ];
-        for (heads, b, s, expected) in cases {
-            let op = dsa_op(DSV32, heads, KvCacheQuantMode::Bfloat16);
-            let result = op.query_generation(&db, b, s).expect("empirical query");
-            approx_rel_1e9(result.latency_ms, expected);
-            assert_eq!(
-                result.source,
-                Source::Empirical,
-                "(h={heads}, b={b}, s={s})"
-            );
-        }
-    }
-
-    /// Generation EMPIRICAL parity on b200_sxm/sglang/0.5.14 (GLM-5, bf16 KV,
-    /// exact head slice off-grid).
-    #[test]
-    fn generation_empirical_sglang_glm_matches_python_oracle() {
+    fn generation_empirical_sglang_glm_wiring() {
         let db = b200_db("sglang", "0.5.14", DatabaseMode::Empirical);
         let op = dsa_op(GLM, 64, KvCacheQuantMode::Bfloat16);
         let result = op
             .query_generation(&db, 48, 10000)
             .expect("empirical query");
-        approx_rel_1e9(result.latency_ms, 0.1927939670669063);
+        assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
         assert_eq!(result.source, Source::Empirical);
     }
 
@@ -1325,7 +1559,7 @@ mod tests {
     /// EmpiricalNotImplemented (mirrors the Python contract).
     #[test]
     fn generation_hybrid_missing_slice_raises_empirical_not_implemented() {
-        let db = b200_db("vllm", "0.19.0", DatabaseMode::Hybrid);
+        let db = b200_db("vllm", "0.24.0", DatabaseMode::Hybrid);
         let op = dsa_op(DSV32, 128, KvCacheQuantMode::Int8);
         let result = op.query_generation(&db, 24, 3000);
         assert!(
@@ -1342,7 +1576,7 @@ mod tests {
             .join("../..")
             .join("src/aiconfigurator_core/systems");
         let mut db =
-            PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load");
+            PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.24.0").expect("db must load");
         db.database_mode = DatabaseMode::Sol;
         let spec = db.system_spec.clone();
         let op = glm_cp_op(1);

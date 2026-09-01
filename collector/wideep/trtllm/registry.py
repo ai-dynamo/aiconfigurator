@@ -3,11 +3,8 @@
 
 """WideEP collector registry for TensorRT-LLM.
 
-Unlike ``wideep_sglang``, the ``wideep_trtllm`` manifest entry pins the SAME
-image and version as stock trtllm (``framework_manifest.yaml``), so
-``require_collector_runtime`` accepts these ops mixed into a stock trtllm run
-and the model case plans activate ``moe_ep`` by default for wideep-declared
-models.
+The registered expert-compute op keeps the same runtime as stock TensorRT-LLM.
+Distributed ``moe_a2a`` uses its separately attested standalone source build.
 """
 
 from collector.registry_types import OpEntry, PerfFile

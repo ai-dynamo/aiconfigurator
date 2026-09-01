@@ -20,6 +20,97 @@ pytestmark = pytest.mark.unit
 class TestCLIEstimateUnit:
     """Unit tests for cli_estimate API internals."""
 
+    def test_static_estimate_resolves_coverage_gated_moe_comm_before_model_build(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.inference_session as inference_session
+
+        captured = {}
+        database = object()
+
+        def fake_resolve(model_config, **kwargs):
+            captured["resolver_config"] = model_config
+            captured["resolver_kwargs"] = kwargs
+            model_config.moe_comm_backend = {
+                "context": "nvlink_two_sided",
+                "generation": "nvlink_two_sided",
+            }
+            model_config.num_gpus_per_node = 4
+
+        def fake_get_model(_model_path, model_config, _backend_name):
+            captured["built_config"] = model_config
+            return object()
+
+        class FakeSummary:
+            def check_oom(self):
+                return False
+
+            def get_result_dict(self):
+                return {"ttft": 0.0, "tpot": 1.0, "power_w": 1.0}
+
+            def get_power_data_coverage(self):
+                return 1.0
+
+            def get_moe_comm_fallbacks(self):
+                return ()
+
+        class FakeSession:
+            def __init__(self, model, loaded_database, backend):
+                assert loaded_database is database
+
+            def run_static(self, **kwargs):
+                return FakeSummary()
+
+        monkeypatch.setattr(api, "_resolve_moe_parallelism", lambda *args, **kwargs: (1, 32))
+        monkeypatch.setattr(api, "resolve_context_fmha_by_data", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_dsv4_moe_arch", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_nvfp4_for_system", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_model_config_moe_comm", fake_resolve)
+        monkeypatch.setattr(inference_session, "InferenceSession", FakeSession)
+
+        api._run_static_estimate(
+            static_mode="static_gen",
+            model_path="deepseek-ai/DeepSeek-R1",
+            system_name="gb200",
+            backend_name="trtllm",
+            resolved_version="test",
+            isl=8192,
+            osl=1024,
+            image_height=0,
+            image_width=0,
+            num_images=1,
+            enable_encoder_dp=True,
+            batch_size=10,
+            prefix=0,
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=32,
+            moe_tp_size=1,
+            moe_ep_size=32,
+            gemm_quant_mode=None,
+            kvcache_quant_mode=None,
+            fmha_quant_mode=None,
+            moe_quant_mode=None,
+            comm_quant_mode=None,
+            nextn=0,
+            nextn_accepted=None,
+            stride=32,
+            engine_step_backend="rust",
+            load_database=lambda _system: database,
+            get_backend=lambda _backend: object(),
+            get_model=fake_get_model,
+        )
+
+        assert captured["built_config"] is captured["resolver_config"]
+        assert captured["built_config"].moe_comm_backend["generation"] == "nvlink_two_sided"
+        assert captured["resolver_kwargs"] == {
+            "model_path": "deepseek-ai/DeepSeek-R1",
+            "backend_name": "trtllm",
+            "database": database,
+            "required_phases": ("context", "generation"),
+            "fmha_quant_mode_explicit": False,
+            "kvcache_quant_mode_explicit": False,
+        }
+
     def test_systems_paths_are_scoped_to_call(self, tmp_path, monkeypatch):
         import aiconfigurator.cli.api as api
         import aiconfigurator.sdk.perf_database as perf_database
@@ -540,6 +631,93 @@ class TestCLIRecommendUnit:
         assert captured_kwargs["enable_wideep"] is True
         assert captured_kwargs["moe_backend"] == "deepep_moe"
 
+    def test_dspark_nextn_auto_enabled(self, monkeypatch):
+        """cli_recommend auto-enables DSPARK via the nextn='auto' → 0 → DSPARK path.
+
+        Exercises the realistic production flow: nextn='auto' calls
+        _resolve_nextn_auto which returns 0 for DSPARK models (block size is not
+        in the checkpoint), then _resolve_dspark_nextn fills in the architectural
+        block size and planning acceptance.
+        """
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: (7, 5.6))
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn="auto",
+        )
+
+        assert captured["nextn"] == 7
+        assert abs(captured["nextn_accepted"] - 5.6) < 1e-9
+
+    def test_dspark_explicit_nextn_accepted_not_overridden(self, monkeypatch):
+        """Explicit nextn_accepted is preserved when DSPARK is auto-detected."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: (7, 5.6))
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn_accepted=3.0,
+        )
+
+        assert captured["nextn"] == 7
+        assert captured["nextn_accepted"] == 3.0
+
+    def test_non_dspark_model_unaffected(self, monkeypatch):
+        """Non-DSPARK models are not touched by the DSPARK auto-detect path."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: None)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_concurrency=16,
+        )
+
+        assert captured["nextn"] == 0
+        assert captured["nextn_accepted"] is None
+
     def test_escalates_on_oom(self, monkeypatch):
         import aiconfigurator.cli.api as api
         from aiconfigurator.sdk.errors import ExperimentOutcome, InsufficientMemoryError
@@ -800,3 +978,9 @@ def test_disagg_estimate_honors_explicit_free_gpu_memory_fraction():
     assert result is not None
     with pytest.raises(RuntimeError, match="OOM"):
         cli_estimate(**common_kw, free_gpu_memory_fraction=0.001)
+    with pytest.raises(RuntimeError, match="OOM"):
+        cli_estimate(**common_kw, decode_free_gpu_memory_fraction=0.001)
+    with pytest.raises(RuntimeError, match="OOM"):
+        cli_estimate(**common_kw, prefill_free_gpu_memory_fraction=0.001)
+    with pytest.raises(RuntimeError, match="OOM"):
+        cli_estimate(**common_kw, decode_max_seq_len=1_000_000)

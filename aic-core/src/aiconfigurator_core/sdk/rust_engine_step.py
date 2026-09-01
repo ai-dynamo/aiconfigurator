@@ -23,9 +23,14 @@ from pathlib import Path
 from typing import Any
 
 from aiconfigurator_core.sdk.config import RuntimeConfig
+from aiconfigurator_core.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 
 logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
+PerOpValue = tuple[str, float, float, str]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
 
 
 # Python-step telemetry (#1357): count every remaining Python op.query() use
@@ -284,22 +289,23 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
-_PYTHON_BACKEND_DEPRECATION_WARNED = False
+def validate_engine_step_backend(value: Any) -> str | None:
+    """Normalize + validate an ``engine_step_backend`` request.
 
-
-def _warn_python_backend_deprecated(requested: str) -> None:
-    """Warn once per process that ``engine_step_backend="python"`` is a no-op."""
-    global _PYTHON_BACKEND_DEPRECATION_WARNED
-    with _PYTHON_STEP_FALLBACK_LOCK:
-        first = not _PYTHON_BACKEND_DEPRECATION_WARNED
-        _PYTHON_BACKEND_DEPRECATION_WARNED = True
-    if first:
-        logger.warning(
-            "engine_step_backend=%r is deprecated and now a no-op: the Python engine-step "
-            "path was removed and the compiled Rust engine is the only step executor. "
-            "The value is accepted for one release cycle, then dropped.",
-            requested,
+    Returns the lowered token (``"rust"``) or ``None`` when nothing was
+    requested; any other value raises. Shared by the step routing gate AND
+    the task/config entry points (``Task.__post_init__``) so a programmatic
+    caller cannot smuggle the retired ``"python"`` token (or any typo) into
+    a path — like the AFD session — that never reaches the routing gate.
+    """
+    requested = None if value is None else str(value).lower()
+    if requested is not None and requested != "rust":
+        raise ValueError(
+            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
+            "engine-step executor ('rust' is the only accepted value; the deprecated 'python' "
+            "no-op was removed after its one-release window)."
         )
+    return requested
 
 
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
@@ -309,38 +315,19 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     when ``"rust"`` is explicitly requested), a non-``PerfDatabase`` object —
     the compiled engine re-loads perf data from disk by identity, which a
     synthetic database does not have. Callers own what ``False`` means: the
-    AFD orchestration keeps its per-call ``op.query()`` loop, while the
+    AFD orchestration keeps its per-call twin-op loop, while the
     engine-step surfaces in ``base_backend`` raise (there is no Python step
     left to delegate to).
 
-    ``engine_step_backend="python"`` (config or env) is a deprecated no-op:
-    it warns once and then behaves exactly as if the value were UNSET —
-    including the non-``PerfDatabase`` delegation below (an early ``return
-    True`` here would silently upgrade the retired escape hatch into an
-    explicit-rust request and bypass the synthetic-database delegation).
-    Retained one release cycle. Any other unknown value raises — silently
-    computing on an engine the caller did not ask for would be worse than
-    failing.
+    ``"rust"`` is the only accepted value. The deprecated ``"python"``
+    no-op completed its one-release cycle and was dropped with the
+    deprecation-cleanup PR; any other value raises — silently computing on
+    an engine the caller did not ask for would be worse than failing.
     """
-    backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    requested = str(backend).lower() if backend else None
-    if requested == "python":
-        _warn_python_backend_deprecated(requested)
-        # The no-op contract: ignore the retired value entirely and
-        # re-resolve the remaining signal (a config-level "python" no longer
-        # shadows the env), then proceed as if it were never set.
-        env_value = os.environ.get(ENGINE_STEP_BACKEND_ENV)
-        requested = str(env_value).lower() if env_value else None
-        if requested == "python":
-            requested = None
-    if requested is not None and requested != "rust":
-        # `requested`, not `backend`: after the deprecated-"python" re-resolve
-        # above, the value being rejected may come from the environment while
-        # `backend` still holds the config's retired "python".
-        raise ValueError(
-            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
-            "engine-step executor ('rust' is the only live value; 'python' is a deprecated no-op)."
-        )
+    backend = getattr(runtime_config, "engine_step_backend", None)
+    if backend is None:
+        backend = os.environ.get(ENGINE_STEP_BACKEND_ENV)
+    requested = validate_engine_step_backend(backend)
     if requested is None:
         # Deferred import: perf_database is heavy and this module must stay
         # light to import (engine.py imports it at top level).
@@ -411,10 +398,11 @@ def _reraise_engine_error(exc: ValueError) -> None:
 def _fold_per_op(
     entries: Any,
     scale: float = 1.0,
-) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, str], tuple[MoECommFallback, ...]]:
     """Fold the compiled engine's per-op tuples into the Python phase dicts.
 
-    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source), ...]``
+    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source,
+    moe_comm_fallbacks), ...]``
     — already name-folded inside the engine, so this is an idempotent re-fold
     (it also keeps duck-typed handles in tests correct): duplicate names
     accumulate with ``+=`` and sources merge to ``"mixed"`` on mismatch —
@@ -423,12 +411,17 @@ def _fold_per_op(
     ``latency_correction_scale`` post-multiply, applied to latency AND energy
     per key exactly like the Python phase runners' downstream scaling. The
     three dicts share one key set (the power-coverage gate pairs latency and
-    energy by identical keys).
+    energy by identical keys). The optional fifth field is ``None`` or an
+    inline-first ``(first_record, additional_records)`` pair. Older duck-typed
+    test handles may omit it or provide the earlier single-record/list shapes.
     """
     latency: dict[str, float] = {}
     energy: dict[str, float] = {}
     source: dict[str, str] = {}
-    for name, latency_ms, energy_wms, src in entries:
+    fallbacks: list[MoECommFallback] = []
+    for entry in entries:
+        name, latency_ms, energy_wms, src = entry[:4]
+        fallback_payloads = entry[4] if len(entry) > 4 else None
         latency[name] = latency.get(name, 0.0) + latency_ms * scale
         energy[name] = energy.get(name, 0.0) + energy_wms * scale
         prior = source.get(name)
@@ -436,7 +429,34 @@ def _fold_per_op(
             source[name] = src
         elif prior != src:
             source[name] = "mixed"
-    return latency, energy, source
+        if fallback_payloads:
+            if isinstance(fallback_payloads[0], str):
+                fallbacks.append(_moe_comm_fallback_from_payload(fallback_payloads))
+                continue
+            if (
+                isinstance(fallback_payloads, tuple)
+                and len(fallback_payloads) == 2
+                and isinstance(fallback_payloads[1], list)
+            ):
+                first_payload, payloads = fallback_payloads
+                fallbacks.append(_moe_comm_fallback_from_payload(first_payload))
+            else:
+                # Compatibility for the earlier private list payload.
+                payloads = fallback_payloads
+            for payload in payloads:
+                fallbacks.append(_moe_comm_fallback_from_payload(payload))
+    return latency, energy, source, merge_moe_comm_fallbacks(fallbacks)
+
+
+def _moe_comm_fallback_from_payload(payload: _MoeCommFallbackPayload) -> MoECommFallback:
+    return MoECommFallback(
+        inference_phase=payload[0],
+        comm_backend=payload[1],
+        requested_ep_size=payload[2],
+        requested_node_num=payload[3],
+        measurement_ep_size=payload[4],
+        measurement_node_num=payload[5],
+    )
 
 
 def estimate_static_latency_breakdown_with_rust(
@@ -453,23 +473,27 @@ def estimate_static_latency_breakdown_with_rust(
     dict[str, float],
     dict[str, str],
     dict[str, str],
+    tuple[MoECommFallback, ...],
 ]:
     """Static (context / generation) per-op breakdown via the compiled engine.
 
-    Routes through ``EngineHandle.run_static_per_op`` (the "Python builds,
-    Rust executes" path). The engine performs the decode stride quadrature and
+    Routes through ``EngineHandle._run_static_per_op_with_metadata``, the
+    private same-call metadata counterpart to the "Python builds, Rust
+    executes" path. The public ``run_static_per_op`` method remains a list of
+    four-tuples. The engine performs the decode stride quadrature and
     the ``(nextn + 1)`` decode-batch scaling internally (mirroring
     the retired Python ``_run_generation_phase``) and returns every queried op's
-    ``(name, latency_ms, energy_wms, source)``; this side folds them into the
+    ``(name, latency_ms, energy_wms, source, moe_comm_fallbacks)``; this side
+    folds them into the
     same name-keyed dicts the Python phase runners produce — real op names,
     real energies, real provenance tags. Returns ``(context_latency,
     generation_latency, context_energy_wms, generation_energy_wms,
-    context_source, generation_source)``.
+    context_source, generation_source, moe_comm_fallbacks)``.
     """
     handle = _cached_engine_handle(model, database)
     engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
     try:
-        context_ops, generation_ops = handle.run_static_per_op(
+        context_ops, generation_ops = handle._run_static_per_op_with_metadata(
             batch_size=int(runtime_config.batch_size),
             isl=int(runtime_config.isl),
             osl=int(runtime_config.osl),
@@ -484,8 +508,12 @@ def estimate_static_latency_breakdown_with_rust(
         _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
-    context_latency, context_energy, context_source = _fold_per_op(context_ops, latency_correction_scale)
-    generation_latency, generation_energy, generation_source = _fold_per_op(generation_ops, latency_correction_scale)
+    context_latency, context_energy, context_source, context_fallbacks = _fold_per_op(
+        context_ops, latency_correction_scale
+    )
+    generation_latency, generation_energy, generation_source, generation_fallbacks = _fold_per_op(
+        generation_ops, latency_correction_scale
+    )
     return (
         context_latency,
         generation_latency,
@@ -493,6 +521,7 @@ def estimate_static_latency_breakdown_with_rust(
         generation_energy,
         context_source,
         generation_source,
+        merge_moe_comm_fallbacks(context_fallbacks, generation_fallbacks),
     )
 
 
@@ -558,7 +587,7 @@ def estimate_mixed_step_breakdown_with_rust(
     """
     handle = _cached_engine_handle(model, database)
     try:
-        shared_ops, ctx_attn_ops, decode_attn_ops = handle.mixed_step_breakdown_per_op(
+        shared_ops, ctx_attn_ops, decode_attn_ops = handle._mixed_step_breakdown_per_op_with_metadata(
             int(ctx_tokens),
             int(gen_tokens),
             int(isl),
@@ -571,9 +600,9 @@ def estimate_mixed_step_breakdown_with_rust(
         _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
-    shared_latency, shared_energy, shared_source = _fold_per_op(shared_ops)
-    ctx_latency, ctx_energy, ctx_source = _fold_per_op(ctx_attn_ops)
-    dec_latency, dec_energy, dec_source = _fold_per_op(decode_attn_ops)
+    shared_latency, shared_energy, shared_source, shared_fallbacks = _fold_per_op(shared_ops)
+    ctx_latency, ctx_energy, ctx_source, ctx_fallbacks = _fold_per_op(ctx_attn_ops)
+    dec_latency, dec_energy, dec_source, dec_fallbacks = _fold_per_op(decode_attn_ops)
 
     # Pass 2/3 fold to (at most) the single filtered attention key; missing
     # passes report 0.0 under the Python branch's default "silicon" source
@@ -609,6 +638,7 @@ def estimate_mixed_step_breakdown_with_rust(
         "component_energy_wms": component_energy_wms,
         "per_op_latency_ms": per_op_latency_ms,
         "per_op_source": per_op_source,
+        "moe_comm_fallbacks": merge_moe_comm_fallbacks(shared_fallbacks, ctx_fallbacks, dec_fallbacks),
     }
 
 
@@ -651,24 +681,25 @@ def estimate_decode_step_breakdown_with_rust(
     isl: int,
     osl: int,
     gen_seq_imbalance_correction_scale: float = 1.0,
-) -> tuple[float, float, dict[str, float], dict[str, str]]:
+) -> tuple[float, float, dict[str, float], dict[str, str], tuple[MoECommFallback, ...]]:
     """``estimate_decode_step_latency_with_rust`` with the per-op values kept.
 
-    Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source)`` —
+    Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source,
+    moe_comm_fallbacks)`` —
     the exact shape ``base_backend._get_genonly_step_latency`` produces on the
     Python step, with real op names and per-op energies folded from the
     compiled engine's per-op results.
     """
     handle = _cached_engine_handle(model, database)
-    entries = handle.decode_step_per_op(
+    entries = handle._decode_step_per_op_with_metadata(
         int(gen_tokens),
         int(isl),
         int(osl),
         gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
     )
     _note_rust_provenance(handle)
-    latency, energy, source = _fold_per_op(entries)
-    return sum(latency.values()), sum(energy.values()), latency, source
+    latency, energy, source, fallbacks = _fold_per_op(entries)
+    return sum(latency.values()), sum(energy.values()), latency, source, fallbacks
 
 
 def evaluate_context_ops_with_rust(
@@ -681,7 +712,7 @@ def evaluate_context_ops_with_rust(
     prefix: int = 0,
     seq_imbalance_correction_scale: float = 1.0,
     x: int | None = None,
-) -> list[tuple[str, float, float, str]]:
+) -> list[PerOpValue]:
     """Evaluate an index-addressed sublist of the compiled context op list.
 
     The thin op-list evaluation FFI: Python-side orchestration (AFD A/F
@@ -716,7 +747,7 @@ def evaluate_generation_ops_with_rust(
     gen_seq_imbalance_correction_scale: float = 1.0,
     prefix: int = 0,
     x: int | None = None,
-) -> list[tuple[str, float, float, str]]:
+) -> list[PerOpValue]:
     """Evaluate an index-addressed sublist of the compiled generation op list
     at the decode-step shape (see ``evaluate_context_ops_with_rust``). The
     base decode walk carries no prefix; ``prefix`` exists for orchestrations
@@ -745,7 +776,7 @@ def evaluate_ops_json_with_rust(
     prefix: int = 0,
     imbalance_correction_scale: float = 1.0,
     x: int | None = None,
-) -> list[tuple[str, float, float, str]]:
+) -> list[PerOpValue]:
     """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against the
     engine's database — serves op lists deliberately NOT in the compiled spec
     (the VL encoder phase). The caller keeps the shape math and passes the
@@ -984,13 +1015,14 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "moe_comm_backend": getattr(model_config, "moe_comm_backend", None),
                         "num_gpus_per_node": getattr(model_config, "num_gpus_per_node", None),
                     },
-                    # Data-resolution policy. `build_engine_spec_json` bakes the
-                    # database's policy-dependent `perf_db_sources` into the
-                    # compiled handle, so two views of the same on-disk identity
-                    # that differ only in shared-layer or strict-provenance
-                    # policy must not share a cached handle — a warmed
-                    # primary-only handle would otherwise answer (or fail) for
-                    # the reuse-carrying view depending on call order.
+                    # Data-resolution policy. `build_engine_spec_json` bakes
+                    # these flags into the compiled handle and the engine
+                    # resolves per-op sources from them (schema v13), so two
+                    # views of the same on-disk identity that differ only in
+                    # shared-layer or strict-provenance policy must not share
+                    # a cached handle — a warmed primary-only handle would
+                    # otherwise answer (or fail) for the reuse-carrying view
+                    # depending on call order.
                     "database_policy": {
                         "enable_shared_layer": bool(getattr(database, "enable_shared_layer", False)),
                         "strict_provenance": bool(getattr(database, "strict_provenance", False)),
@@ -1054,9 +1086,17 @@ def _quant_to_dtype(value: Any) -> str | None:
         return "fp8_block"
     if name == "nvfp4":
         return "nvfp4"
+    if name == "w4a16_nvfp4":
+        return "w4a16_nvfp4"
     if name in {"int8", "int8_wo", "sq"}:
         return "int8"
-    if name in {"int4", "int4_wo", "w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+    if name in {
+        "int4",
+        "int4_wo",
+        "w4afp8",
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+    }:
         return "int4"
     return None
 

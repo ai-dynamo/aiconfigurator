@@ -55,7 +55,7 @@ use std::sync::OnceLock;
 
 use super::axis_curve::AxisCurve;
 use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::{PerfReader, PerfRow};
@@ -106,32 +106,77 @@ impl MoeA2aTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved
     /// from `perf_db_sources` (Python-supplied). Each perf file falls back to
     /// its primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let moe_a2a_sources =
-            resolve_op_sources(perf_db_sources, "moe_a2a_perf.parquet", &data_root);
-        let legacy_normal_sources = resolve_op_sources(
-            perf_db_sources,
-            "wideep_deepep_normal_perf.parquet",
-            &data_root,
-        );
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
+        let moe_a2a_sources = resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
+        let legacy_normal_sources =
+            resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
         let legacy_ll_sources =
-            resolve_op_sources(perf_db_sources, "wideep_deepep_ll_perf.parquet", &data_root);
+            resolver.sources_for("wideep_deepep_ll_perf.parquet", &data_root)?;
         let legacy_trtllm_alltoall_sources =
-            resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             moe_a2a_sources,
             legacy_normal_sources,
             legacy_ll_sources,
             legacy_trtllm_alltoall_sources,
             grids: OnceLock::new(),
-        }
+        })
+    }
+
+    /// Whether an exact A2A shape coordinate has at least one collected SM
+    /// curve. Token-axis coverage is deliberately not checked here: an exact
+    /// scale with an incomplete curve must fail at its own interpolation
+    /// boundary rather than silently falling back to another node scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn has_shape(
+        &self,
+        comm_backend: &str,
+        phase: &str,
+        comm_dtype: &str,
+        ep_size: u32,
+        node_num: u32,
+        hidden_size: u32,
+        topk: u32,
+        num_experts: u32,
+    ) -> Result<bool, AicError> {
+        let grids = self.load()?;
+        let phase_slice = (comm_backend.to_string(), phase.to_string());
+        let Some(dtypes) = grids.dtypes_by_phase.get(&phase_slice) else {
+            return Ok(false);
+        };
+        let used_dtype = if dtypes.contains(comm_dtype) {
+            comm_dtype
+        } else if comm_dtype == "fp8_block" && dtypes.contains("fp8") {
+            "fp8"
+        } else if dtypes.len() == 1 && dtypes.contains("default") {
+            "default"
+        } else {
+            return Ok(false);
+        };
+        let key_at = |sms: u32| MoeA2aKey {
+            comm_backend: comm_backend.to_string(),
+            phase: phase.to_string(),
+            comm_dtype: used_dtype.to_string(),
+            ep_size,
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            sms,
+        };
+        Ok(grids
+            .by_keys
+            .range(key_at(0)..=key_at(u32::MAX))
+            .next()
+            .is_some())
     }
 
     /// Unified MoE all-to-all latency (ms) for one comm phase.
@@ -297,14 +342,25 @@ fn query_sms_grid(
 }
 
 /// `comm_dtype` of every legacy DeepEP row: those tables were collected with
-/// no dtype axis (`_adapt_legacy_deepep`).
-const LEGACY_DEEPEP_DTYPE: &str = "default";
+/// no dtype axis (`_adapt_legacy_deepep`). Shared with the table view — the
+/// legacy-adaptation vocabulary has ONE home per family.
+pub(crate) const LEGACY_DEEPEP_DTYPE: &str = "default";
+
+/// `ep_size` of every legacy DeepEP row: `node_num * 8` — the legacy tables
+/// were collected on 8-GPU HGX fleets and carry no ep axis
+/// (`_adapt_legacy_deepep`). Saturating only to keep a corrupt row from
+/// panicking a debug build; real node counts are single digits. Shared with
+/// the table view.
+pub(crate) fn legacy_deepep_ep_size(node_num: u32) -> u32 {
+    node_num.saturating_mul(8)
+}
 
 /// `kernel_source` Python assumes when the legacy trtllm-alltoall file has no
 /// such COLUMN (`row.get("kernel_source", "NVLinkTwoSided")`). A column that
 /// exists with a NULL cell is a different case — see
-/// [`adapt_legacy_trtllm_alltoall`].
-const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "NVLinkTwoSided";
+/// [`adapt_legacy_trtllm_alltoall`]. Shared with the table view (and the raw
+/// `load_trtllm_alltoall_data` twin, which used the same default).
+pub(crate) const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "NVLinkTwoSided";
 
 /// Load the unified table: legacy adapters first (keep-first), then the new
 /// schema (first occurrence of a key overwrites, repeats keep first) —
@@ -383,9 +439,7 @@ fn legacy_deepep_key(
         comm_backend: comm_backend.to_string(),
         phase: phase.to_string(),
         comm_dtype: LEGACY_DEEPEP_DTYPE.to_string(),
-        // Saturating only to keep a corrupt row from panicking a debug build;
-        // real node counts are single digits.
-        ep_size: node_num.saturating_mul(8),
+        ep_size: legacy_deepep_ep_size(node_num),
         node_num,
         hidden_size,
         topk,
@@ -524,7 +578,8 @@ fn adapt_legacy_deepep_ll(sources: &[PerfSource], by_keys: &mut A2aGrid) -> Resu
 }
 
 /// `_LEGACY_TRTLLM_KERNEL_TO_BACKEND`; an unmapped kernel skips the row.
-fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str> {
+/// Shared with the table view.
+pub(crate) fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str> {
     match kernel_source {
         "NVLinkTwoSided" => Some("nvlink_two_sided"),
         "NVLinkOneSided" => Some("nvlink_one_sided"),
@@ -536,8 +591,10 @@ fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str> {
 /// where `None` means the row's own `moe_dtype` passes through. The
 /// low-precision combine kernel gets its own `"fp4"` dtype key (an nvfp4
 /// run's STANDARD combine still keys as `"nvfp4"`). An unmapped op_name skips
-/// the row.
-fn legacy_trtllm_phase_dtype(op_name: &str) -> Option<(&'static str, Option<&'static str>)> {
+/// the row. Shared with the table view.
+pub(crate) fn legacy_trtllm_phase_dtype(
+    op_name: &str,
+) -> Option<(&'static str, Option<&'static str>)> {
     match op_name {
         "alltoall_prepare" => Some(("prepare", None)),
         "alltoall_dispatch" => Some(("dispatch", None)),
@@ -609,7 +666,7 @@ fn adapt_legacy_trtllm_alltoall(
                         path.display()
                     ))
                 })?,
-                None => (ep_size / 4).max(1),
+                None => crate::perf_database::trtllm_alltoall::legacy_num_nodes_fallback(ep_size),
             };
             let key = MoeA2aKey {
                 comm_backend: comm_backend.to_string(),
@@ -636,7 +693,7 @@ fn adapt_legacy_trtllm_alltoall(
 /// `_normalize_sms`: an absent column, a NULL cell, or NaN all key at 0.
 /// The column is INT64 in the collector schema; the f64 arm covers a
 /// float-typed collection (Python's `int(float(raw))`).
-fn normalize_sms(row: &PerfRow, col: Option<usize>) -> Result<u32, AicError> {
+pub(crate) fn normalize_sms(row: &PerfRow, col: Option<usize>) -> Result<u32, AicError> {
     if let Some(value) = row.u32_optional(col)? {
         return Ok(value);
     }
@@ -1678,7 +1735,11 @@ mod tests {
             "wideep_deepep_ll_perf.parquet",
             "trtllm_alltoall_perf.parquet",
         ] {
-            for source in resolve_op_sources(&PerfDbSources::default(), basename, data_root) {
+            for source in crate::perf_database::resolve_op_sources(
+                &PerfDbSources::default(),
+                basename,
+                data_root,
+            ) {
                 let path = source.path();
                 if !path.exists() {
                     continue;

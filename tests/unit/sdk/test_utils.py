@@ -630,6 +630,7 @@ class TestGemma4MixModelBuilder:
             262144,  # context_length
             model_config,
             None,  # extra_params (we use set_gemma4_config instead)
+            backend_name="trtllm",
         )
         model.set_gemma4_config(cfg)
         return model
@@ -665,6 +666,7 @@ class TestGemma4MixModelBuilder:
             262144,
             TestGemma4MixModelBuilder._make_model_config(),  # tp=1, moe_tp=1, moe_ep=1
             None,
+            backend_name="trtllm",
         )
         model.set_gemma4_config(cfg)
         return model
@@ -784,6 +786,7 @@ class TestGemma4MixModelBuilder:
             262144,
             self._make_model_config(),
             None,
+            backend_name="trtllm",
         )
         with pytest.raises(ValueError, match="requires a Gemma4MixConfig"):
             model.set_gemma4_config(common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1)))
@@ -807,6 +810,7 @@ class TestGemma4MixModelBuilder:
             262144,
             self._make_model_config(),
             None,
+            backend_name="trtllm",
         )
         bad_cfg = common.Gemma4MixConfig(
             layer_types=("sliding_attention",) * 5,  # only 5, but num_layers=30
@@ -896,6 +900,7 @@ class TestGemma4MixModelBuilder:
                 262144,
                 bad_config,
                 None,
+                backend_name="trtllm",
             )
 
 
@@ -943,6 +948,7 @@ class TestHybridMoEModelBuilder:
             152576,
             262144,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -978,6 +984,7 @@ class TestHybridMoEModelBuilder:
             202048,
             10485760,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -1014,6 +1021,7 @@ class TestHybridMoEModelBuilder:
             202048,
             1048576,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -1379,6 +1387,100 @@ class TestParseCompressedTensorsQuant:
         assert overrides["moe_quant_mode"] == common.MoEQuantMode.nvfp4
         assert overrides["kvcache_quant_mode"] == common.KVCacheQuantMode.fp8
         assert overrides["fmha_quant_mode"] == common.FMHAQuantMode.fp8
+
+    def test_modelopt_mixed_precision_mxfp8_dense_nvfp4_experts_map_sdk_modes(self):
+        """MXFP8 dense/attention layers ride the fp8_block approximation; NVFP4 routed experts stay nvfp4.
+
+        Mirrors nvidia/MiniMax-M3-NVFP4 (ModelOpt MIXED_PRECISION): attention
+        q/k/v/o + MSA index projections + dense MLP + shared expert = MXFP8,
+        routed experts w1/w2/w3 = NVFP4 group_size 16, kv_cache_quant_algo null.
+        """
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+        from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
+
+        prefix = "language_model.model.layers"
+        raw_config = _attach_inferred_quant_fields(
+            {
+                "hf_quant_config": {
+                    "producer": {"name": "modelopt"},
+                    "quantization": {
+                        "quant_algo": "MIXED_PRECISION",
+                        "kv_cache_quant_algo": None,
+                        "exclude_modules": ["lm_head", "model.embed_tokens", f"{prefix}.3.block_sparse_moe.gate"],
+                        "quantized_layers": {
+                            f"{prefix}.3.self_attn.q_proj": {"quant_algo": "MXFP8"},
+                            f"{prefix}.3.self_attn.o_proj": {"quant_algo": "MXFP8"},
+                            f"{prefix}.3.self_attn.index_q_proj": {"quant_algo": "MXFP8"},
+                            f"{prefix}.0.mlp.gate_proj": {"quant_algo": "MXFP8"},
+                            f"{prefix}.3.block_sparse_moe.shared_experts.up_proj": {"quant_algo": "MXFP8"},
+                            f"{prefix}.3.block_sparse_moe.experts.0.w1": {"quant_algo": "NVFP4", "group_size": 16},
+                            f"{prefix}.3.block_sparse_moe.experts.0.w2": {"quant_algo": "NVFP4", "group_size": 16},
+                        },
+                    },
+                },
+            }
+        )
+
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+
+        assert raw_config["quant_algo"] == "mixed_precision"
+        assert overrides["gemm_quant_mode"] == common.GEMMQuantMode.fp8_block
+        assert overrides["moe_quant_mode"] == common.MoEQuantMode.nvfp4
+        # kv_cache_quant_algo=null and a non-fp8-family quant_algo: no kv/fmha
+        # override, both fall through to the bfloat16 defaults in get_model.
+        assert "kvcache_quant_mode" not in overrides
+        assert "fmha_quant_mode" not in overrides
+
+    def test_modelopt_mixed_precision_mxfp8_config_group_not_misread_as_per_tensor_fp8(self):
+        """A config_groups MXFP8 entry (8-bit float, group_size 32) maps to fp8_block, not fp8_static."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+        from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
+
+        raw_config = _attach_inferred_quant_fields(
+            {
+                "quantization_config": {
+                    "quant_algo": "MIXED_PRECISION",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": 32},
+                            "targets": ["model.layers.0.self_attn.q_proj"],
+                        },
+                    },
+                },
+            }
+        )
+
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+
+        assert overrides["gemm_quant_mode"] == common.GEMMQuantMode.fp8_block
+
+    def test_modelopt_mixed_precision_mxfp8_wins_over_per_tensor_fp8_for_gemms(self):
+        """A checkpoint mixing MXFP8 and per-tensor FP8 dense layers keeps the block-scaled lane."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+        from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
+
+        raw_config = _attach_inferred_quant_fields(
+            {
+                "hf_quant_config": {
+                    "quantization": {
+                        "quant_algo": "MIXED_PRECISION",
+                        "quantized_layers": {
+                            "model.layers.0.self_attn.q_proj": {"quant_algo": "MXFP8"},
+                            "model.layers.0.mlp.up_proj": {"quant_algo": "FP8"},
+                            "model.layers.1.mixer.experts.0.up_proj": {"quant_algo": "MXFP8"},
+                        },
+                    }
+                },
+            }
+        )
+
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+
+        assert overrides["gemm_quant_mode"] == common.GEMMQuantMode.fp8_block
+        assert overrides["moe_quant_mode"] == common.MoEQuantMode.fp8_block
 
     def test_expert_dtype_fp4_is_deepseek_v4_specific(self):
         from aiconfigurator.sdk import common

@@ -133,4 +133,79 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
+    OpEntry(
+        op="mhc_module",
+        module="collector.trtllm.collect_mhc_module",
+        get_func="get_mhc_module_test_cases",
+        run_func="run_mhc_module_worker",
+        perf_filename=PerfFile.MHC_MODULE,
+    ),
+    # DeepSeek-V4 CSA/HCA attention modules. Requires trtllm>=1.3.0rc21
+    # (module __compat__); the framework itself rejects pre-Blackwell GPUs
+    # (mla.py forward_*_sparse_mla "DeepSeek-V4 is not supported on
+    # pre-blackwell GPUs" @1.3.0rc23) — those platforms fail into the
+    # classified log per observe-don't-predict.
+    # SM120 probe (RTX PRO 6000, 1.3.0rc23, campaign 2026-08-07): 100% of
+    # cases fail from case 0 (~5.4s/case classified errors with SIGABRT
+    # worker resets), matching the DeepGEMM sparse-attention "Unsupported
+    # architecture" family limit already documented for DSA in
+    # collect_mla_module.py — park SM120 until a framework fix ships.
+    OpEntry(
+        op="dsv4_csa_context_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_csa_context_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_CSA_CONTEXT_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="dsv4_hca_context_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_hca_context_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_HCA_CONTEXT_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="dsv4_csa_generation_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_csa_generation_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_CSA_GENERATION_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="dsv4_hca_generation_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_hca_generation_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_HCA_GENERATION_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="msa_context_module",
+        module="collector.trtllm.collect_msa_module",
+        get_func="get_msa_context_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_CONTEXT_MODULE,
+        # MiniMax-M3 MSA modules: hardware-validated on SM90 (h100/h200,
+        # rc23 Triton reference path) and SM100/103 (b200/b300/gb200/gb300,
+        # rc23 implementation="msa" fmha_sm100 path — see collect_msa_module).
+        # SM120 runs the Triton path; its table is pending (collection-pool
+        # availability) and lands in a follow-up — until then M3-on-SM120
+        # trtllm estimates fail with a typed EmpiricalNotImplemented (no MSA
+        # table and no DSA xop donor on that system/backend): an explicitly
+        # rejected cell, not a silent fallback. SM121 has never run on
+        # hardware and stays marked.
+        unverified_sms=(121,),
+    ),
+    OpEntry(
+        op="msa_generation_module",
+        module="collector.trtllm.collect_msa_module",
+        get_func="get_msa_generation_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_GENERATION_MODULE,
+        # See msa_context_module marker rationale.
+        unverified_sms=(121,),
+    ),
 ]

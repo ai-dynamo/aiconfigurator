@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 
 use super::axis_curve::LeafAxisCurve;
 use super::perf_interp::LeafValue;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -83,7 +83,13 @@ impl CommunicationTable {
         nccl_root: Option<PathBuf>,
         oneccl_root: Option<PathBuf>,
     ) -> Self {
-        Self::with_sources(data_root, nccl_root, oneccl_root, &PerfDbSources::default())
+        Self::with_sources(
+            data_root,
+            nccl_root,
+            oneccl_root,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
@@ -96,11 +102,11 @@ impl CommunicationTable {
         data_root: PathBuf,
         nccl_root: Option<PathBuf>,
         oneccl_root: Option<PathBuf>,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
         let custom_allreduce_sources =
-            resolve_op_sources(perf_db_sources, "custom_allreduce_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("custom_allreduce_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             nccl_root,
             oneccl_root,
@@ -108,7 +114,17 @@ impl CommunicationTable {
             custom_allreduce: OnceLock::new(),
             nccl: OnceLock::new(),
             oneccl: OnceLock::new(),
-        }
+        })
+    }
+
+    /// System-wide NCCL data dir (for the table view's primary-only load).
+    pub(crate) fn nccl_root(&self) -> Option<&Path> {
+        self.nccl_root.as_deref()
+    }
+
+    /// System-wide OneCCL data dir (vLLM/XPU systems only).
+    pub(crate) fn oneccl_root(&self) -> Option<&Path> {
+        self.oneccl_root.as_deref()
     }
 
     /// Raw custom-allreduce value (latency ms + power/energy), 1-D
@@ -137,16 +153,35 @@ impl CommunicationTable {
         interp_message_size(curve, message_size)
     }
 
-    /// Custom-allreduce latency at a RAW tp_size, mirroring the full Python
-    /// DB-level `_query_custom_allreduce_table.get_silicon`
-    /// (operations/communication.py) so every consumer inherits the same
-    /// semantics:
+    /// Resolve which measured TP slice backs a query for `tp_size`.
+    ///
+    /// Caps the requested rank count to the largest measured slice for this
+    /// quant mode. If the table cannot be loaded, retain the legacy node cap
+    /// so the eventual query surfaces the original data error. This Rust
+    /// engine method is the single implementation; Python/SDK queries delegate
+    /// to the engine.
+    pub fn measured_tp_slice(&self, quant: CommQuantMode, tp_size: u32, per_node: u32) -> u32 {
+        if let Ok(grids) = self.load_custom_allreduce() {
+            if let Some(max_recorded) = grids
+                .by_keys
+                .keys()
+                .filter_map(|(name, measured_tp)| (name == quant.name()).then_some(*measured_tp))
+                .max()
+            {
+                return tp_size.min(max_recorded);
+            }
+        }
+        tp_size.min(per_node)
+    }
+
+    /// Custom-allreduce latency at a RAW tp_size. This is the engine-level
+    /// implementation used by every consumer:
     ///   1. `tp == 1` -> 0;
     ///   2. GB200 NVL72 (`num_gpus_per_node == 72`) with `tp > 4` -> reroute
     ///      to NCCL all_reduce at the RAW tp (custom AR is only collected up
     ///      to tp4 there);
-    ///   3. clamp tp to the node size and interpolate the table;
-    ///   4. beyond-node overflow: scale by the p2p-bandwidth ratio.
+    ///   3. cap tp to the largest measured slice and interpolate the table;
+    ///   4. unmeasured overflow only: scale by the p2p-bandwidth ratio.
     pub fn query_custom_allreduce_scaled(
         &self,
         spec: &SystemSpec,
@@ -161,15 +196,22 @@ impl CommunicationTable {
         if per_node == 72 && tp_size > 4 {
             return self.query_nccl_scaled(spec, quant, "all_reduce", tp_size, message_size);
         }
-        let effective_tp = tp_size.min(per_node);
+        // Cap at the largest measured rank-count slice. On NVL systems (4
+        // GPUs per node), measured TP8/TP16 rows remain exact hits while a
+        // larger unmeasured request scales from TP16 instead of falling back
+        // non-monotonically to TP4. See issues #1416 and #1260.
+        let effective_tp = self.measured_tp_slice(quant, tp_size, per_node);
         let mut value = self.query_custom_allreduce(quant, effective_tp, message_size)?;
-        if tp_size > per_node {
-            let base_bw = spec.get_p2p_bandwidth(per_node);
+        // Only correct for bandwidth when the curve came from a SMALLER slice
+        // than requested; a measured cross-node curve already includes that
+        // cost and scaling it again would double-count the penalty.
+        if effective_tp < tp_size {
+            let base_bw = spec.get_p2p_bandwidth(effective_tp);
             let target_bw = spec.get_p2p_bandwidth(tp_size);
             let f_tp = tp_size as f64;
-            let f_pn = per_node as f64;
-            let scale = (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
-            // Python scales latency AND energy by the beyond-node factor.
+            let f_eff = effective_tp as f64;
+            let scale = (f_tp - 1.0) / f_tp * f_eff / (f_eff - 1.0).max(1.0) * base_bw / target_bw;
+            // Scale latency and energy by the same beyond-node factor.
             value.latency *= scale;
             value.energy *= scale;
         }
@@ -785,6 +827,107 @@ mod tests {
                 .query_nccl(CommQuantMode::Half, "all_reduce", 4, 1024.0)
                 .unwrap(),
             LeafValue::latency_only(2.0)
+        );
+    }
+
+    /// Issue #1416: a measured cross-node TP slice must win over the
+    /// node-capped one, and must NOT get the beyond-node bandwidth scaling
+    /// applied on top (the measured curve already carries that cost). The
+    /// assertions go through `query_custom_allreduce_scaled` — the actual
+    /// query boundary — so a regression in the scaling policy cannot slip
+    /// past this test. GB300 has 4 GPUs per node, so TP8/TP16 span nodes.
+    #[test]
+    fn custom_allreduce_prefers_measured_multinode_tp_slice() {
+        let spec = SystemSpec::load(&systems_root().join("gb300.yaml")).expect("gb300.yaml parse");
+        assert_eq!(spec.node.num_gpus_per_node, 4);
+        let points = BTreeMap::from([(1024, 1.0), (4096, 4.0)]);
+        let tp4 = ("half".to_string(), 4);
+        let tp8 = ("half".to_string(), 8);
+        let tp16 = ("half".to_string(), 16);
+
+        // per_node = 4, so TP8 spans nodes.
+        let with_multinode = table_with_loaded_collectives(
+            BTreeMap::from([
+                (tp4.clone(), latency_curve(points.clone())),
+                (
+                    tp8,
+                    latency_curve(BTreeMap::from([(1024, 7.0), (4096, 9.0)])),
+                ),
+                (
+                    tp16,
+                    latency_curve(BTreeMap::from([(1024, 11.0), (4096, 12.0)])),
+                ),
+            ]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            with_multinode.measured_tp_slice(CommQuantMode::Half, 8, 4),
+            8
+        );
+        assert_eq!(
+            with_multinode.measured_tp_slice(CommQuantMode::Half, 16, 4),
+            16
+        );
+        assert_eq!(
+            with_multinode.measured_tp_slice(CommQuantMode::Half, 32, 4),
+            16
+        );
+        // The measured TP8 curve is returned raw: no bandwidth correction
+        // stacked on top of real cross-node data.
+        let measured = with_multinode
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 8, 1024.0)
+            .unwrap();
+        assert_eq!(measured, LeafValue::latency_only(7.0));
+
+        // An unmeasured TP32 query scales from the largest measured TP16
+        // slice. GB300's TP16 and TP32 bandwidths are equal, so the fixed
+        // ring fan-out factor is 31/30: 12.0 ms -> 12.4 ms.
+        let extrapolated32 = with_multinode
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 32, 4096.0)
+            .unwrap();
+        assert!((extrapolated32.latency - 12.4).abs() < 1e-12);
+        assert!(extrapolated32.latency > 12.0);
+
+        // Without measured TP8 rows the node cap still applies (issue #1260
+        // compatibility path stays reachable) and the TP4 fallback carries
+        // the beyond-node bandwidth factor.
+        let without_tp8 = table_with_loaded_collectives(
+            BTreeMap::from([(tp4, latency_curve(points))]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 8, 4), 4);
+        let fallback8 = without_tp8
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 8, 1024.0)
+            .unwrap();
+        let expected8 = 7.0 / 6.0;
+        assert!(
+            (fallback8.latency - expected8).abs() < 1e-15,
+            "TP8 fallback must scale the raw TP4 value: expected {expected8}, got {}",
+            fallback8.latency
+        );
+        assert!(
+            (fallback8.latency - 1.0).abs() > 1e-3,
+            "the no-TP8 query must not return the raw TP4 value unscaled"
+        );
+        assert_eq!(
+            without_tp8
+                .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 16, 4096.0)
+                .unwrap()
+                .latency,
+            5.0
+        );
+
+        // Within-node TP is unchanged either way: no slice remapping, no
+        // scaling.
+        assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 4, 4), 4);
+        assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 2, 4), 2);
+        assert_eq!(
+            without_tp8
+                .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 4, 4096.0)
+                .unwrap(),
+            LeafValue::latency_only(4.0)
         );
     }
 

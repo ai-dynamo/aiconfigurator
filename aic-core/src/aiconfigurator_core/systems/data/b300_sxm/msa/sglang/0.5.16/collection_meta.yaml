@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# 8x B300 SXM campaign via internal collection CI (2026-08-09).
+# kernel_source = sglang_minimax_*_triton_sparse: the official
+# lmsysorg/sglang:v0.5.16 image does NOT bundle the fmha_sm100 wheel
+# (import fails -> msa_available()=False), so the Triton sparse path IS
+# that image's serving truth on this system. Re-collect against an
+# fmha_sm100-bundled image when one exists.
+# context accepted gaps: 5 tp=1 sweep tails died at the plan's
+# two largest prefixes (1000000/1032192 — per-GPU KV extent ~2^31
+# elements, triton illegal-memory-access, giant-shape boundary class;
+# 10 cells of 26860; the same shapes at tp>=2 are present).
+# Plus 1 transient infra loss: one tp=4 h=16 fp8-KV context sweep
+# group failed at torch.distributed rendezvous (TCPStore
+# EADDRINUSE port race between concurrent workers) — classified,
+# not a kernel failure; the sibling systems cover the shape.
+# generation: zero failures.
+schema_version: 1
+provenance: collected
+runtime:
+  framework: sglang
+  version: 0.5.16
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 26850
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 1480
+    status: complete

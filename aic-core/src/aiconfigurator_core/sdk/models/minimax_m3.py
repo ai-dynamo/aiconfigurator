@@ -6,9 +6,10 @@
 Structurally a sibling of DeepSeekV32Model (MoE + sparse-attention-module +
 shared expert), with the attention block modeled by the MSA op instead of DSA:
 MSA is GQA (64 q / 4 kv heads, head_dim 128, partial rope) with a per-block
-indexer selecting the top-16 blocks (block_size 128 -> 2048 tokens). There is no
-MSA silicon data, so the MSA op runs HYBRID/EMPIRICAL and transfers from DSA's
-measured utilisation (scaled by ``msa_dsa_scale_k``).
+indexer selecting the top-16 blocks (block_size 128 -> 2048 tokens). The MSA op
+reads its own msa_*_module silicon tables when collected; without them it runs
+HYBRID/EMPIRICAL and transfers from DSA's measured utilisation (scaled by
+``msa_dsa_scale_k``).
 
 Like the GLM-5 / DeepSeek-V3.2 modeling, the first ``first_k_dense_replace``
 dense layers are approximated as MoE+MSA (a ~5% layer fraction); the vision

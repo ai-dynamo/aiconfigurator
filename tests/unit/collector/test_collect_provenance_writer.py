@@ -78,6 +78,21 @@ def _provenance_ctx(collections: list[dict]) -> dict:
     }
 
 
+def _xpu_provenance_ctx(collections: list[dict]) -> dict:
+    runtime = CollectorRuntime(
+        framework="vllm_xpu",
+        version="0.26.0",
+        images={"default": "vllm/vllm-openai-xpu:v0.26.0@sha256:" + "5" * 64},
+        data_backend="vllm",
+    )
+    return {
+        "framework": runtime.framework,
+        "installed_version": "0.26.0+xpu",
+        "runtime": runtime,
+        "collections": collections,
+    }
+
+
 def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str]) -> Path:
     path = checkpoint_dir / BACKEND / f"{FULL_NAME}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +105,35 @@ def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str
                 "run_func": "run",
                 "framework_version": "0.5.14",
                 "sm_version": 100,
+                "updated_at": "2026-07-20T00:00:00",
+                "done": sorted(done),
+                "failed": sorted(failed),
+            }
+        )
+    )
+    return path
+
+
+def _write_checkpoint_for(
+    checkpoint_dir: Path,
+    *,
+    backend: str,
+    full_name: str,
+    version: str,
+    done: list[str],
+    failed: list[str],
+) -> Path:
+    path = checkpoint_dir / backend / f"{full_name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": collect_mod.RESUME_SCHEMA_VERSION,
+                "backend": backend,
+                "module": full_name,
+                "run_func": "run",
+                "framework_version": version,
+                "sm_version": None,
                 "updated_at": "2026-07-20T00:00:00",
                 "done": sorted(done),
                 "failed": sorted(failed),
@@ -134,7 +178,10 @@ def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_pa
     assert table["collector_hash"].startswith("sha256:")
 
 
-def test_status_partial_when_checkpoint_has_unresolved_failures(tmp_path):
+def test_status_complete_with_recorded_case_failures(tmp_path):
+    """Recorded per-case failures are DATA and do not demote the table
+    (owner decision tianhaox 2026-08-08, PR #1486) — the failed case still
+    participates in case_plan_hash as an attempted case."""
     output_root = tmp_path / "out"
     parquet_path = output_root / "gemm_perf.parquet"
     _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
@@ -153,7 +200,7 @@ def test_status_partial_when_checkpoint_has_unresolved_failures(tmp_path):
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
     table = doc["tables"]["gemm_perf"]
-    assert table["status"] == provenance.STATUS_PARTIAL
+    assert table["status"] == provenance.STATUS_COMPLETE
     assert table["case_plan_hash"] == provenance.case_plan_hash(["case-a", "case-b"])
 
 

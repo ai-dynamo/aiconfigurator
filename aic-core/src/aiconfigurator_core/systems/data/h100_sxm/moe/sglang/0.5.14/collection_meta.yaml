@@ -20,4 +20,13 @@ tables:
     # Blackwell trtllm-gen lanes are unaffected, same kernel + epilogue
     # constants). Re-collections on stock images must re-apply the suffix
     # until the sglang collector learns the checkpoint's situ property.
+    # 2026-08-09: appended 3078 MiniMax-M3 MoE shape rows (6144/3072, 128x4,
+    # bf16, sglang_fused_moe_triton; model-filtered internal collection CI
+    # run, zero failures).
+    # 2026-08-24: appended 3564 Nemotron-3-Super-120B-A12B moe rows
+    # (hidden=1024, inter=2688, 512x22 experts; recollection campaign on
+    # stock 0.5.14, AIC revision 1982d8d4) — restores the sglang-native
+    # Nemotron-3 MoE lane after the 0.5.10 bridging dirs were pruned.
+    # Keys disjoint from the base table. Nemotron-3-Ultra-FP8 generates
+    # 0 sglang cases by design (allowed_modes: [] in the model case yaml).
     status: complete

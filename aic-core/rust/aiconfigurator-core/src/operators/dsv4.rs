@@ -195,6 +195,42 @@ impl Dsv4ModuleOp {
     /// model config). `o_groups: None` (old specs) falls back to the pinned
     /// per-architecture derivation; `window_size: None` falls back to the
     /// pinned Pro window.
+    /// Python `_BaseDeepSeekV4AttentionModule._estimate_weights` ×
+    /// scale_factor: three mixed-dtype element pools (gemm-quant / BF16 /
+    /// FP32), with the compressor and CSA-indexer terms gated on
+    /// compress_ratio exactly like the Python op.
+    pub fn weight_bytes(&self) -> f64 {
+        let dims = self.sol_dims();
+        let h = dims.hidden_size as f64;
+        let q_lora = dims.q_lora_rank as f64;
+        let o_lora = dims.o_lora_rank as f64;
+        let head_dim = dims.head_dim as f64;
+        let heads = f64::from(self.num_heads);
+        let o_groups = dims.local_o_groups as f64;
+        let index_n_heads = dims.index_n_heads as f64;
+        let index_head_dim = dims.index_head_dim as f64;
+        let cr = self.attn_kind.compress_ratio() as u32;
+
+        let mut gemm_elems =
+            h * q_lora + q_lora * heads * head_dim + h * head_dim + o_groups * o_lora * h;
+        let mut bf16_elems = heads * head_dim * o_lora;
+        let mut f32_elems = heads;
+        if cr != 0 {
+            let compressor_mult = if cr == 4 { 2.0 } else { 1.0 };
+            gemm_elems += 2.0 * h * compressor_mult * head_dim;
+            f32_elems += cr as f64 * compressor_mult * head_dim;
+        }
+        if cr == 4 {
+            gemm_elems += q_lora * index_n_heads * index_head_dim;
+            gemm_elems += 2.0 * h * 2.0 * index_head_dim;
+            bf16_elems += h * index_n_heads;
+            f32_elems += cr as f64 * 2.0 * index_head_dim;
+        }
+        let bytes =
+            gemm_elems * self.gemm_quant_mode.mapping().memory + bf16_elems * 2.0 + f32_elems * 4.0;
+        bytes * self.scale_factor
+    }
+
     pub(crate) fn sol_dims(&self) -> Dsv4SolDims {
         let pinned = dsv4_dims(&self.architecture);
         let local_o_groups = match self.o_groups {
@@ -774,6 +810,19 @@ pub struct Dsv4MegaMoeOp {
 }
 
 impl Dsv4MegaMoeOp {
+    /// Python `DeepSeekV4MegaMoEModule` weights × scale_factor: always-gated
+    /// SwiGLU (3 GEMMs), Python's float floor-division chain preserved
+    /// (`... * memory * 3 // ep // tp` — two SEQUENTIAL floors, not one).
+    pub fn weight_bytes(&self) -> f64 {
+        let raw = f64::from(self.hidden_size)
+            * f64::from(self.inter_size)
+            * f64::from(self.num_experts)
+            * self.quant_mode.mapping().memory
+            * 3.0;
+        let per_ep = (raw / f64::from(self.moe_ep_size)).floor();
+        (per_ep / f64::from(self.moe_tp_size)).floor() * self.scale_factor
+    }
+
     /// Query measured MegaMoE routed-module latency at the rank-LOCAL token
     /// count `num_tokens` (Python `query`'s `x`; the perf rows are indexed by
     /// local-rank tokens — do NOT pre-multiply by attention_dp_size).
@@ -998,13 +1047,13 @@ mod tests {
         );
     }
 
-    /// Real-DB fail-loud: b200_sxm/sglang/0.5.10 ships the DSV4 module +
-    /// paged_mqa_logits parquets but NO `dsv4_csa_topk_calib` (no system
-    /// ships it), so a CSA CP context query resolves the base + mqa and then
-    /// fails loud on the missing top_last rows — exactly Python's end-to-end
-    /// behaviour today.
+    /// Real-DB fail-loud: b200_sxm/sglang/0.5.10 now retains only the
+    /// hca_attn table, so a CSA CP context query must fail LOUD with the
+    /// actionable no-module-rows message (names the missing parquet) (never a fabricated value).
+    /// The calib-specific missing-top_last branch is pinned synthetically in
+    /// `perf_database::dsv4` (absent calib -> None -> operator fail-loud).
     #[test]
-    fn cp_missing_calib_fails_loud_on_real_db() {
+    fn cp_missing_sparse_tables_fail_loud_on_real_db() {
         let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
@@ -1014,41 +1063,31 @@ mod tests {
         let err = op.query_context(&db, 1, 16384, 0).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("DeepSeek-V4 CSA CP modeling needs sparse tables")
-                && msg.contains("csa_topk_calib top_last"),
+            msg.contains("no DSV4 module rows loaded"),
             "unexpected message: {msg}"
         );
     }
 
-    /// Real-data parity anchor for the chunk-decomposed mqa lookup on the
-    /// SHIPPED gb200 sparse table (in-grid: isl=16384 walks two chunks,
-    /// (8192, past=0) + (8192, past=8192), both exact grid hits). Python
-    /// oracle generated with:
-    ///
-    /// ```text
-    /// PYTHONPATH=src python3 -c "
-    /// from aiconfigurator.sdk.perf_database import get_database
-    /// from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule as M
-    /// db = get_database('gb200', 'sglang', '0.5.10')
-    /// M.load_data(db)
-    /// print(M._mqa_chunked(db, 1, 16384, 0, 1, 64))"
-    /// # -> 0.45932399999999995  (= 0.194236 + 0.265088)
-    /// ```
+    /// Chunk decomposition on the shipped gb200/0.5.14 sparse table:
+    /// isl=16384 walks two chunks, (8192, past=0) + (8192, past=8192).
+    /// Pinned RELATIVELY — the chunked walk must equal the sum of its two
+    /// chunk lookups — so no recorded-value constant (2026-08 test policy).
     #[test]
     fn mqa_chunked_matches_python_on_gb200_data() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/gb200/sparse_attention/sglang/0.5.10");
+            .join("src/aiconfigurator_core/systems/data/gb200/sparse_attention/sglang/0.5.14");
         let table = Dsv4Table::new(root);
         let mut lookup =
             |chunk_isl: u32, past: u32| table.query_paged_mqa_logits(1, chunk_isl, past, 1, 64);
         let got = mqa_chunked(16384, 0, &mut lookup)
             .expect("lookup must not error")
             .expect("in-grid chunks must resolve");
-        let want = 0.45932399999999995;
+        let want = table.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap().unwrap()
+            + table.query_paged_mqa_logits(1, 8192, 8192, 1, 64).unwrap().unwrap();
         assert!(
-            ((got - want) / want).abs() < 1e-9,
-            "rust {got} vs python {want}"
+            ((got - want) / want).abs() < 1e-12,
+            "chunk walk must sum its chunk lookups: {got} vs {want}"
         );
     }
 

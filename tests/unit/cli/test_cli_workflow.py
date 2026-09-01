@@ -10,11 +10,13 @@ while keeping heavy computation mocked out.
 
 import argparse
 import logging
+from dataclasses import fields
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from aiconfigurator.cli.api import EstimateResult
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
@@ -28,6 +30,31 @@ from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
+
+
+def test_estimate_result_preserves_existing_positional_field_order() -> None:
+    assert [field.name for field in fields(EstimateResult)][:-1] == [
+        "ttft",
+        "tpot",
+        "power_w",
+        "isl",
+        "osl",
+        "batch_size",
+        "ctx_tokens",
+        "tp_size",
+        "pp_size",
+        "model_path",
+        "system_name",
+        "backend_name",
+        "backend_version",
+        "raw",
+        "mode",
+        "summary",
+        "per_ops_data",
+        "per_ops_source",
+        "kv_cache_warning",
+    ]
+    assert fields(EstimateResult)[-1].name == "moe_comm_fallbacks"
 
 
 class TestCLILogLevelResolution:
@@ -459,6 +486,32 @@ class TestBuildDefaultTaskConfigs:
     """Tests for build_default_tasks function."""
 
     @patch("aiconfigurator.cli.main.Task")
+    def test_normalizes_engine_step_backend_before_task_construction(self, mock_task_config):
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        build_default_tasks(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=1,
+            system="h200_sxm",
+            engine_step_backend="RUST",
+        )
+
+        assert mock_task_config.call_args.kwargs["engine_step_backend"] == "rust"
+
+    @pytest.mark.parametrize("falsey_value", ["", 0, False])
+    @patch("aiconfigurator.cli.main.Task")
+    def test_rejects_falsey_engine_step_backend(self, mock_task_config, falsey_value):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            build_default_tasks(
+                model_path="Qwen/Qwen3-32B",
+                total_gpus=1,
+                system="h200_sxm",
+                engine_step_backend=falsey_value,
+            )
+
+        mock_task_config.assert_not_called()
+
+    @patch("aiconfigurator.cli.main.Task")
     def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
         """Disagg config should be skipped when total_gpus < 2."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
@@ -640,7 +693,7 @@ class TestBuildDefaultTaskConfigs:
             total_gpus=8,
             system="h100_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
         )
 
         assert set(result) == {"agg", "disagg"}
@@ -678,7 +731,7 @@ class TestDeprecatedWideepCliFlags:
             total_gpus=8,
             system="h100_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
             **kwargs,
         )
 
@@ -729,7 +782,10 @@ class TestBuildExperimentTaskConfigs:
                 "model_path": "Qwen/Qwen3-32B",
                 "system_name": "h200_sxm",
                 "total_gpus": 8,
-                "engine_step_backend": "python",
+                # Plumbing token, not a real backend: Task is mocked, so this
+                # only proves the per-exp yaml value survives the global
+                # override (the retired "python" value used to play this role).
+                "engine_step_backend": "exp-level-token",
             },
         }
 
@@ -742,9 +798,9 @@ class TestBuildExperimentTaskConfigs:
             yaml_data = call.args[0]
             esb = call.kwargs.get("engine_step_backend", yaml_data.get("engine_step_backend"))
             by_backend[esb] = yaml_data
-        assert set(by_backend) == {"rust", "python"}
+        assert set(by_backend) == {"rust", "exp-level-token"}
         assert by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
-        assert by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+        assert by_backend["exp-level-token"]["model_path"] == "Qwen/Qwen3-32B"
 
     @patch("aiconfigurator.cli.main.Task")
     def test_default_database_mode_is_passed_to_task_yaml(self, mock_task):
