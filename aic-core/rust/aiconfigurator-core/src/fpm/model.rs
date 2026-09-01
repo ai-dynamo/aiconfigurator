@@ -849,7 +849,7 @@ impl<T> WorkloadStores<T> {
 /// used for hard caller/config errors (e.g. a non-UTF-8 `systems_path`, invalid
 /// FPM options, a malformed spec). Those must surface rather than silently
 /// degrade `best_available` to regression mode.
-fn can_fallback_to_regression(err: &AicError) -> bool {
+pub(super) fn can_fallback_to_regression(err: &AicError) -> bool {
     matches!(
         err,
         AicError::UnsupportedModel(_)
@@ -857,6 +857,7 @@ fn can_fallback_to_regression(err: &AicError) -> bool {
             | AicError::ModelConfig(_)
             | AicError::PerfDatabase(_)
             | AicError::Io { .. }
+            | AicError::Yaml { .. }
             | AicError::Parquet { .. }
     )
 }

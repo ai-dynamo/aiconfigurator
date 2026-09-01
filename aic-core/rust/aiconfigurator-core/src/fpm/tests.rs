@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -139,6 +140,22 @@ fn regression_model(
     options: ForwardPassPerfOptions,
 ) -> Result<ForwardPassPerfModel, AicError> {
     ForwardPassPerfModel::from_regression(worker_type, options)
+}
+
+#[test]
+fn malformed_system_yaml_is_fallback_eligible_without_changing_perf_database_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("broken.yaml"), "data_dir: [").unwrap();
+    let err = match PerfDatabase::load(tmp.path(), "broken", "vllm", "0.24.0") {
+        Err(err) => err,
+        Ok(_) => panic!("malformed system YAML must fail native database loading"),
+    };
+
+    assert!(matches!(&err, AicError::Yaml { .. }));
+    assert!(super::model::can_fallback_to_regression(&err));
+    assert!(super::model::can_fallback_to_regression(
+        &AicError::PerfDatabase("malformed performance data".to_string())
+    ));
 }
 
 fn fixture_engine() -> Arc<Engine> {

@@ -168,8 +168,9 @@ This path uses the native AIC estimate when the native estimator can be built,
 learns online correction factors from FPM observations, and falls back to the
 regression associated with `worker_type` for eligible native build or
 data-availability failures. These include unsupported models and missing or
-unreadable model, system, or performance data. A successful native build keeps
-the existing workload-kind inference and correction behavior; `worker_type`
+unreadable model, system, or performance data, plus malformed system YAML. A
+successful native build keeps the existing workload-kind inference and
+correction behavior; `worker_type`
 and regression-only weights do not alter native estimates. Check
 `diagnostics()` to determine whether the active source is `aic`,
 `aic_with_correction`, or `fallback_regression`, and to inspect any fallback
