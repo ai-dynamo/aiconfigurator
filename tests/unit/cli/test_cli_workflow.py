@@ -724,6 +724,38 @@ class TestBuildDefaultTaskConfigs:
             assert backend == "vllm"
             assert call.kwargs["moe_backend"] == "megamoe"
 
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_auto_megamoe_resolves_next_alias_before_row_probe(self, mock_supported_databases, mock_task_config):
+        """A query-slot alias must resolve to its literal before the exact-row
+        probe and before the resulting task is constructed."""
+        mock_supported_databases.return_value = {
+            "gb300": {
+                "sglang": ["0.5.16"],
+                "vllm": ["0.27.0"],
+            }
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_tasks(
+            model_path="moonshotai/Kimi-K3",
+            total_gpus=2,
+            system="gb300",
+            backend="auto",
+            backend_version="next",
+            moe_backend="megamoe",
+        )
+
+        assert set(result) == {"agg_vllm", "disagg_vllm"}
+        assert mock_task_config.call_count == 2
+        for call in mock_task_config.call_args_list:
+            backend = call.kwargs.get("backend_name") or call.kwargs.get("prefill_backend_name")
+            prefill_version = call.kwargs.get("backend_version") or call.kwargs.get("prefill_backend_version")
+            decode_version = call.kwargs.get("backend_version") or call.kwargs.get("decode_backend_version")
+            assert backend == "vllm"
+            assert prefill_version == "0.27.0"
+            assert decode_version == "0.27.0"
+
     def test_megamoe_probe_rejects_a_table_with_only_another_models_rows(self):
         """A family/version directory is not itself model-level support."""
         from aiconfigurator.cli.main import _megamoe_perf_data_available

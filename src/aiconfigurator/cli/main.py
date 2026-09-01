@@ -1539,7 +1539,9 @@ def _megamoe_lane_version(
     """
     candidates: list[str] = []
     if backend_version is not None:
-        candidates.append(backend_version)
+        resolved_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
+        if resolved_version is not None:
+            candidates.append(resolved_version)
     else:
         latest = perf_database.get_latest_database_version(system=system_name, backend=backend_name)
         if latest is not None:
