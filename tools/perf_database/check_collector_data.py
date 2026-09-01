@@ -26,8 +26,9 @@ Six rules, each named after the design section it enforces:
   `<family>/<backend>/` subtree it lives in. `from_version` may be newer or
   older than the declaring dir's own version — that asymmetry is exactly what
   a declaration is for (§6.3); this check does not re-derive direction.
-- **R3 comm exclusion** (design §6.5 rule 5): no `reuse.yaml` may exist
-  anywhere under a `comm` family dir (NCCL/oneCCL curves are topology-bound).
+- **R3 comm declared-reuse exclusion** (design §6.5 rule 5): no `reuse.yaml`
+  may exist under `comm`; validated framework namespaces reuse earlier
+  versions implicitly, while NCCL/oneCCL and unknown backends are primary-only.
 - **R4 family placement** (design §2, catalog-driven): every parquet table's
   stem must map, via the op catalog (`collector/op_backend_catalog.yaml`), to
   the family directory it is actually filed under.
@@ -222,7 +223,7 @@ def check_r2_reuse_validity(data_root: Path, version_dirs: list[tuple[str, str, 
 
 
 # --------------------------------------------------------------------------
-# R3: comm exclusion (design §6.5 rule 5)
+# R3: comm declared-reuse exclusion (design §6.5 rule 5)
 # --------------------------------------------------------------------------
 
 
@@ -235,7 +236,8 @@ def check_r3_comm_exclusion(data_root: Path) -> list[str]:
         for reuse_path in sorted(comm_dir.rglob(REUSE_YAML)):
             failures.append(
                 f"{reuse_path.relative_to(data_root)}: reuse.yaml is not allowed under the comm family "
-                "(design §6.5 rule 5 -- NCCL/oneCCL curves are topology-bound)"
+                "(design §6.5 rule 5 -- framework backends reuse earlier versions implicitly; "
+                "NCCL/oneCCL and unknown backends are primary-only)"
             )
     return failures
 

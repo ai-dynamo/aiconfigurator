@@ -1042,7 +1042,7 @@ def _is_family_layout_version_dir(version_path: str, data_dir: str) -> bool:
     legacy layout as deprecated fallback for one transition window") -- a
     legacy-shaped dir predates the V3 metadata regime entirely, so strict
     provenance does not apply to it, mirroring how the engine resolver's
-    ``op_file_family_from_path`` (``perf_database/source_resolution.rs``)
+    ``op_file_namespace_from_path`` (``perf_database/source_resolution.rs``)
     treats legacy-shaped paths as structurally outside the comm-family
     exclusion (Task 1's FIX-2).
     """
