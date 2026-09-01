@@ -51,6 +51,7 @@ from aiconfigurator.sdk.models import (
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
 from aiconfigurator.sdk.moe_comm_resolver import (
     a2a_covers_parallel,
+    moe_compute_coverage,
     resolve_model_config_moe_comm,
     select_moe_comm_backend,
 )
@@ -1327,9 +1328,8 @@ class Task:
         # (a lightweight double injected by a caller) carries no coverage
         # information, which is the same answer as an absent table.
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
-        if gpus_per_node and a2a_probe is not None and compute_probe is not None:
+        if gpus_per_node and a2a_probe is not None:
             quant_mode = self._role_attr(role, "moe_quant_mode")
             if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
                 # The compute table is keyed by MoEQuantMode members; any
@@ -1342,8 +1342,15 @@ class Task:
                 )
             for phase in ("context", "generation"):
                 a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts, quant_mode, phase)
-                compute = compute_probe(
-                    shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
+                compute = moe_compute_coverage(
+                    database,
+                    backend_name=backend_name,
+                    hidden_size=shape.hidden_size,
+                    inter_size=shape.moe_inter_size,
+                    topk=shape.topk,
+                    num_experts=shape.num_experts,
+                    quant_mode=quant_mode,
+                    phase=phase,
                 )
                 per_backend: dict[str, set[int]] = {}
                 for name, backend_spec in MOE_A2A_BACKENDS.items():

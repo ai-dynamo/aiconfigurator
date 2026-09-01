@@ -342,6 +342,25 @@ def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
 
 
 # ---------------------------------------------------------------------------
+# legacy_moe_compute_coverage on a synthetic store
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_moe_compute_coverage_uses_regular_expert_kernel_table(stub_perf_db):
+    fp8_block = common.MoEQuantMode.fp8_block
+    stub_perf_db._moe_data = _store(
+        [
+            ((fp8_block, "balanced", 8, 256, 7168, 2048, 1, 64), {32: _leaf(0.1)}),
+            ((fp8_block, "power_law_1.2", 8, 256, 7168, 2048, 1, 128), {32: _leaf(0.2)}),
+            ((fp8_block, "balanced", 8, 256, 7168, 2048, 2, 256), {32: _leaf(0.3)}),
+        ]
+    )
+
+    assert stub_perf_db.legacy_moe_compute_coverage(7168, 2048, 8, 256, fp8_block) == {64, 128}
+    assert stub_perf_db.legacy_moe_compute_coverage(4096, 2048, 8, 256, fp8_block) == set()
+
+
+# ---------------------------------------------------------------------------
 # Shipped-data smoke: real databases, legacy-adapted tables
 # ---------------------------------------------------------------------------
 

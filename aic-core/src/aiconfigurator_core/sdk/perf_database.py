@@ -2434,6 +2434,36 @@ class PerfDatabase:
                     covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
         return covered
 
+    def legacy_moe_compute_coverage(
+        self,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        quant_mode: common.MoEQuantMode,
+    ) -> set[int]:
+        """Return EP sizes covered by the regular expert-kernel MoE table.
+
+        vLLM and TensorRT-LLM publish expert compute in ``moe_perf.parquet``
+        rather than the WideEP-specific compute tables.  This probe is used
+        only to gate the compute leg of a graph whose communication is already
+        owned by :class:`MoEAllToAll`; it does not enable the legacy
+        ``MoEDispatch``/NCCL graph.
+        """
+        from aiconfigurator_core.sdk.operations.moe import MoE
+
+        MoE.load_data(self)
+        table = self._moe_data
+        if not table:
+            return set()
+
+        covered: set[int] = set()
+        for by_topk in (table.get(quant_mode) or {}).values():  # ANY distribution
+            by_hidden = ((by_topk.get(topk) or {}).get(num_experts) or {}).get(hidden_size) or {}
+            by_ep = (by_hidden.get(inter_size) or {}).get(1) or {}  # moe_tp == 1
+            covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
+        return covered
+
     # ═══════════════════════════════════════════════════════════════════
     # DSA (DeepSeek Sparse Attention) Queries
     # ═══════════════════════════════════════════════════════════════════

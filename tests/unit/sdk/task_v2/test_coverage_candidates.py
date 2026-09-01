@@ -344,7 +344,8 @@ def test_exact_resolver_accepts_node1_deepep_substitution_for_other_frameworks(f
             "trtllm_deepep_ht": {(4, 1)},
             "trtllm_deepep_ll": {(4, 1)},
         },
-        moe_expert_compute_coverage=lambda *_args: {64},
+        moe_expert_compute_coverage=lambda *_args: set(),
+        legacy_moe_compute_coverage=lambda *_args: {64},
     )
     model_config = ModelConfig(attention_dp_size=64, moe_tp_size=1, moe_ep_size=64)
 

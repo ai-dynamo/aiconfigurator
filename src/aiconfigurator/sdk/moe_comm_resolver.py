@@ -51,6 +51,36 @@ def a2a_covers_parallel(
     )
 
 
+def moe_compute_coverage(
+    database: Any,
+    *,
+    backend_name: str,
+    hidden_size: int,
+    inter_size: int,
+    topk: int,
+    num_experts: int,
+    quant_mode: common.MoEQuantMode,
+    phase: str,
+) -> set[int]:
+    """Return compute coverage for the large-EP graph without comm fallback.
+
+    Prefer the unified WideEP compute table. vLLM/TRT-LLM may additionally
+    use their regular expert-kernel table; communication remains exclusively
+    modeled by ``MoEAllToAll``.
+    """
+    compute_probe = getattr(database, "moe_expert_compute_coverage", None)
+    covered = (
+        set(compute_probe(hidden_size, inter_size, topk, num_experts, quant_mode, phase))
+        if compute_probe is not None
+        else set()
+    )
+    if backend_name in {"vllm", "trtllm"}:
+        legacy_probe = getattr(database, "legacy_moe_compute_coverage", None)
+        if legacy_probe is not None:
+            covered.update(legacy_probe(hidden_size, inter_size, topk, num_experts, quant_mode))
+    return covered
+
+
 def select_moe_comm_backend(
     coverage: LargeEpCoverage,
     *,
@@ -145,7 +175,6 @@ def resolve_model_config_moe_comm(
         resolved = {}
     if coverage_snapshot is None and family in LARGE_EP_READY_FAMILIES and database is not None:
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         for phase in dict.fromkeys(required_phases):
             a2a = (
                 a2a_probe(
@@ -158,17 +187,15 @@ def resolve_model_config_moe_comm(
                 if a2a_probe is not None
                 else {}
             )
-            compute_eps = (
-                compute_probe(
-                    shape.hidden_size,
-                    shape.moe_inter_size,
-                    shape.topk,
-                    shape.num_experts,
-                    model_config.moe_quant_mode,
-                    phase,
-                )
-                if compute_probe is not None
-                else {moe_ep_size}
+            compute_eps = moe_compute_coverage(
+                database,
+                backend_name=backend_name,
+                hidden_size=shape.hidden_size,
+                inter_size=shape.moe_inter_size,
+                topk=shape.topk,
+                num_experts=shape.num_experts,
+                quant_mode=model_config.moe_quant_mode,
+                phase=phase,
             )
             for comm_backend, backend_spec in MOE_A2A_BACKENDS.items():
                 if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
