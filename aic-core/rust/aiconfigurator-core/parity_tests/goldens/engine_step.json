@@ -475,9 +475,9 @@
       },
       "static": {
         "values": {
-          "static_ctx": 227.835,
-          "static_gen": 18.995,
-          "static_total": 246.83
+          "static_ctx": 228.353,
+          "static_gen": 19.439,
+          "static_total": 247.792
         }
       }
     },
@@ -1991,7 +1991,7 @@
     },
     "kimi-k3-b200-vllm-nospec::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "5f678722434314c2af45f8dc0c3b5f552ff792d4"
     },
     "kimi-k3-b300-sglang-next-dspark-nextn7::agg": {
       "engine": "rust",

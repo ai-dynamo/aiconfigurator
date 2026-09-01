@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.27.0
+  image: vllm/vllm-openai:v0.27.0
+  image_digest: sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7
+tables:
+  # SM103 (GB300) MLA decode pre/post BMM at vllm 0.27.0 (bf16-only lane —
+  # fp8 BMM is ROCm/AITER-gated, see kernel_source_backends vllm_torch_bmm).
+  # Collected 2026-08-17 on the same pod/run as the mla family tables
+  # alongside; kernel ground truth = vllm_torch_bmm (torch.bmm), matching the
+  # 0.24.0 fact entries.
+  mla_bmm_perf:
+    collector_ref: 9dc4e14
+    collector_hash: sha256:f90f21fe587e0786473fba0e75b529e1c8734cc7d43de069d1faf1fb40e25db4
+    case_plan_hash: sha256:823b83cdf5bd810e7e8efe207cefbfa26c3a1daeb80864dabae26d6f6b1869b1
+    collected_at: '2026-08-17'
+    rows: 436
+    status: complete
