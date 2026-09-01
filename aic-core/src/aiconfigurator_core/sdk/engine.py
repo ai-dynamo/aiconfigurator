@@ -107,6 +107,8 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `strict_provenance` policy flags; the engine re-derives every table's
 #   source list from the perf-data tree
 #   (`perf_database/source_resolution.rs`).
+# - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
+#   op-layout change (the serde default covers JSON only).
 # Single owner: the Rust crate constant. Python re-exports it for
 # diagnostics/tests instead of declaring a twin to keep in sync.
 ENGINE_SPEC_SCHEMA_VERSION = aiconfigurator_core.engine_spec_schema_version()

@@ -698,11 +698,11 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument(
         "--nextn",
         type=_parse_nextn,
-        default=0,
+        default=None,
         help="MTP (Multi-Token Prediction) draft length, or 'auto' to use the checkpoint's "
-        "num_nextn_predict_layers (absent/0 keeps MTP disabled). When the depth is > 0, enables "
-        "speculative decoding in the configuration search and requires --nextn-accepted. "
-        "Default: 0 (disabled); MTP is never enabled implicitly when the flag is omitted.",
+        "num_nextn_predict_layers and then DSPARK architecture metadata. When the depth is > 0, "
+        "enables speculative decoding and requires a measured --nextn-accepted value. Omitted or "
+        "0 keeps speculation disabled unless a DSPARK model is paired with --nextn-accepted.",
     )
     parser.add_argument(
         "--nextn-accepted",
@@ -3359,8 +3359,15 @@ def main(args):
             raise SystemExit("recommend mode requires --model-path")
         if not getattr(args, "system", None):
             raise SystemExit("recommend mode requires --system")
-        _resolve_and_validate_nextn(args)
-        _run_recommend(args)
+        # Preserve omitted, explicit zero, and "auto" as distinct recommend API
+        # inputs. cli_recommend owns DSPARK fallback and acceptance validation.
+        try:
+            _run_recommend(args)
+        except Exception as exc:
+            if is_expected_cli_error(exc):
+                logger.debug("Traceback for recommend mode", exc_info=True)
+                raise SystemExit("Error: " + str(exc)) from exc
+            raise
         return
 
     if args.mode == "default":

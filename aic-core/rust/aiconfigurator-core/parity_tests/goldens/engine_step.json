@@ -3,9 +3,9 @@
     "deepseek-r1-b200-vllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 226.97449032341166,
-          "agg_tpot": 80.97623074042902,
-          "agg_ttft": 145.99825958298266
+          "agg_request": 226.97449032341171,
+          "agg_tpot": 80.97623074042903,
+          "agg_ttft": 145.99825958298268
         }
       },
       "disagg": {
@@ -32,7 +32,7 @@
       "agg": {
         "values": {
           "agg_request": 295.22849734948784,
-          "agg_tpot": 113.0957634585825,
+          "agg_tpot": 113.09576345858251,
           "agg_ttft": 182.1327338909053
         }
       },
@@ -59,8 +59,8 @@
     "deepseek-v3-b200-vllm-shape-prefix-heavy": {
       "agg": {
         "values": {
-          "agg_request": 751.4422001436217,
-          "agg_tpot": 40.285403459525305,
+          "agg_request": 751.4422001436218,
+          "agg_tpot": 40.28540345952531,
           "agg_ttft": 147.16114825074214
         }
       },
@@ -101,37 +101,37 @@
     "deepseek-v32-b200-sglang-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 272.8550813797047,
-          "agg_tpot": 92.49324792532363,
-          "agg_ttft": 180.36183345438107
+          "agg_request": 269.14517465478315,
+          "agg_tpot": 91.23565242535022,
+          "agg_ttft": 177.90952222943292
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 188.906,
+          "disagg_request": 183.587,
           "disagg_tpot": 11.52,
-          "disagg_ttft": 177.386
+          "disagg_ttft": 172.067
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 92.21228282551203
+          "mixed_step": 90.96040022108522
         }
       },
       "static": {
         "values": {
-          "static_ctx": 89.589,
+          "static_ctx": 86.903,
           "static_gen": 9.561,
-          "static_total": 99.15
+          "static_total": 96.464
         }
       }
     },
     "deepseek-v32-b200-vllm-empirical": {
       "agg": {
         "values": {
-          "agg_request": 437.9756148647987,
-          "agg_tpot": 180.27087758343467,
-          "agg_ttft": 257.70473728136403
+          "agg_request": 437.9756148647986,
+          "agg_tpot": 180.27087758343464,
+          "agg_ttft": 257.704737281364
         }
       },
       "disagg": {
@@ -157,9 +157,9 @@
     "deepseek-v32-b200-vllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 437.9791869645789,
-          "agg_tpot": 180.27255857156655,
-          "agg_ttft": 257.70662839301235
+          "agg_request": 437.97918696457896,
+          "agg_tpot": 180.27255857156658,
+          "agg_ttft": 257.7066283930124
         }
       },
       "disagg": {
@@ -185,9 +185,9 @@
     "deepseek-v4-flash-b200-vllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 134.62931630314554,
-          "agg_tpot": 45.143207672068485,
-          "agg_ttft": 89.48610863107706
+          "agg_request": 134.62931630314552,
+          "agg_tpot": 45.14320767206848,
+          "agg_ttft": 89.48610863107703
         }
       },
       "disagg": {
@@ -289,9 +289,9 @@
     "gpt-oss-20b-b200-trtllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 34.073448440872035,
-          "agg_tpot": 11.550321505380351,
-          "agg_ttft": 22.523126935491685
+          "agg_request": 34.07344844087204,
+          "agg_tpot": 11.550321505380353,
+          "agg_ttft": 22.52312693549169
         }
       },
       "disagg": {
@@ -352,9 +352,9 @@
     "kimi-k25-b200-sglang-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 118.78331385397647,
-          "agg_tpot": 40.26553011999202,
-          "agg_ttft": 78.51778373398444
+          "agg_request": 118.78331385397644,
+          "agg_tpot": 40.265530119992015,
+          "agg_ttft": 78.51778373398443
         }
       },
       "disagg": {
@@ -484,16 +484,16 @@
     "kimi-k3-b300-sglang-next-dspark-nextn7": {
       "agg": {
         "values": {
-          "agg_request": 255.6330384511804,
-          "agg_tpot": 86.65526727158658,
-          "agg_ttft": 168.97777117959382
+          "agg_request": 260.0170466224618,
+          "agg_tpot": 88.14137173642773,
+          "agg_ttft": 171.87567488603406
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 188.552,
-          "disagg_tpot": 17.203,
-          "disagg_ttft": 171.349
+          "disagg_request": 195.075,
+          "disagg_tpot": 17.185,
+          "disagg_ttft": 177.89
         }
       },
       "mixed": {
@@ -501,25 +501,25 @@
       },
       "static": {
         "values": {
-          "static_ctx": 86.54,
-          "static_gen": 14.077,
-          "static_total": 100.617
+          "static_ctx": 89.844,
+          "static_gen": 13.955,
+          "static_total": 103.79899999999999
         }
       }
     },
     "kimi-k3-b300-sglang-next-nospec": {
       "agg": {
         "values": {
-          "agg_request": 255.6330384511804,
-          "agg_tpot": 86.65526727158658,
-          "agg_ttft": 168.97777117959382
+          "agg_request": 260.0170466224618,
+          "agg_tpot": 88.14137173642773,
+          "agg_ttft": 171.87567488603406
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 188.552,
-          "disagg_tpot": 17.203,
-          "disagg_ttft": 171.349
+          "disagg_request": 195.075,
+          "disagg_tpot": 17.185,
+          "disagg_ttft": 177.89
         }
       },
       "mixed": {
@@ -527,9 +527,9 @@
       },
       "static": {
         "values": {
-          "static_ctx": 86.54,
-          "static_gen": 14.077,
-          "static_total": 100.617
+          "static_ctx": 89.844,
+          "static_gen": 13.955,
+          "static_total": 103.79899999999999
         }
       }
     },
@@ -537,7 +537,7 @@
       "agg": {
         "values": {
           "agg_request": 42.38671372945476,
-          "agg_tpot": 6.393747637390477,
+          "agg_tpot": 6.393747637390478,
           "agg_ttft": 35.992966092064286
         }
       },
@@ -565,7 +565,7 @@
       "agg": {
         "values": {
           "agg_request": 89.99355929832745,
-          "agg_tpot": 22.020498493330564,
+          "agg_tpot": 22.02049849333056,
           "agg_ttft": 67.97306080499689
         }
       },
@@ -592,9 +592,9 @@
     "mimo-v2-flash-b200-vllm-hybrid-attn-xshape": {
       "agg": {
         "values": {
-          "agg_request": 139.04908593658308,
-          "agg_tpot": 45.10545220545086,
-          "agg_ttft": 93.94363373113222
+          "agg_request": 139.04908593658314,
+          "agg_tpot": 45.10545220545088,
+          "agg_ttft": 93.94363373113225
         }
       },
       "disagg": {
@@ -620,37 +620,37 @@
     "minimax-m25-b200-sglang-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 81.42214511050099,
-          "agg_tpot": 27.60072715610203,
-          "agg_ttft": 53.82141795439896
+          "agg_request": 78.42468637877572,
+          "agg_tpot": 26.584639450432448,
+          "agg_ttft": 51.84004692834327
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 61.056,
-          "disagg_tpot": 8.896,
-          "disagg_ttft": 52.16
+          "disagg_request": 57.886,
+          "disagg_tpot": 7.733,
+          "disagg_ttft": 50.153
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 27.47489463093701
+          "mixed_step": 26.46140125363558
         }
       },
       "static": {
         "values": {
-          "static_ctx": 26.344,
-          "static_gen": 6.853,
-          "static_total": 33.197
+          "static_ctx": 25.33,
+          "static_gen": 5.776,
+          "static_total": 31.105999999999998
         }
       }
     },
     "minimax-m25-b200-vllm-empirical": {
       "agg": {
         "values": {
-          "agg_request": 164.65910724619985,
-          "agg_tpot": 51.22781517468228,
-          "agg_ttft": 113.43129207151757
+          "agg_request": 164.6591072461998,
+          "agg_tpot": 51.22781517468226,
+          "agg_ttft": 113.43129207151753
         }
       },
       "disagg": {
@@ -704,8 +704,8 @@
     "minimax-m25-b200-vllm-sampled-prefix": {
       "agg": {
         "values": {
-          "agg_request": 297.37004004176816,
-          "agg_tpot": 43.77214452505532,
+          "agg_request": 297.3700400417681,
+          "agg_tpot": 43.77214452505531,
           "agg_ttft": 122.2814619415469
         }
       },
@@ -732,8 +732,8 @@
     "minimax-m25-b200-vllm-shape-decode-heavy": {
       "agg": {
         "values": {
-          "agg_request": 2230.0780466370575,
-          "agg_tpot": 33.76173532775233,
+          "agg_request": 2230.078046637057,
+          "agg_tpot": 33.761735327752326,
           "agg_ttft": 103.08872098866047
         }
       },
@@ -828,9 +828,9 @@
     "minimax-m3-b200-sglang-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 166.5146849856586,
-          "agg_tpot": 56.445655927341896,
-          "agg_ttft": 110.0690290583167
+          "agg_request": 166.51468498565862,
+          "agg_tpot": 56.4456559273419,
+          "agg_ttft": 110.06902905831672
         }
       },
       "disagg": {
@@ -996,9 +996,9 @@
     "nemotron-h-56b-b200-trtllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 75.04821707936978,
-          "agg_tpot": 25.440073586227044,
-          "agg_ttft": 49.608143493142734
+          "agg_request": 75.04821707936976,
+          "agg_tpot": 25.44007358622704,
+          "agg_ttft": 49.60814349314273
         }
       },
       "disagg": {
@@ -1025,7 +1025,7 @@
       "agg": {
         "values": {
           "agg_request": 153.1150292932594,
-          "agg_tpot": 22.077660843886765,
+          "agg_tpot": 22.07766084388677,
           "agg_ttft": 131.03736844937262
         }
       },
@@ -1053,7 +1053,7 @@
       "agg": {
         "values": {
           "agg_request": 153.74341539641367,
-          "agg_tpot": 22.373371951253485,
+          "agg_tpot": 22.373371951253482,
           "agg_ttft": 131.37004344516018
         }
       },
@@ -1108,9 +1108,9 @@
     "nemotron-nas-b200-trtllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 73.76926809398927,
-          "agg_tpot": 25.006531557284497,
-          "agg_ttft": 48.762736536704764
+          "agg_request": 73.76926809398924,
+          "agg_tpot": 25.00653155728449,
+          "agg_ttft": 48.76273653670475
         }
       },
       "disagg": {
@@ -1136,9 +1136,9 @@
     "nemotron-nas-b200-vllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 118.70559206745708,
-          "agg_tpot": 21.97910214939157,
-          "agg_ttft": 96.72648991806551
+          "agg_request": 118.7055920674571,
+          "agg_tpot": 21.979102149391576,
+          "agg_ttft": 96.72648991806552
         }
       },
       "disagg": {
@@ -1325,9 +1325,9 @@
     "qwen3-30b-a3b-b60-vllm-scan-coverage": {
       "agg": {
         "values": {
-          "agg_request": 401.8487033345324,
-          "agg_tpot": 168.7758603927211,
-          "agg_ttft": 233.07284294181125
+          "agg_request": 401.84870333453244,
+          "agg_tpot": 168.77586039272114,
+          "agg_ttft": 233.0728429418113
         }
       },
       "disagg": {
@@ -1361,9 +1361,9 @@
     "qwen3-32b-b200-trtllm-shape-prefill-heavy": {
       "agg": {
         "values": {
-          "agg_request": 327.6502652307287,
-          "agg_tpot": 111.06788651889107,
-          "agg_ttft": 216.58237871183758
+          "agg_request": 327.6502652307286,
+          "agg_tpot": 111.06788651889106,
+          "agg_ttft": 216.58237871183755
         }
       },
       "disagg": {
@@ -1418,7 +1418,7 @@
       "agg": {
         "values": {
           "agg_request": 96.57007577630782,
-          "agg_tpot": 18.338859188850734,
+          "agg_tpot": 18.338859188850737,
           "agg_ttft": 78.23121658745708
         }
       },
@@ -1491,9 +1491,9 @@
     "qwen35-27b-b200-sglang-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 52.61553493119773,
-          "agg_tpot": 17.835774552948383,
-          "agg_ttft": 34.77976037824934
+          "agg_request": 52.615534931197715,
+          "agg_tpot": 17.835774552948376,
+          "agg_ttft": 34.779760378249335
         }
       },
       "disagg": {
@@ -1519,9 +1519,9 @@
     "qwen35-27b-b200-trtllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 59.10981521318461,
-          "agg_tpot": 20.037225495994782,
-          "agg_ttft": 39.07258971718983
+          "agg_request": 59.10981521318459,
+          "agg_tpot": 20.037225495994775,
+          "agg_ttft": 39.072589717189814
         }
       },
       "disagg": {
@@ -1576,8 +1576,8 @@
       "agg": {
         "values": {
           "agg_request": 85.19613531275206,
-          "agg_tpot": 28.88004586872951,
-          "agg_ttft": 56.316089444022545
+          "agg_tpot": 28.880045868729514,
+          "agg_ttft": 56.31608944402255
         }
       },
       "disagg": {
@@ -1603,9 +1603,9 @@
     "qwen35-397b-a17b-b200-trtllm-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 107.182245070102,
-          "agg_tpot": 36.33296443054305,
-          "agg_ttft": 70.84928063955894
+          "agg_request": 107.18224507010194,
+          "agg_tpot": 36.332964430543036,
+          "agg_ttft": 70.84928063955891
         }
       },
       "disagg": {
@@ -1632,7 +1632,7 @@
       "agg": {
         "values": {
           "agg_request": 114.32060081999131,
-          "agg_tpot": 28.386165091760617,
+          "agg_tpot": 28.38616509176062,
           "agg_ttft": 85.9344357282307
         }
       },
@@ -1675,291 +1675,291 @@
   "post_freeze_pins": {
     "deepseek-r1-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-gb200-vllm-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "2c7fe4bf5fe014c10db04b686046a73abb5ee86a"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-gb200-vllm-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "2c7fe4bf5fe014c10db04b686046a73abb5ee86a"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-gb200-vllm-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "2c7fe4bf5fe014c10db04b686046a73abb5ee86a"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-r1-gb200-vllm-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "2c7fe4bf5fe014c10db04b686046a73abb5ee86a"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v3-b200-vllm-shape-prefix-heavy::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v3-b200-vllm-shape-prefix-heavy::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v3-b200-vllm-shape-prefix-heavy::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v3-b200-vllm-shape-prefix-heavy::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v3-b200-vllm-sol::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v3-b200-vllm-sol::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v32-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v4-flash-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v4-flash-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v4-flash-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "deepseek-v4-flash-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "dsv4-flash-b200-sglang-cp8-reuse::cp_static_ctx": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "dsv4-flash-b200-sglang-cp8-reuse::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-isl16384-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-isl16384-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-isl16384-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm5-b200-sglang-isl16384-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm52-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm52-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm52-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "glm52-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-trtllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-trtllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-trtllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-trtllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "gpt-oss-20b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-sglang-cp8::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-hybrid-invariant::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-hybrid-invariant::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-hybrid-invariant::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-hybrid-invariant::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k25-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b200-vllm-nospec::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b200-vllm-nospec::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b200-vllm-nospec::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b200-vllm-nospec::static": {
       "engine": "rust",
@@ -1967,683 +1967,683 @@
     },
     "kimi-k3-b300-sglang-next-dspark-nextn7::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-dspark-nextn7::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-dspark-nextn7::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-dspark-nextn7::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-nospec::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-nospec::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-nospec::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "kimi-k3-b300-sglang-next-nospec::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama31-8b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama31-8b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama31-8b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama31-8b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama4-scout-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama4-scout-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama4-scout-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "llama4-scout-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "mimo-v2-flash-b200-vllm-hybrid-attn-xshape::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "mimo-v2-flash-b200-vllm-hybrid-attn-xshape::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "mimo-v2-flash-b200-vllm-hybrid-attn-xshape::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "mimo-v2-flash-b200-vllm-hybrid-attn-xshape::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-sampled-prefix::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-sampled-prefix::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-sampled-prefix::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-sampled-prefix::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-shape-decode-heavy::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-shape-decode-heavy::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-shape-decode-heavy::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-b200-vllm-shape-decode-heavy::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-balanced-miss::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-balanced-miss::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-balanced-miss::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-balanced-miss::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-xprofile::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-xprofile::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-xprofile::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m25-nvfp4-h200-vllm-hybrid-xprofile::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m27-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m27-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m27-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m27-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-sglang-hybrid-xop::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-sglang-hybrid-xop::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-sglang-hybrid-xop::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-sglang-hybrid-xop::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-balanced::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-balanced::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-balanced::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-balanced::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-off::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-off::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-off::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-policy-off::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-xop::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-xop::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-xop::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "minimax-m3-b200-vllm-hybrid-xop::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-shape-batch8::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-shape-batch8::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-shape-batch8::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-sglang-shape-batch8::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-trtllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-trtllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-trtllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-trtllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-h-56b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-trtllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-trtllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-trtllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-trtllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "nemotron-nas-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-sglang-cp8::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xprofile::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xprofile::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xprofile::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xprofile::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xquant::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xquant::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xquant::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-hybrid-xquant::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-sol::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-a22b-b200-vllm-sol::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-b200-sglang-adp8-etp4ep2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-b200-sglang-adp8-etp4ep2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-b200-sglang-adp8-etp4ep2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-235b-b200-sglang-adp8-etp4ep2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b60-vllm-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "9934fc5df063c8326350cdcd2da03f2074eee308"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b60-vllm-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "9934fc5df063c8326350cdcd2da03f2074eee308"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b60-vllm-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "9934fc5df063c8326350cdcd2da03f2074eee308"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-b60-vllm-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "9934fc5df063c8326350cdcd2da03f2074eee308"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-30b-a3b-h200-vllm-afd::afd": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-trtllm-shape-prefill-heavy::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-trtllm-shape-prefill-heavy::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-trtllm-shape-prefill-heavy::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-trtllm-shape-prefill-heavy::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-empirical::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-empirical::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-empirical::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-empirical::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-sol::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-b200-vllm-sol::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-gb200-vllm-power::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-gb200-vllm-power::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-gb200-vllm-power::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen3-32b-gb200-vllm-power::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-trtllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-trtllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-trtllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-trtllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-27b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-sglang-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-sglang-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-sglang-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-trtllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-trtllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-trtllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-trtllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-vllm-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-vllm-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-vllm-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     },
     "qwen35-397b-a17b-b200-vllm-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "83683224004a6270259c7cb92505755138e9b189"
+      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
     }
   }
 }

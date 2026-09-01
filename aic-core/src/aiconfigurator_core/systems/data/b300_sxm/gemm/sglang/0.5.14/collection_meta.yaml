@@ -1,11 +1,69 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: 1
-provenance: legacy
+schema_version: 2
+# `local`: the original manual campaign has its emitted attestation below; the
+# 2026-08-26 review-healing case-plan hashes were reconstructed from the exact
+# logged filters because those scoped runs did not export sidecars.
+provenance: local
 runtime:
   framework: sglang
   version: 0.5.14
+  # Private runtime image recorded by the JET campaign and healing jobs.
+  image: gitlab-master.nvidia.com/yimingl/aic-eval-tools/sglang:v0.5.14-cu130-amd64
+  image_digest: sha256:9611bd4c5624b0e9e17829506188a12f17205f2083de0dd44d6c521733553a50
 tables:
   gemm_perf:
+    # 2026-08-14 (AIC-1759): FULL-TABLE replacement with the first true
+    # B300 measurement (aws-pdx, device 'NVIDIA B300 SXM6 AC'): the prior
+    # rows carried device 'NVIDIA GB300' — borrowed hardware data — and
+    # fp8_block additionally had the AIC-1744 per-call packing bias
+    # (m32 @ n5120xk4096: 20.3 -> 11.0 us). New grid strictly supersets
+    # the old for every dtype (+222 bfloat16, +148 fp8 shapes from
+    # Step-3.7 cases). Collected via manual JET job on aws-pdx-slurm-1
+    # from the AIC-1744/1745 PR branch (#1533, pipeline 62709074).
+    # 2026-08-26 (PR #1533 review healing): values-only replacement of six
+    # isolated >3x m-neighbor spikes: bfloat16 (96,3584,256),
+    # (4353,32,2048), (14,32,10240), (96,768,32), (193,12288,1024), and
+    # nvfp4 (128,2048,6144). Each spike plus both m-neighbors was re-collected
+    # on an 8-GPU B300 SXM6 AC allocation at aws-pdx in the mirrored v0.5.14
+    # amd64 image, in two independent runs; the per-key MIN was landed. Row
+    # count, keys, and schema stayed unchanged; the full-table scan then found
+    # 0 isolated >3x m-neighbor spikes.
+    rows: 130906
     status: complete
+    collections:
+      # Exact sidecar emitted by the original 2026-08-14 campaign. Its
+      # `status: partial` is the campaign status; the shipped table above is
+      # complete after selecting its full GEMM table and applying the scoped
+      # review-healing pass.
+      - collector_ref: a08781aa7685516b1bb91703060e89cc1582a289
+        collector_hash: sha256:f7221785c44f83fde369369f1240f74f66a626851c8f92ab19e08ff6557bfdca
+        case_plan_hash: sha256:5e12321dc5ba7b83638bcb17922ec0d3f6739a75b44f5a063cadbb89807642b2
+        collected_at: '2026-08-14'
+        rows: 130906
+        status: partial
+      # Review-healing pass 1 (JET pipeline 64691774, job 412968266): the
+      # flagged row and its two m-neighbors, two independent runs. The
+      # case-plan hash is reconstructed from the exact logged three-case
+      # filter; only the flagged row's per-key MIN was shipped.
+      - collector_ref: f21fbe5d64b64c3a7c1b9299838799eb4e98d30f
+        collector_hash: sha256:924badc34a076536ee73c3862d06dac5082e132c8300ded57bfc42e35c79dc9e
+        case_plan_hash: sha256:bf337c668c550ee41b42b70518db7552ff41ca733a88a988ea4478db28d99af9
+        collected_at: '2026-08-26'
+        rows: 1
+        status: complete
+        source_campaign_rows: 3
+        source_campaign_status: complete
+      # Review-healing pass 2 (JET pipeline 64694061, job 412989224): five
+      # flagged rows plus both m-neighbors, two independent runs. The
+      # case-plan hash is reconstructed from the exact logged 15-case filter;
+      # only the five flagged rows' per-key MIN values were shipped.
+      - collector_ref: f21fbe5d64b64c3a7c1b9299838799eb4e98d30f
+        collector_hash: sha256:924badc34a076536ee73c3862d06dac5082e132c8300ded57bfc42e35c79dc9e
+        case_plan_hash: sha256:cf9758c99dc63ed7887007b6ba71bd1fe491ca8943c81918212176351c8bd7f4
+        collected_at: '2026-08-26'
+        rows: 5
+        status: complete
+        source_campaign_rows: 15
+        source_campaign_status: complete

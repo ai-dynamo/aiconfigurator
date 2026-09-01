@@ -4,7 +4,7 @@
 """Unit tests for tools/perf_database/check_collector_data.py.
 
 Builds synthetic family-layout trees (`<system>/<family>/<backend>/<version>/`)
-under `tmp_path` and exercises each of the six fail-closed rules (R1-R6,
+under `tmp_path` and exercises each of the seven fail-closed rules (R1-R7,
 design §6/§6.5/§8) both green (a fully compliant tree) and red (one named
 offender per rule). Uses the REAL op catalog (`collector/op_backend_catalog.yaml`)
 for family-placement checks -- same convention as
@@ -429,6 +429,32 @@ def _meta_with_plan_hash(table: str, *, rows: int, plan_hash: str) -> str:
     )
 
 
+def _v2_meta_with_events(table: str, plan_hashes: list[str]) -> str:
+    lines = [
+        "schema_version: 2",
+        "runtime:",
+        "  framework: trtllm",
+        '  version: "1.3.0rc23"',
+        "tables:",
+        f"  {table}:",
+        "    rows: 4212",
+        "    status: complete",
+        "    collections:",
+    ]
+    for index, plan_hash in enumerate(plan_hashes):
+        lines.extend(
+            [
+                f"      - collector_ref: {'a' * 40}",
+                f"        collector_hash: sha256:{'b' * 64}",
+                f"        case_plan_hash: {plan_hash}",
+                "        collected_at: '2026-08-26'",
+                f"        rows: {index + 1}",
+                "        status: complete",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
 class TestR7AttestedCasePlan:
     def test_empty_plan_hash_with_rows_fails(self, mod, tmp_path):
         _touch(tmp_path, "b200_sxm/moe/trtllm/1.3.0rc23/moe_perf.parquet")
@@ -459,3 +485,17 @@ class TestR7AttestedCasePlan:
             _meta_with_plan_hash("moe_perf", rows=0, plan_hash=mod.EMPTY_CASE_PLAN_HASH),
         )
         assert mod.check_r7_attested_case_plan(tmp_path, mod.iter_version_dirs(tmp_path)) == []
+
+    def test_empty_plan_hash_in_any_v2_collection_event_fails(self, mod, tmp_path):
+        _touch(tmp_path, "b200_sxm/moe/trtllm/1.3.0rc23/moe_perf.parquet")
+        _write(
+            tmp_path,
+            "b200_sxm/moe/trtllm/1.3.0rc23/collection_meta.yaml",
+            _v2_meta_with_events("moe_perf", ["sha256:" + "c" * 64, mod.EMPTY_CASE_PLAN_HASH]),
+        )
+
+        failures = mod.check_r7_attested_case_plan(tmp_path, mod.iter_version_dirs(tmp_path))
+
+        assert len(failures) == 1
+        assert "collections[1]" in failures[0]
+        assert "EMPTY attempted-case set" in failures[0]

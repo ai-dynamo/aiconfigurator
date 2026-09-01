@@ -703,7 +703,11 @@ mod tests {
         for (m, n, k, quant) in cases {
             let result = query_gemm_table(&db, quant, m, n, k).expect("empirical query");
             assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
-            assert_eq!(result.source, Source::Empirical, "({m}, {n}, {k}, {quant:?})");
+            assert_eq!(
+                result.source,
+                Source::Empirical,
+                "({m}, {n}, {k}, {quant:?})"
+            );
             assert_eq!(
                 result.energy_wms, 0.0,
                 "empirical fallback carries no energy"
@@ -827,10 +831,26 @@ mod tests {
         // are deliberately not pinned (the one value-discriminating xprofile
         // pin lives in the b200 test above).
         let cases = [
-            (GemmQuantMode::Sq, 512u32, util_empirical::ProvenanceTier::XQuant),
-            (GemmQuantMode::Sq, 8192, util_empirical::ProvenanceTier::XQuant),
-            (GemmQuantMode::Int4Wo, 512, util_empirical::ProvenanceTier::XProfile),
-            (GemmQuantMode::Int4Wo, 8192, util_empirical::ProvenanceTier::XProfile),
+            (
+                GemmQuantMode::Sq,
+                512u32,
+                util_empirical::ProvenanceTier::XQuant,
+            ),
+            (
+                GemmQuantMode::Sq,
+                8192,
+                util_empirical::ProvenanceTier::XQuant,
+            ),
+            (
+                GemmQuantMode::Int4Wo,
+                512,
+                util_empirical::ProvenanceTier::XProfile,
+            ),
+            (
+                GemmQuantMode::Int4Wo,
+                8192,
+                util_empirical::ProvenanceTier::XProfile,
+            ),
         ];
         for (quant, m, tier) in cases {
             db.reset_provenance();

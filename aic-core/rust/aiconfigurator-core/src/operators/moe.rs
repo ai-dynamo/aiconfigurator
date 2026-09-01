@@ -952,9 +952,7 @@ mod tests {
         );
         let op = qwen3_op(MoeQuantMode::Bfloat16);
         let r333 = op.query(&db, 333).expect("own-shape empirical t=333");
-        assert_routing(&r333, Source::Empirical,
-            "own_emp_t333",
-        );
+        assert_routing(&r333, Source::Empirical, "own_emp_t333");
         let r96 = op.query(&db, 96).expect("own-shape empirical t=96");
         assert_routing(&r96, Source::Empirical, "own_emp_t96");
         // Python capture: {"empirical"} (own-shape grid, no borrow).
@@ -1043,9 +1041,7 @@ mod tests {
         let rc = op
             .query(&conservative, 96)
             .expect("xshape under conservative policy");
-        assert_routing(&rc, Source::Empirical,
-            "conservative_xshape_t96",
-        );
+        assert_routing(&rc, Source::Empirical, "conservative_xshape_t96");
     }
 
     /// Policy gating: disabled tiers are SKIPPED, and the terminal
@@ -1137,9 +1133,7 @@ mod tests {
         let r = op
             .query(&db, 96)
             .expect("nvfp4_wo resolves via XPROFILE ladder");
-        assert_routing(&r, Source::Empirical,
-            "nvfp4_wo_ladder_t96",
-        );
+        assert_routing(&r, Source::Empirical, "nvfp4_wo_ladder_t96");
     }
 
     #[test]
@@ -1168,20 +1162,15 @@ mod tests {
         let ll = op.query(&db, 100).expect("ll-table empirical t=100");
         assert_routing(&ll, Source::Empirical, "ll_own_t100");
         let std_table = op.query(&db, 200).expect("std-table empirical t=200");
-        assert_routing(&std_table, Source::Empirical,
-            "std_own_t200",
-        );
+        assert_routing(&std_table, Source::Empirical, "std_own_t200");
 
         let mut off_shape = op.clone();
         off_shape.inter_size = 17000;
         let xshape = off_shape
             .query(&db, 100)
             .expect("failed ll probe -> std xshape");
-        assert_routing(&xshape, Source::Empirical,
-            "nvfp4_xshape_t100",
-        );
+        assert_routing(&xshape, Source::Empirical, "nvfp4_xshape_t100");
     }
-
 
     /// With attention-dp, all dp ranks' tokens funnel into the shared expert
     /// pool: query(dp=4, t) must equal query(dp=1, 4t). Dropping the

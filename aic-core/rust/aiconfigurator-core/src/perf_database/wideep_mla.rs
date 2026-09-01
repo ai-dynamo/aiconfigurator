@@ -898,7 +898,14 @@ mod tests {
     fn wideep_mla_regime_routing() {
         let b200 = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
         let got = b200
-            .query_context(1, 1, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Fp8Block, "trtllm_mla")
+            .query_context(
+                1,
+                1,
+                128,
+                KvCacheQuantMode::Fp8,
+                FmhaQuantMode::Fp8Block,
+                "trtllm_mla",
+            )
             .expect("b200 trtllm_mla context query");
         assert!(got.is_finite() && got > 0.0);
         let got = b200
@@ -909,7 +916,14 @@ mod tests {
         let h200 = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));
         for (b, s) in [(4u32, 4096u32), (4, 6000), (4, 50000)] {
             let got = h200
-                .query_context(b, s, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Fp8Block, "flashinfer")
+                .query_context(
+                    b,
+                    s,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Fp8Block,
+                    "flashinfer",
+                )
                 .expect("h200 flashinfer context query");
             assert!(got.is_finite() && got > 0.0, "(b={b}, s={s})");
         }

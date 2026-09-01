@@ -2023,6 +2023,12 @@ class GdnCommonTestCase:
     batch_size_list: Optional[list[int]]
     seq_len_list: Optional[list[int]]  # For context phase; None for generation
     model_name: str
+    # SSM state dtype from the model config (`mamba_ssm_dtype`; serving
+    # default "float32" — sglang configs/mamba_utils.py @0.5.14). Consumers
+    # use it to model the hypothetical bfloat16 FlashInfer serving lane on
+    # capability major 10. Official repository collection remains FP32-only
+    # until a state-dtype-keyed persisted identity/schema is separately approved.
+    mamba_ssm_dtype: str = "float32"
 
 
 # =============================================================================
@@ -2102,6 +2108,13 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
         num_v_heads = int(model_config["num_v_heads"])
         head_v_dim = int(model_config["head_v_dim"])
         model_name = str(model_config["model_path"])
+        mamba_ssm_dtype = str(model_config.get("mamba_ssm_dtype", "float32"))
+        if mamba_ssm_dtype != "float32":
+            raise ValueError(
+                "model_case_values.gdn.mamba_ssm_dtype must be float32; only float32 collection is supported "
+                "because the persisted GDN identity has no state-dtype dimension, "
+                f"got {mamba_ssm_dtype!r} for {model_name}"
+            )
         tp_sizes = _as_int_list(
             model_config.get("tensor_parallel_sizes"),
             field_name="model_case_values.gdn.tensor_parallel_sizes",
@@ -2146,6 +2159,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                     batch_size_list=context_batch_sizes,
                     seq_len_list=context_seq_lens,
                     model_name=model_name,
+                    mamba_ssm_dtype=mamba_ssm_dtype,
                 )
             )
 
@@ -2162,6 +2176,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                     batch_size_list=generation_batch_sizes,
                     seq_len_list=None,
                     model_name=model_name,
+                    mamba_ssm_dtype=mamba_ssm_dtype,
                 )
             )
 

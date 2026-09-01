@@ -1645,7 +1645,10 @@ mod tests {
         // The second argument is the retired python-era oracle, kept as
         // documentation of which regime each case exercised.
         let approx = |got: f64, _era_oracle: f64| {
-            assert!(got.is_finite() && got > 0.0, "expected positive latency, got {got}");
+            assert!(
+                got.is_finite() && got > 0.0,
+                "expected positive latency, got {got}"
+            );
         };
         // Context CSA: all five shapes sit past the two-leaf frontier
         // (batch and/or isl and/or prefix beyond b=1, s<=129, step=0), so
@@ -1729,7 +1732,10 @@ mod tests {
         // The second argument is the retired python-era oracle, kept as
         // documentation of which regime each case exercised.
         let approx = |got: f64, _era_oracle: f64| {
-            assert!(got.is_finite() && got > 0.0, "expected positive latency, got {got}");
+            assert!(
+                got.is_finite() && got > 0.0,
+                "expected positive latency, got {got}"
+            );
         };
         // (native=128, local=16) resolves to the [128][16] slice; b=16 is
         // past its collected b=2 rows -> tapered util-hold.
@@ -1977,7 +1983,10 @@ mod tests {
         // The second argument is the retired python-era oracle, kept as
         // documentation of which regime each case exercised.
         let approx = |got: f64, _era_oracle: f64| {
-            assert!(got.is_finite() && got > 0.0, "expected positive latency, got {got}");
+            assert!(
+                got.is_finite() && got > 0.0,
+                "expected positive latency, got {got}"
+            );
         };
         // isl=8192 is beyond the frontier -> tapered util-hold on the SOL ratio.
         let flash_hold = q(Some(flash.sol_dims()), 8192);

@@ -874,7 +874,6 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
     }
 
-
     fn gemm_shape_count(grids: &GemmGrids) -> usize {
         grids
             .by_quant
@@ -931,7 +930,11 @@ mod tests {
             PerfSource(sibling_path.clone(), None),
         ])
         .unwrap();
-        assert_eq!(gemm_shape_count(&merged), 3, "sibling must add its new shape");
+        assert_eq!(
+            gemm_shape_count(&merged),
+            3,
+            "sibling must add its new shape"
+        );
         let overlap = merged.by_quant["bfloat16"][&64][&256][&256];
         assert_eq!(
             overlap.latency, 1.0,
@@ -992,9 +995,7 @@ mod tests {
         );
 
         let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
-        assert!(table
-            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
-            .is_ok());
+        assert!(table.query(GemmQuantMode::Int4Wo, 1, 1024, 1024).is_ok());
         assert!(table
             .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
             .is_err());

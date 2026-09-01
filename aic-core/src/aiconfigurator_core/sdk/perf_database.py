@@ -608,7 +608,108 @@ def _load_collection_meta_yaml(path: str) -> dict:
         raise ValueError(f"{path}: failed to parse collection_meta.yaml: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: expected a YAML mapping at the top level, got {type(raw).__name__}")  # noqa: TRY004
+    schema_version = raw.get("schema_version", 1)
+    if schema_version == 2:
+        _validate_collection_meta_v2(raw, path)
+    elif schema_version == 1:
+        tables = raw.get("tables")
+        if isinstance(tables, dict):
+            for table, entry in tables.items():
+                if isinstance(entry, dict) and "collections" in entry:
+                    raise ValueError(f"{path}: tables.{table}.collections requires schema_version 2")
+    else:
+        raise ValueError(f"{path}: unsupported collection_meta.yaml schema_version {schema_version!r}")
     return raw
+
+
+_COLLECTION_EVENT_REQUIRED_KEYS = (
+    "collector_ref",
+    "collector_hash",
+    "case_plan_hash",
+    "collected_at",
+    "rows",
+    "status",
+)
+_COLLECTION_EVENT_OPTIONAL_KEYS = ("source_campaign_rows", "source_campaign_status", "runtime")
+_COLLECTION_STATUSES = frozenset({"complete", "partial"})
+_COLLECTION_RUNTIME_KEYS = ("framework", "version", "image", "image_variant", "image_digest")
+
+
+def _validate_non_negative_row_count(value: object, *, field: str, path: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{path}: {field} must be a non-negative integer")
+
+
+def _validate_collection_runtime(runtime: object, *, field: str, path: str) -> None:
+    if not isinstance(runtime, dict):
+        raise ValueError(f"{path}: {field} must be a mapping")  # noqa: TRY004
+    unknown = sorted(set(runtime) - set(_COLLECTION_RUNTIME_KEYS))
+    if unknown:
+        raise ValueError(f"{path}: {field} has unsupported key(s): {', '.join(unknown)}")
+    for key in ("framework", "version"):
+        if not isinstance(runtime.get(key), str) or not runtime[key].strip():
+            raise ValueError(f"{path}: {field}.{key} must be a non-empty string")
+    for key in _COLLECTION_RUNTIME_KEYS[2:]:
+        if key in runtime and (not isinstance(runtime[key], str) or not runtime[key].strip()):
+            raise ValueError(f"{path}: {field}.{key} must be a non-empty string when provided")
+
+
+def _validate_collection_event(event: object, *, table: str, index: int, path: str) -> None:
+    field_path = f"tables.{table}.collections[{index}]"
+    if not isinstance(event, dict):
+        raise ValueError(f"{path}: {field_path} must be a mapping")  # noqa: TRY004
+
+    missing = [key for key in _COLLECTION_EVENT_REQUIRED_KEYS if key not in event]
+    if missing:
+        raise ValueError(f"{path}: {field_path} missing required key(s): {', '.join(missing)}")
+    allowed = {*_COLLECTION_EVENT_REQUIRED_KEYS, *_COLLECTION_EVENT_OPTIONAL_KEYS}
+    unknown = sorted(set(event) - allowed)
+    if unknown:
+        raise ValueError(f"{path}: {field_path} has unsupported key(s): {', '.join(unknown)}")
+
+    for key in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
+        if not isinstance(event[key], str) or not event[key].strip():
+            raise ValueError(f"{path}: {field_path}.{key} must be a non-empty string")
+    _validate_non_negative_row_count(event["rows"], field=f"{field_path}.rows", path=path)
+    if event["status"] not in _COLLECTION_STATUSES:
+        raise ValueError(f"{path}: {field_path}.status must be 'complete' or 'partial'")
+
+    if "source_campaign_rows" in event:
+        _validate_non_negative_row_count(
+            event["source_campaign_rows"], field=f"{field_path}.source_campaign_rows", path=path
+        )
+        if event["source_campaign_rows"] < event["rows"]:
+            raise ValueError(f"{path}: {field_path}.source_campaign_rows must be at least as large as rows")
+    if "source_campaign_status" in event and event["source_campaign_status"] not in _COLLECTION_STATUSES:
+        raise ValueError(f"{path}: {field_path}.source_campaign_status must be 'complete' or 'partial'")
+    if "runtime" in event:
+        _validate_collection_runtime(event["runtime"], field=f"{field_path}.runtime", path=path)
+
+
+def _validate_collection_meta_v2(raw: dict, path: str) -> None:
+    _validate_collection_runtime(raw.get("runtime"), field="runtime", path=path)
+
+    tables = raw.get("tables")
+    if not isinstance(tables, dict):
+        raise ValueError(f"{path}: schema v2 'tables' must be a mapping")  # noqa: TRY004
+    for table, entry in tables.items():
+        if not isinstance(table, str) or not table:
+            raise ValueError(f"{path}: schema v2 table names must be non-empty strings")
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: tables.{table} must be a mapping")  # noqa: TRY004
+        unknown = sorted(set(entry) - {"rows", "status", "collections"})
+        if unknown:
+            raise ValueError(f"{path}: tables.{table} has unsupported key(s): {', '.join(unknown)}")
+        if "rows" not in entry or "status" not in entry or "collections" not in entry:
+            raise ValueError(f"{path}: tables.{table} requires rows, status, and collections")
+        _validate_non_negative_row_count(entry["rows"], field=f"tables.{table}.rows", path=path)
+        if entry["status"] not in _COLLECTION_STATUSES:
+            raise ValueError(f"{path}: tables.{table}.status must be 'complete' or 'partial'")
+        collections = entry["collections"]
+        if not isinstance(collections, list) or not collections:
+            raise ValueError(f"{path}: tables.{table}.collections must be a non-empty list")
+        for index, event in enumerate(collections):
+            _validate_collection_event(event, table=table, index=index, path=path)
 
 
 def _collection_meta_partial_tables(meta: dict) -> frozenset[str]:

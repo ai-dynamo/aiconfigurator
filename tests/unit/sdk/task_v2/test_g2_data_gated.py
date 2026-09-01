@@ -182,7 +182,7 @@ def _write_version_dir(root: str, family: str, backend: str, filename: str, rows
     pq.write_table(pa.Table.from_pylist(rows), os.path.join(version_dir, filename))
     stem = filename.split(".")[0]
     with open(os.path.join(version_dir, "collection_meta.yaml"), "w", encoding="utf-8") as f:
-        yaml.safe_dump({"status": "complete", "schema_version": 2, "tables": {stem: {"status": "complete"}}}, f)
+        yaml.safe_dump({"schema_version": 1, "tables": {stem: {"status": "complete"}}}, f)
 
 
 @pytest.fixture(scope="module")

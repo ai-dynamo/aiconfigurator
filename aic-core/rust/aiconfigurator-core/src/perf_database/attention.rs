@@ -1080,8 +1080,6 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
     }
 
-
-
     #[test]
     fn context_attention_mha_normalizes_n_kv_to_zero() {
         // Caller passes n_kv=64 (== n, MHA); the loader normalizes the lookup

@@ -59,7 +59,9 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `enable_shared_layer` / `strict_provenance` policy flags; the engine
 //   re-derives every table's source list from the perf-data tree
 //   (`perf_database/source_resolution.rs`).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 13;
+// - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
+//   op-layout change (the serde default covers JSON only).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 14;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

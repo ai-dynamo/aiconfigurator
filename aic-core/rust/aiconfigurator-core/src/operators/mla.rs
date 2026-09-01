@@ -890,7 +890,8 @@ mod tests {
     fn context_mla_empirical_regime_routing() {
         let mut db = gb200_trtllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        let cases: &[(u32, u32, u32, u32)] = &[(4, 5000, 0, 128), (2, 3000, 1024, 16), (4, 4096, 0, 128)];
+        let cases: &[(u32, u32, u32, u32)] =
+            &[(4, 5000, 0, 128), (2, 3000, 1024, 16), (4, 4096, 0, 128)];
         for &(b, s, prefix, n) in cases {
             let __r = query_context_mla_table(
                 &db,
@@ -903,7 +904,11 @@ mod tests {
             )
             .expect("empirical query");
             assert!(__r.latency_ms.is_finite() && __r.latency_ms > 0.0);
-            assert_eq!(__r.source, Source::Empirical, "(b={b}, s={s}, pfx={prefix}, n={n})");
+            assert_eq!(
+                __r.source,
+                Source::Empirical,
+                "(b={b}, s={s}, pfx={prefix}, n={n})"
+            );
         }
     }
 
@@ -1007,12 +1012,52 @@ mod tests {
     fn context_mla_module_empirical_regime_routing() {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        type Case = (u32, u32, u32, u32, FmhaQuantMode, KvCacheQuantMode, GemmQuantMode);
+        type Case = (
+            u32,
+            u32,
+            u32,
+            u32,
+            FmhaQuantMode,
+            KvCacheQuantMode,
+            GemmQuantMode,
+        );
         let cases: &[Case] = &[
-            (2, 5000, 0, 128, FmhaQuantMode::Bfloat16, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
-            (1, 2000, 2048, 16, FmhaQuantMode::Bfloat16, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
-            (1, 1, 0, 128, FmhaQuantMode::Bfloat16, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
-            (2, 5000, 0, 128, FmhaQuantMode::Fp8, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block),
+            (
+                2,
+                5000,
+                0,
+                128,
+                FmhaQuantMode::Bfloat16,
+                KvCacheQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+            ),
+            (
+                1,
+                2000,
+                2048,
+                16,
+                FmhaQuantMode::Bfloat16,
+                KvCacheQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+            ),
+            (
+                1,
+                1,
+                0,
+                128,
+                FmhaQuantMode::Bfloat16,
+                KvCacheQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+            ),
+            (
+                2,
+                5000,
+                0,
+                128,
+                FmhaQuantMode::Fp8,
+                KvCacheQuantMode::Fp8,
+                GemmQuantMode::Fp8Block,
+            ),
         ];
         for &(b, s, prefix, n, fmha, kv, gemm) in cases {
             let __r = query_context_mla_module_table(&db, b, s, prefix, n, kv, fmha, gemm, None)
@@ -1047,8 +1092,20 @@ mod tests {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
         let cases: &[(u32, u32, u32, KvCacheQuantMode, GemmQuantMode)] = &[
-            (8, 3000, 128, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
-            (1, 4097, 128, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
+            (
+                8,
+                3000,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+            ),
+            (
+                1,
+                4097,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+            ),
             (8, 3000, 16, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block),
         ];
         for &(b, s, n, kv, gemm) in cases {
