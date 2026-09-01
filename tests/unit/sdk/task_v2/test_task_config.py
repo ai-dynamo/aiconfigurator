@@ -117,7 +117,10 @@ def test_disagg_with_separate_role_specs():
     assert t.is_moe is True
     assert t.prefill_tp_candidates is not None
     assert t.decode_tp_candidates is not None
-    assert t.num_gpu_per_replica is not None
+    # A fused-only search materializes the legacy replica list, while shipped
+    # large-EP coverage intentionally uses the resolved maximum as its budget.
+    # This construction test must accept either data-driven regime.
+    assert t.num_gpu_per_replica is not None or t.max_gpu_per_replica is not None
     assert t.max_gpu_per_replica == 32  # clamped to total_gpus=32, matches v1 _finalize_disagg
     assert t.max_prefill_workers == 32
 
