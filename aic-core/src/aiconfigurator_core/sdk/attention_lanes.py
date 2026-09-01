@@ -60,7 +60,7 @@ _OVERRIDE_LANES: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 
-def _override_lanes(backend: str, override: str) -> tuple[str, ...]:
+def resolve_attention_override_lanes(backend: str, override: str) -> tuple[str, ...]:
     """Stored ``kernel_source`` labels for a user-facing *override* on *backend*.
 
     Raises :class:`UnsupportedAttentionBackendError` for a (backend, override)
@@ -220,7 +220,8 @@ def resolve_attention_lane_tiers(
     """Return ``(pinned, donors, framework_default_matched)`` for the context.
 
     *pinned* is the explicit-intent head — the override (translated to the
-    backend's stored ``kernel_source`` labels, see :func:`_override_lanes`)
+    backend's stored ``kernel_source`` labels, see
+    :func:`resolve_attention_override_lanes`)
     and the framework-default map lane, in that precedence, ``"default"``
     excluded (it is always the donor tier's last element). *donors* is the
     generic tail from :func:`_donor_tier`.  *framework_default_matched* is
@@ -240,7 +241,7 @@ def resolve_attention_lane_tiers(
 
     # Step 1: override first, translated to the stored kernel_source labels.
     if override is not None:
-        listed.extend(_override_lanes(backend, override))
+        listed.extend(resolve_attention_override_lanes(backend, override))
 
     # Step 2: framework-default lane from the map.
     backend_map = defaults.get(backend)
@@ -292,8 +293,9 @@ def resolve_attention_lane_order(
     Precedence rules (applied in order, each lane included at most once):
 
     1. *override* — always first when given, translated to the backend's
-       stored ``kernel_source`` labels (:func:`_override_lanes`; an override
-       the backend does not support raises
+       stored ``kernel_source`` labels
+       (:func:`resolve_attention_override_lanes`; an override the backend does
+       not support raises
        :class:`UnsupportedAttentionBackendError`).
     2. The framework-default lane for (*backend*, floor-matched *version*,
        *sm_version*) from ``attention_lane_defaults.yaml``, if present and

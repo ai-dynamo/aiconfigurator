@@ -28,6 +28,7 @@ import aiconfigurator_core._aiconfigurator_core as _core
 from aiconfigurator_core.sdk.attention_lanes import (
     UnsupportedAttentionBackendError,
     resolve_attention_lane_order,
+    resolve_attention_override_lanes,
     split_attention_lane_tiers,
 )
 from aiconfigurator_core.sdk.operations.base import OpShellKit
@@ -192,6 +193,16 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
         from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
 
         density = fetch_attention_lane_density(database, table_attr)
+        if override not in (None, "default"):
+            override_lanes = resolve_attention_override_lanes(database.backend, override)
+            if not any(lane in density for lane in override_lanes):
+                phase = "context" if table_attr == "_context_attention_data" else "generation"
+                raise UnsupportedAttentionBackendError(
+                    f"attention_backend={override!r} has no {phase} attention measurements for "
+                    f"system {database.system!r}, backend {database.backend!r}, version {database.version!r}; "
+                    f"expected at least one stored kernel_source lane from {list(override_lanes)!r}, "
+                    f"available lanes: {sorted(density)!r}."
+                )
         primary_density = fetch_attention_lane_density(database, table_attr, shared_layer=False)
         return list(_source_tiered_lane_walk_order(density, primary_density, order))
     except UnsupportedAttentionBackendError:

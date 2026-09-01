@@ -654,6 +654,30 @@ def test_real_shipped_vllm_0220_b200_donor_only_override_pin_stays_first():
 
 
 @pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])
+@pytest.mark.parametrize("override", ["fa3", "fla"])
+def test_real_shipped_sglang_0514_b200_rejects_supported_but_absent_override(table_attr, override):
+    """Backend-wide vocabulary support is insufficient for explicit intent.
+
+    The shipped B200 SGLang 0.5.14 phase tables carry neither ``fa3`` nor
+    ``fla``.  Both names are valid SGLang override spellings, but serializing
+    either absent pin ahead of available donors would let Rust silently serve
+    a different kernel.  Every loaded phase table must therefore contain at
+    least one translated label for a named override.
+    """
+    from aiconfigurator_core.sdk.attention_lanes import UnsupportedAttentionBackendError
+    from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+    from aiconfigurator_core.sdk.perf_database import get_database
+
+    db = get_database("b200_sxm", "sglang", "0.5.14", allow_unlisted_version=True)
+    density = fetch_attention_lane_density(db, table_attr)
+
+    assert set(density) == {"flashinfer", "triton", "trtllm_mha"}
+    with pytest.raises(UnsupportedAttentionBackendError, match=rf"{override}.*no .* attention measurements"):
+        resolved_lane_order_for_op(db, table_attr, override)
+
+
+@pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])
 @pytest.mark.parametrize("override", [None, "default"], ids=["unset", "default"])
 def test_vllm_0240_primary_lanes_precede_shared_donors(table_attr, override):
     """A mapped literal ``default`` means framework dispatch, not donor-first.
