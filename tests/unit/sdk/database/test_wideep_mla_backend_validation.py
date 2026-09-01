@@ -23,6 +23,7 @@ def blackwell_empirical_database():
         "0.5.10",
         database_mode=common.DatabaseMode.EMPIRICAL,
         shared_layer=False,
+        allow_unlisted_version=True,
     )
     assert database is not None
     return database
