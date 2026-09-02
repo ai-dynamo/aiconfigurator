@@ -165,6 +165,45 @@ class TestForwardModelRewrite:
         # Weight bytes captured from the original lists keep memory estimation intact.
         assert model.context_ops[0].get_weights() == pytest.approx(expected_weights)
 
+    def test_fpm_spec_preserves_explicit_attention_backend_for_nested_ops(self):
+        from aiconfigurator.sdk.engine import build_engine_spec_json
+        from aiconfigurator.sdk.perf_database import get_database
+
+        attention_backend = "trtllm_mha"
+        model = models.get_model(
+            "Qwen/Qwen3-0.6B",
+            _model_config(forward_model="fpm", attention_backend=attention_backend),
+            "sglang",
+        )
+        database = get_database("b200_sxm", "sglang", "0.5.14")
+
+        spec = json.loads(
+            build_engine_spec_json(
+                model,
+                model_path="Qwen/Qwen3-0.6B",
+                system="b200_sxm",
+                backend="sglang",
+                backend_version="0.5.14",
+                kv_block_size=None,
+                systems_path=None,
+                nextn=0,
+                database=database,
+            )
+        )
+        context_lane_order = next(
+            op["ContextAttention"]["lane_order"]
+            for op in spec["context_ops"][0]["FpmForward"]["sol_ops"]
+            if "ContextAttention" in op
+        )
+        generation_lane_order = next(
+            op["GenerationAttention"]["lane_order"]
+            for op in spec["generation_ops"][0]["FpmForward"]["sol_ops"]
+            if "GenerationAttention" in op
+        )
+
+        assert context_lane_order[0] == attention_backend
+        assert generation_lane_order[0] == attention_backend
+
     def test_fpm_rejects_construction_without_sol_ops(self):
         # Legacy "exactly one of sol_fn/sol_ops" contract, minus the retired
         # half: omitting sol_ops keeps raising (main's ValueError), with the

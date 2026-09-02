@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import (
     _get_model_info,
@@ -579,7 +580,11 @@ class Task:
     nextn: int | str = 0
     nextn_accepted: float | None = None
     moe_backend: str | None = None
-    attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
+    # Applies to every graph with standard dense ContextAttention/GenerationAttention ops and to
+    # supported DeepSeek MLA/WideEP paths. Named support is backend/table/version-specific and fails
+    # closed; None/default uses the mapped framework default or safe default fallback. SGLang WideEP
+    # maps None/default to flashinfer and also supports fa3.
+    attention_backend: str | None = None
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
@@ -2099,11 +2104,11 @@ class Task:
             nextn=self.nextn,
             enable_encoder_dp=self.enable_encoder_dp,
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # attention_backend / wideep_num_slots are shared across roles (Task has no
-            # per-role variant) and fed to ModelConfig so get_model selects the MLA
-            # attention perf tables (fa3 vs flashinfer) and the EPLB slot count.
-            # workload_distribution remains non-configurable in v2 and ModelConfig's
-            # default matches v1's.
+            # moe_backend / attention_backend / wideep_num_slots are shared across roles
+            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
+            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
+            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
+            # in v2 and ModelConfig's default matches v1's.
             #
             # moe_backend="deepep_moe" is NOT forwarded: it used to select both the
             # sglang wideEP model classes and the wideep MoE compute tables for the
@@ -2111,8 +2116,11 @@ class Task:
             # would make a fused tuple price itself off the large-EP tables. MegaMoE
             # is a real DeepSeek-V4 kernel selection and passes through.
             moe_backend=self.moe_backend if self.moe_backend != "deepep_moe" else None,
-            # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
-            attention_backend=self.attention_backend or "flashinfer",
+            # None means "unspecified" and MUST stay None: the WideEP MLA ops apply
+            # their own "flashinfer" default, while dense attention (AIC-1715) reads
+            # this field as the kernel-LANE override — materializing a lane name here
+            # would silently pin every model to the flashinfer lane.
+            attention_backend=self.attention_backend,
             wideep_num_slots=self.wideep_num_slots,
             forward_model=self.forward_model or "op_level",
             moe_comm_backend=None,
@@ -2213,8 +2221,11 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
-            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
+        if self.attention_backend is not None and self.attention_backend not in ATTENTION_BACKEND_CHOICES:
+            raise ValueError(
+                f"attention_backend must be one of {', '.join(repr(b) for b in ATTENTION_BACKEND_CHOICES)}, "
+                f"got {self.attention_backend!r}."
+            )
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         self._check_encoder_knobs_require_epd()
@@ -2243,7 +2254,32 @@ class Task:
             self._validate_afd()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+        self._validate_sglang_wideep_attention_backend()
         self._validate_database_quant_modes()
+
+    def _validate_sglang_wideep_attention_backend(self) -> None:
+        """Reject dense-only attention backends when a role can reach WideEP.
+
+        SGLang's WideEP MLA operators accept only ``flashinfer`` and ``fa3``;
+        ``default`` means their established framework default (``flashinfer``).
+        The wider attention-lane vocabulary remains valid for tasks whose
+        enumerated tuples are all dense/fused.
+        """
+        if self.attention_backend in (None, "default", "flashinfer", "fa3"):
+            return
+        roles = ("agg",) if self.serving_mode in ("agg", "afd") else ("prefill", "decode")
+        for role in roles:
+            if self._role_attr(role, "backend_name") != "sglang":
+                continue
+            if ("wideep_context_mla", "wideep_generation_mla") not in self._reachable_attention_op_keys(role):
+                continue
+            from aiconfigurator.sdk.errors import UnsupportedAttentionBackendError
+
+            raise UnsupportedAttentionBackendError(
+                f"SGLang WideEP MLA does not support attention_backend={self.attention_backend!r}; "
+                "supported values: ['fa3', 'flashinfer', 'default']. "
+                "Dense-only SGLang tasks may use the wider attention-backend vocabulary."
+            )
 
     def _validate_agg(self) -> None:
         if not self.model_path:

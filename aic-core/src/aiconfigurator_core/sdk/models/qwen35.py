@@ -374,6 +374,12 @@ class Qwen35Model(BaseModel):
                         fmha_q,
                         head_size=self._head_size,
                         use_qk_norm=True,
+                        # lane_order resolves at spec-build time (a database
+                        # handle is needed; models are database-less pure
+                        # shape graphs) — see
+                        # engine.py::_resolve_attention_lane_orders, which
+                        # reads this model's `config.attention_backend` as
+                        # the override.
                     ),
                     ops.GEMM(
                         "context_proj_gemm",
@@ -749,6 +755,8 @@ class Qwen35Model(BaseModel):
                         kvcache_q,
                         head_size=self._head_size,
                         use_qk_norm=True,
+                        # lane_order resolves at spec-build time; see the
+                        # context_attention twin above.
                     ),
                     ops.GEMM(
                         "generation_proj_gemm",

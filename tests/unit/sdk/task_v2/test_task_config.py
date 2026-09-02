@@ -11,6 +11,7 @@ prefix discipline, and the build_* helpers.
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, MoECommFallback
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -319,6 +320,41 @@ def test_invalid_attention_backend_rejected():
         serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", attention_backend="torch"
     )
     with pytest.raises(ValueError, match="attention_backend"):
+        t.validate()
+
+
+def test_valid_attention_backend_choices_accepted():
+    """Dense-only SGLang tasks retain the full attention-lane vocabulary."""
+    for choice in ATTENTION_BACKEND_CHOICES:
+        t = Task(
+            serving_mode="agg",
+            model_path="meta-llama/Meta-Llama-3.1-8B",
+            system_name="h200_sxm",
+            backend_name="sglang",
+            attention_backend=choice,
+        )
+        assert t._reachable_attention_op_keys("agg") == [("context_attention", "generation_attention")]
+        t.validate()
+
+
+def test_sglang_wideep_rejects_unsupported_attention_backend_before_sweep():
+    """The general dense-attention vocabulary must not leak into WideEP MLA.
+
+    This real task reaches both fused and SGLang WideEP candidates.  ``triton``
+    is valid for dense attention, but the WideEP Rust ops accept only
+    ``flashinfer`` / ``fa3``; validation must reject it before sweep error
+    handling can silently discard every WideEP candidate.
+    """
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        attention_backend="triton",
+    )
+    assert ("wideep_context_mla", "wideep_generation_mla") in t._reachable_attention_op_keys("agg")
+
+    with pytest.raises(ValueError, match=r"SGLang WideEP MLA.*triton"):
         t.validate()
 
 

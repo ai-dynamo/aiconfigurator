@@ -21,7 +21,7 @@ bytes as the Python → Rust wire format, and the Rust `Engine` deserializes and
 interprets it — closer to a compiled query plan than a compiled executable. The
 one-time compile just resolves the model into a fixed, serializable op list so
 the hot path never re-walks the model or re-enters Python. The wire format is
-versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 14, most
+versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 15, most
 recently bumped when `GdnOp` gained its serialized `mamba_ssm_dtype` field),
 the wheel and crate move in
 lockstep, and the Rust `Engine` rejects a spec with any other version.
@@ -43,7 +43,7 @@ crate's `embed-python` feature, which enables PyO3's `auto-initialize` support:
 
 ```toml
 [dependencies]
-aiconfigurator-core = { version = "0.11.0", features = ["embed-python"] }
+aiconfigurator-core = { version = "0.12.0", features = ["embed-python"] }
 ```
 
 Applications that embed Python in an existing host may initialize the

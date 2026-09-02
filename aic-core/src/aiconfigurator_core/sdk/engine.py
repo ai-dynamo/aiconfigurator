@@ -109,6 +109,14 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   (`perf_database/source_resolution.rs`).
 # - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
 #   op-layout change (the serde default covers JSON only).
+# - 15 (AIC-1715/1716): Context/Generation attention ops gained `lane_order`
+#   (always serialized — bincode decodes positionally). Concurrently claimed
+#   v8, v9, v10, and v12 on its own branch (v8 alongside #1503's v7/v8, v9
+#   alongside #1461's `Op::FpmForward` v9, v10 alongside issue #1498's Mhc
+#   `seq_split` v10, v12 alongside PR-6's `DsaModuleOp`
+#   `attn_projection_quant_modes` v12, and v14 alongside #1533's
+#   `GdnOp::mamba_ssm_dtype` v14); each landed first, so this renumbers to 15
+#   at merge (same v3/v4, v5/v6 precedent).
 # Single owner: the Rust crate constant. Python re-exports it for
 # diagnostics/tests instead of declaring a twin to keep in sync.
 ENGINE_SPEC_SCHEMA_VERSION = aiconfigurator_core.engine_spec_schema_version()
@@ -363,6 +371,7 @@ def compile_engine(
     kvcache_quant_mode: str | None = None,
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
+    attention_backend: str | None = None,
     nextn: int = 0,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
@@ -392,6 +401,7 @@ def compile_engine(
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
         forward_model=forward_model,
+        attention_backend=attention_backend,
     )
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.
@@ -431,6 +441,33 @@ def build_ops_json(ops: Any) -> str:
     return _ops_json(ops)
 
 
+def _resolve_attention_lane_orders(ops: Any, database: Any, override: str | None) -> None:
+    """Set ``_lane_order`` on every ``ContextAttention``/``GenerationAttention``
+    in *ops*, mutating in place.
+
+    AIC-1715/1716: attention ops are constructed by the model layer without a
+    database handle (models are pure shape graphs), so the kernel-lane
+    precedence (resolver YAML + the loaded table's own leftover lanes) can
+    only be resolved here, at spec build, where *database* is available —
+    same place ``_wideep_moe`` pre-bakes its kernel_source. Every op not
+    explicitly re-resolved keeps the always-valid ``["default"]`` its pyo3
+    constructor already carries.
+    """
+    from aiconfigurator_core.sdk.operations.attention import (
+        ContextAttention,
+        GenerationAttention,
+        resolved_lane_order_for_op,
+    )
+
+    for op in ops:
+        if isinstance(op, ContextAttention):
+            op._lane_order = resolved_lane_order_for_op(database, "_context_attention_data", override)
+        elif isinstance(op, GenerationAttention):
+            op._lane_order = resolved_lane_order_for_op(database, "_generation_attention_data", override)
+        elif isinstance(op, FPMForwardOp):
+            _resolve_attention_lane_orders(op._sol_ops, database, override)
+
+
 def build_engine_spec_json(
     model: Any,
     *,
@@ -448,6 +485,15 @@ def build_engine_spec_json(
     Separated from ``compile_engine`` so the op-transfer round-trip test can
     inspect the JSON (and the decoded ops) without going through bincode.
     """
+    # AIC-1715/1716: resolve each attention op's kernel-lane walk now that a
+    # database is in hand (see `_resolve_attention_lane_orders`). The
+    # `attention_backend` override is a model-level knob (`ModelConfig`, not
+    # per-op) — every model family gets a valid, table-aware lane order this
+    # way, whether or not it exposes the override.
+    override = getattr(getattr(model, "config", None), "attention_backend", None)
+    _resolve_attention_lane_orders(model.context_ops, database, override)
+    _resolve_attention_lane_orders(model.generation_ops, database, override)
+
     # Vision encoder ops are intentionally NOT emitted into the spec.
     #
     # The compile path threads no image configuration (num_images_per_request,
@@ -642,20 +688,32 @@ def _evaluate_single_op(
     ``SOL_FULL`` decomposition triple) — that dimension left with the shims;
     per-call SOL decomposition is served by
     ``EngineHandle.evaluate_ops_sol_json`` directly."""
+    from aiconfigurator_core.sdk.operations.attention import ContextAttention, GenerationAttention
     from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
-    ops_json = build_ops_json([op])
-    eval_kwargs = dict(
-        is_context=bool(is_context),
-        batch_size=int(batch_size),
-        s=int(s),
-        prefix=int(prefix),
-        imbalance_correction_scale=float(imbalance_correction_scale),
-        x=None if x is None else int(x),
-    )
-    handle = _probe_handle_for(database, None)
-    (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
-    return PerformanceResult(latency, energy=energy, source=source)
+    # AIC-1715/1716: a fresh attention op needs a table-aware lane order, but
+    # callers may already have pinned one. Resolve only the default sentinel
+    # and restore it after this evaluation so shared model ops are immutable.
+    restore_lane_order = isinstance(op, (ContextAttention, GenerationAttention)) and op._lane_order == ["default"]
+    original_lane_order = op._lane_order if restore_lane_order else None
+    try:
+        if restore_lane_order:
+            _resolve_attention_lane_orders([op], database, None)
+        ops_json = build_ops_json([op])
+        eval_kwargs = dict(
+            is_context=bool(is_context),
+            batch_size=int(batch_size),
+            s=int(s),
+            prefix=int(prefix),
+            imbalance_correction_scale=float(imbalance_correction_scale),
+            x=None if x is None else int(x),
+        )
+        handle = _probe_handle_for(database, None)
+        (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
+        return PerformanceResult(latency, energy=energy, source=source)
+    finally:
+        if restore_lane_order:
+            op._lane_order = original_lane_order
 
 
 def _maybe_load_database(system: str, backend: str, backend_version: str | None, systems_path: str | None) -> Any:
