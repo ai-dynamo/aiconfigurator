@@ -1130,6 +1130,57 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
 
 
 @pytest.mark.integration
+def test_best_available_falls_back_on_malformed_system_yaml(tmp_path: Path) -> None:
+    """Malformed system specs are native-data failures, not hard config errors."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    systems_root = tmp_path / "systems"
+    systems_root.mkdir()
+    (systems_root / "broken.yaml").write_text("data_dir: [", encoding="utf-8")
+    config = _supported_fpm_config()
+    config.update(system_name="broken", systems_path=str(systems_root))
+
+    model = RustForwardPassPerfModel.best_available(config, "aggregated")
+    diagnostics = model.diagnostics()
+
+    assert diagnostics["source"] == "fallback_regression"
+    assert "YAML error" in diagnostics["last_warning"]
+
+
+@pytest.mark.integration
+def test_malformed_performance_yaml_remains_a_perf_database_failure(tmp_path: Path) -> None:
+    """Performance-side YAML keeps its typed error and remains fallback-safe."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    systems_root = tmp_path / "systems"
+    systems_root.mkdir()
+    (systems_root / "synthetic.yaml").write_text(
+        "data_dir: data\n"
+        "gpu:\n  mem_bw: 1000000000000\n"
+        "node:\n"
+        "  num_gpus_per_node: 8\n"
+        "  inter_node_bw: 100000000000\n"
+        "  intra_node_bw: 900000000000\n",
+        encoding="utf-8",
+    )
+    (systems_root / "data/gemm/trtllm/1.3.0rc20").mkdir(parents=True)
+    (systems_root / "perf_data_reuse_manifest.yaml").write_text("groups: [", encoding="utf-8")
+    config = _supported_fpm_config()
+    config.update(system_name="synthetic", systems_path=str(systems_root))
+
+    with pytest.raises(PerfDataNotAvailableError, match="perf database error"):
+        RustForwardPassPerfModel.from_native(config)
+
+    model = RustForwardPassPerfModel.best_available(config, "aggregated")
+    diagnostics = model.diagnostics()
+    assert diagnostics["source"] == "fallback_regression"
+    assert "perf database error" in diagnostics["last_warning"]
+
+
+@pytest.mark.integration
 def test_best_available_validates_regression_weights_only_after_fallback() -> None:
     """Regression-only knobs and worker semantics apply only if native AIC is unavailable."""
     pytest.importorskip("aiconfigurator_core")
