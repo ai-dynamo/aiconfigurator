@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: vllm
+  version: 0.27.0
+  image: vllm/vllm-openai:v0.27.0
+  # Arm64 entry of the v0.27.0 multi-arch image used on GB300/SM103.
+  image_digest: sha256:7441a0579b7974fe00eec2c41a5710bcd0dc3dafc03edcdc5663158dd68286cf
+tables:
+  # Recollected 2026-08-21 from the committed abbe8b6 collector closure.
+  # The 256 rows cover EP 4/8/16/32, context 24 + generation 40 per EP,
+  # balanced/power_law_1.01/power_law_1.2/power_law_sampled_1.9 routing,
+  # pre_dispatch=vllm, buffer_policy=cached_vllm, and the vendored vLLM
+  # deep_gemm.fp8_fp4_mega_moe kernel. Every EP run exited zero and passed
+  # validate_perf; the merged table has no duplicate loader keys.
+  # EP32 used eight 4-GPU hosts in nvidia.com/gb300-node=node2. A 32-rank
+  # transport smoke immediately before collection observed NET/IB on all
+  # hosts, P2P/MNNVL rings, GDR=1, and zero NET/Socket selections.
+  dsv4_megamoe_module_perf:
+    collector_ref: abbe8b6f504d50a07da4c6f5575f49eb4d0067a4
+    collector_hash: sha256:72800f900313fe9f50f4885390f974a62644027daa89f539593c1c6125d59781
+    case_plan_hash: sha256:4ae27f93d317ac0f79562c627818dcf214221edf2508fbddc0197f803d4a3531
+    collected_at: '2026-08-21'
+    rows: 256
+    status: complete

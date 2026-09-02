@@ -831,12 +831,32 @@ def resolve_dsv4_moe_arch_mode(
     return None
 
 
+def _is_kimi_k3_checkpoint(model_path: str) -> bool:
+    """Kimi-K3 checkpoint identity independent of how the checkpoint is addressed.
+
+    An exact hub-id match alone blinds everything downstream for local/offline
+    deployments (clusters run against local mounts such as /data/models/Kimi-K3),
+    so when the string doesn't match we identify by the config's architecture —
+    the same object ``Task`` family resolution keys on. Unreadable paths (unknown
+    hub ids, no local config) conservatively report False, preserving the
+    pre-existing exact-match semantics for non-K3 models.
+    """
+    if model_path == "moonshotai/Kimi-K3":
+        return True
+    try:
+        info = _get_model_info(model_path)
+    except Exception:
+        return False
+    return info.get("architecture") == "KimiK3ForConditionalGeneration"
+
+
 def resolve_kimi_k3_moe_arch_mode(
     model_path: str,
     system_name: str | None,
     backend_name: str | None,
+    moe_backend: str | None = None,
 ) -> common.MoEQuantMode | None:
-    """Arch-specific MoE quant mode for Kimi-K3's MXFP4 routed experts on sglang.
+    """Arch-specific MoE quant mode for Kimi-K3's MXFP4 routed experts.
 
     The kimi-k3 branch's ``Mxfp4MoEMethod`` default precision quantizes
     activations to mxfp8 on Blackwell (``per_token_group_quant`` /
@@ -846,13 +866,22 @@ def resolve_kimi_k3_moe_arch_mode(
     bf16-activation marlin W4A16 lane — the checkpoint's plain
     ``w4a16_mxfp4`` label is already correct there, so this returns None and
     the HF auto-inference stands.
+
+    vLLM's default K3 MoE lane is W4A16 Marlin, so non-megamoe vLLM estimates
+    keep the plain label (returns None). The vLLM MegaMoE lane runs the same
+    fused ``deep_gemm.fp8_fp4_mega_moe`` kernel as SGLang's, so on Blackwell it
+    gets the same ``w4a8_mxfp4_mxfp8`` key; vLLM MegaMoE rows are keyed
+    ``pre_dispatch=vllm`` in the unified table (first shipped for gb300 @
+    vllm 0.27.0).
     """
-    if backend_name != "sglang":
-        return None
-    if model_path != "moonshotai/Kimi-K3":
+    if not _is_kimi_k3_checkpoint(model_path):
         return None
     from aiconfigurator_core.sdk.perf_database import is_blackwell_system
 
+    if backend_name not in ("sglang", "vllm"):
+        return None
+    if backend_name == "vllm" and moe_backend != "megamoe":
+        return None
     if is_blackwell_system(system_name):
         return common.MoEQuantMode.w4a8_mxfp4_mxfp8
     return None
@@ -877,7 +906,7 @@ def resolve_dsv4_moe_arch(
         return
     mode = resolve_dsv4_moe_arch_mode(model_path, system_name, backend_name, moe_backend)
     if mode is None:
-        mode = resolve_kimi_k3_moe_arch_mode(model_path, system_name, backend_name)
+        mode = resolve_kimi_k3_moe_arch_mode(model_path, system_name, backend_name, moe_backend)
     if mode is not None:
         model_config.moe_quant_mode = mode
 

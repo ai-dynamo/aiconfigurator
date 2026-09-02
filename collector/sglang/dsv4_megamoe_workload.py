@@ -16,9 +16,14 @@ from dataclasses import dataclass
 import torch
 
 try:
-    from collector.helper import balanced_logits, power_law_logits_v3, sample_power_law
+    from collector.helper import (
+        _router_logits_from_selected_experts,
+        balanced_logits,
+        power_law_logits_v3,
+        sample_power_law,
+    )
 except ImportError:
-    from helper import balanced_logits, power_law_logits_v3, sample_power_law
+    from helper import _router_logits_from_selected_experts, balanced_logits, power_law_logits_v3, sample_power_law
 
 
 SAMPLED_POWER_LAW_DISTRIBUTION = "power_law_sampled_1.9"
@@ -172,8 +177,6 @@ def sampled_power_law_logits(num_tokens: int, num_experts: int, topk: int, ep: i
     without replacement, matching the discrete shape produced by a real router
     without adding latency correction factors.
     """
-    import torch.nn.functional as F
-
     if topk > num_experts:
         raise ValueError(f"topk={topk} cannot exceed num_experts={num_experts}")
     if num_tokens <= 0:
@@ -190,8 +193,7 @@ def sampled_power_law_logits(num_tokens: int, num_experts: int, topk: int, ep: i
         selected_batches.append(torch.multinomial(batch_weights, topk, replacement=False))
     selected_experts = torch.cat(selected_batches, dim=0).to(dtype=torch.int64, device="cpu")
     selected_experts = _swap_max_rank_to_rank0(selected_experts, num_experts=num_experts, ep=ep)
-    expert_map = F.one_hot(selected_experts, num_classes=num_experts).sum(1)
-    return F.softmax(expert_map.bfloat16(), dim=1)
+    return _router_logits_from_selected_experts(selected_experts, num_experts)
 
 
 def _validate_plan(
@@ -223,6 +225,48 @@ def _validate_plan(
     merged = torch.cat([item.reshape(-1).to(dtype=torch.int64) for item in topk_ids_by_rank])
     actual_counts = torch.bincount(merged, minlength=routed_num_experts).to(dtype=torch.int64)
     if not torch.equal(actual_counts[:routed_num_experts], expected_expert_counts.to(dtype=torch.int64)):
+        raise ValueError("expert counts changed while assigning source ranks")
+
+
+def _validate_plan_streaming(
+    *,
+    rows_for,
+    num_ranks: int,
+    routed_num_experts: int,
+    routed_topk: int,
+    tokens_per_rank: Sequence[int],
+    expected_expert_counts: torch.Tensor,
+) -> None:
+    """Same checks as ``_validate_plan``, one rank resident at a time.
+
+    ``_validate_plan`` needs every rank's slice simultaneously (it cats them all
+    for the expert-count check), which forces the whole global plan to stay in
+    memory. Here each rank's rows are produced on demand and dropped, and the
+    expert histogram is accumulated incrementally -- mathematically identical,
+    since bincount over a concatenation equals the sum of per-part bincounts.
+    """
+    if num_ranks != len(tokens_per_rank):
+        raise ValueError("rank count mismatch")
+
+    actual_counts = torch.zeros(routed_num_experts, dtype=torch.int64)
+    for rank, tokens in enumerate(tokens_per_rank):
+        topk_ids, topk_weights = rows_for(rank)
+        if tuple(topk_ids.shape) != (tokens, routed_topk):
+            raise ValueError(f"rank {rank} topk_ids shape mismatch: {tuple(topk_ids.shape)}")
+        if tuple(topk_weights.shape) != (tokens, routed_topk):
+            raise ValueError(f"rank {rank} topk_weights shape mismatch: {tuple(topk_weights.shape)}")
+        if topk_ids.dtype not in (torch.int32, torch.int64):
+            raise ValueError("topk_ids must be integer")
+        if torch.any(topk_ids < 0) or torch.any(topk_ids >= routed_num_experts):
+            raise ValueError("topk_ids contain invalid routed expert ids")
+        ids64 = topk_ids.to(dtype=torch.int64)
+        sorted_ids = torch.sort(ids64, dim=1).values
+        if torch.any(sorted_ids[:, 1:] == sorted_ids[:, :-1]):
+            raise ValueError("a token row contains duplicate expert ids")
+        actual_counts += torch.bincount(ids64.reshape(-1), minlength=routed_num_experts)[:routed_num_experts]
+        del topk_ids, topk_weights, ids64, sorted_ids
+
+    if not torch.equal(actual_counts, expected_expert_counts.to(dtype=torch.int64)):
         raise ValueError("expert counts changed while assigning source ranks")
 
 
@@ -283,22 +327,32 @@ def build_routing_plan(
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(routing_seed))
+    # `randperm` must still draw the FULL global permutation so the RNG stream --
+    # and therefore every rank's rows -- stays bit-identical to the rows already
+    # collected. Only the MATERIALIZATION is narrowed: the permutation is an index
+    # tensor, so this rank's slice is one gather of permutation[offset:end]
+    # instead of permuting the whole table and then re-copying 32 contiguous
+    # slices. At EP=32 x 32768 tokens/rank that dropped peak host RSS from
+    # ~177GiB to single-digit GiB per worker (the pod's memory cgroup was
+    # OOM-killing the whole group, memory.oom.group, with no python traceback).
     permutation = torch.randperm(global_num_tokens, generator=generator)
-    topk_ids = topk_ids[permutation].contiguous()
-    topk_weights = topk_weights[permutation].contiguous()
 
-    topk_ids_by_rank = []
-    topk_weights_by_rank = []
+    rank_offsets = []
     offset = 0
     for tokens in tokens_per_rank:
-        end = offset + tokens
-        topk_ids_by_rank.append(topk_ids[offset:end].contiguous())
-        topk_weights_by_rank.append(topk_weights[offset:end].contiguous())
-        offset = end
+        rank_offsets.append((offset, offset + tokens))
+        offset += tokens
 
-    _validate_plan(
-        topk_ids_by_rank=topk_ids_by_rank,
-        topk_weights_by_rank=topk_weights_by_rank,
+    def _rows_for(rank_index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        start, end = rank_offsets[rank_index]
+        rows = permutation[start:end]
+        return topk_ids[rows].contiguous(), topk_weights[rows].contiguous()
+
+    local_topk_ids, local_topk_weights = _rows_for(rank)
+
+    _validate_plan_streaming(
+        rows_for=_rows_for,
+        num_ranks=len(tokens_per_rank),
         routed_num_experts=routed_num_experts,
         routed_topk=routed_topk,
         tokens_per_rank=tokens_per_rank,
@@ -309,8 +363,8 @@ def build_routing_plan(
         distribution=distribution,
         source_policy=source_policy,
         global_num_tokens=global_num_tokens,
-        local_topk_ids=topk_ids_by_rank[rank],
-        local_topk_weights=topk_weights_by_rank[rank],
+        local_topk_ids=local_topk_ids,
+        local_topk_weights=local_topk_weights,
     )
 
 

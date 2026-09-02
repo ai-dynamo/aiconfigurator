@@ -138,6 +138,21 @@ frameworks:
       # sha256:d61e062d" observation was the manifest list's arm64 entry,
       # not a new build. On aarch64 hosts (gb200/gb300) resolve the arm64
       # entry of the same tag and re-verify the version string before use.)
+      #
+      # megamoe: its own family (op catalog) precisely so this pin does NOT
+      # touch the `moe` default above. v0.27.0 is the first stock release that
+      # ships the fused K3 MegaMoE path AND a DeepGEMM build, so the
+      # situ-as-silu Marlin approximation does not apply here — this lane runs
+      # the real kernel. Verified in-container on GB300/SM103 (arm64 entry of
+      # the multi-arch index; runtime reported vllm 0.27.0, torch 2.13.0+cu130,
+      # deep_gemm vendored as vllm.third_party.deep_gemm with
+      # fp8_fp4_mega_moe/get_symm_buffer_for_mega_moe present).
+      # Re-verify the arm64 digest and the runtime version string on every bump.
+      megamoe:
+        version: "0.27.0"
+        images:
+          default: "vllm/vllm-openai:v0.27.0@sha256:5b03c7de2951cda2d5fd087457902625eabbe9188478e439561ef34f325b0fd5"
+          grace_blackwell: "vllm/vllm-openai:v0.27.0@sha256:7441a0579b7974fe00eec2c41a5710bcd0dc3dafc03edcdc5663158dd68286cf"
   vllm_xpu:
     base_framework: vllm
     data_backend: vllm

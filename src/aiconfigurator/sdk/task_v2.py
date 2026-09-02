@@ -188,9 +188,19 @@ _DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS = {
     "sgl-project/DeepSeek-V4-Pro-FP8",
 }
 
+# MegaMoE (Kimi-K3) — only this checkpoint has packaged perf data (gb300:
+# sglang 0.5.10/0.5.16-reused + vllm 0.27.0; b200_sxm: sglang 0.5.16).
+# Checked via architecture identity (helpers._is_kimi_k3_checkpoint), so local
+# offline checkpoint mounts qualify the same way the hub id does.
 
-def _sglang_megamoe_parallel_lists(system_name: str, should_enable_pp: bool = False) -> dict[str, list[int]]:
-    """SGLang MegaMoE parallel search lists; rack-NVL aware. Mirrors v1 (initial support)."""
+
+def _megamoe_parallel_lists(system_name: str, should_enable_pp: bool = False) -> dict[str, list[int]]:
+    """MegaMoE parallel search lists; EP-only (moe_tp=1), rack-NVL aware.
+
+    Shared by the SGLang and vLLM megamoe paths: the fused
+    ``deep_gemm.fp8_fp4_mega_moe`` kernel is expert-parallel-only on both
+    backends. Mirrors v1 (initial SGLang support).
+    """
     spec = load_system_spec(system_name)
     has_rack_nvl = int(spec.get("node", {}).get("num_gpus_per_rack", 0) or 0) >= 32
     ep_list = [4, 8, 16, 32] if has_rack_nvl else [8]
@@ -311,8 +321,8 @@ def build_disagg_parallel_lists(
                 "moe_ep_list": [8, 16, 32, 64],
             }
         elif moe_backend == "megamoe":
-            prefill_cfg = _sglang_megamoe_parallel_lists(prefill_system, should_enable_pp)
-            decode_cfg = _sglang_megamoe_parallel_lists(decode_system, should_enable_pp)
+            prefill_cfg = _megamoe_parallel_lists(prefill_system, should_enable_pp)
+            decode_cfg = _megamoe_parallel_lists(decode_system, should_enable_pp)
         elif moe_backend == "deepep_moe":
             x = [1, 2, 4, 8, 16]
             for cfg in (prefill_cfg, decode_cfg):
@@ -341,16 +351,22 @@ def build_disagg_parallel_lists(
                 "moe_ep_list": [1, 2, 4, 8, 16],
             }
     elif backend_name == "vllm":
-        x = [1, 2, 4, 8, 16]
-        prefill_cfg = {
-            "num_gpu_per_worker": x,
-            "tp_list": x,
-            "pp_list": x if should_enable_pp else [1],
-            "dp_list": x,
-            "moe_tp_list": x,
-            "moe_ep_list": x,
-        }
-        decode_cfg = copy.deepcopy(prefill_cfg)
+        if moe_backend == "megamoe":
+            # EP-only fused kernel on vLLM too; mirror the sglang megamoe lists
+            # until a pinned vLLM serving pre-dispatch refines them.
+            prefill_cfg = _megamoe_parallel_lists(prefill_system, should_enable_pp)
+            decode_cfg = _megamoe_parallel_lists(decode_system, should_enable_pp)
+        else:
+            x = [1, 2, 4, 8, 16]
+            prefill_cfg = {
+                "num_gpu_per_worker": x,
+                "tp_list": x,
+                "pp_list": x if should_enable_pp else [1],
+                "dp_list": x,
+                "moe_tp_list": x,
+                "moe_ep_list": x,
+            }
+            decode_cfg = copy.deepcopy(prefill_cfg)
     else:
         raise ValueError(f"Invalid backend: {backend_name}")
 
@@ -909,20 +925,44 @@ class Task:
             self.enable_encoder_dp = False
 
     def _validate_megamoe_backend_support(self) -> None:
-        """v1 _validate_megamoe_backend_support: megamoe is sglang + DeepSeek-V4-Pro + Blackwell only."""
+        """MegaMoE is Blackwell + SGLang/vLLM only.
+
+        The vLLM lane queries the unified ``dsv4_megamoe_module`` table with
+        ``pre_dispatch=vllm`` (measured rows shipped for gb300 @ vllm 0.27.0);
+        (system, backend) pairs without measured MegaMoE rows fail with a clear
+        PerfDataNotAvailableError at query time.
+        """
         if self.moe_backend != "megamoe":
             return
         roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
-        if self._role_attr(roles[0], "backend_name") != "sglang":
-            raise ValueError("moe_backend='megamoe' is currently supported only for the SGLang backend.")
-        if self._model_family != "DEEPSEEKV4":
-            raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
-        model = self._role_attr(roles[0], "model_path")
-        if model not in _DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS:
-            raise ValueError(
-                "moe_backend='megamoe' currently has packaged performance data only for "
-                f"DeepSeek-V4-Pro; got model_path={model!r}."
-            )
+        unsupported_roles = [role for role in roles if self._role_attr(role, "backend_name") not in ("sglang", "vllm")]
+        if unsupported_roles:
+            raise ValueError("moe_backend='megamoe' is currently supported only for the SGLang and vLLM backends.")
+        if self._model_family == "DEEPSEEKV4":
+            # No measured DeepSeek-V4 vLLM MegaMoE rows exist (vLLM shipping is
+            # Kimi-K3 on GB300 @ 0.27.0); admitting vllm here would fail later
+            # at the strict exact-key table lookup.
+            if any(self._role_attr(role, "backend_name") != "sglang" for role in roles):
+                raise ValueError(
+                    "moe_backend='megamoe' for DeepSeek-V4 is currently supported only for the SGLang backend."
+                )
+            model = self._role_attr(roles[0], "model_path")
+            if model not in _DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS:
+                raise ValueError(
+                    "moe_backend='megamoe' currently has packaged performance data only for "
+                    f"DeepSeek-V4-Pro; got model_path={model!r}."
+                )
+        elif self._model_family == "KIMIK3":
+            from aiconfigurator.sdk.models.helpers import _is_kimi_k3_checkpoint
+
+            model = self._role_attr(roles[0], "model_path")
+            if not _is_kimi_k3_checkpoint(model):
+                raise ValueError(
+                    "moe_backend='megamoe' currently has packaged performance data only for "
+                    f"Kimi-K3; got model_path={model!r}."
+                )
+        else:
+            raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 and Kimi-K3 models.")
         non_blackwell = sorted(
             {
                 self._role_attr(r, "system_name")
@@ -1129,6 +1169,7 @@ class Task:
                             self._role_attr(role, "model_path"),
                             self._role_attr(role, "system_name"),
                             self._role_attr(role, "backend_name"),
+                            self.moe_backend,
                         )
                     if arch_mode is not None:
                         from_hf = arch_mode
@@ -1698,8 +1739,8 @@ class Task:
             _set("agg_moe_ep_candidates", [1])
             return
 
-        if self.backend_name == "sglang" and self.moe_backend == "megamoe":
-            mm = _sglang_megamoe_parallel_lists(self.system_name)
+        if self.backend_name in ("sglang", "vllm") and self.moe_backend == "megamoe":
+            mm = _megamoe_parallel_lists(self.system_name)
             _set("agg_num_gpu_candidates", mm["num_gpu_per_worker"])
             _set("agg_tp_candidates", mm["tp_list"])
             _set("agg_pp_candidates", mm["pp_list"])

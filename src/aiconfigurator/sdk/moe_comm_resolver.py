@@ -121,6 +121,13 @@ def resolve_model_config_moe_comm(
     moe_ep_size = int(model_config.moe_ep_size or 1)
     if moe_ep_size <= 1:
         return None
+    if getattr(model_config, "moe_backend", None) == "megamoe":
+        # The fused MegaMoE module's measured boundary already contains its
+        # A2A (symm-buffer dispatch/combine inside the dsv4_megamoe_module
+        # rows), so cross-node EP must not demand separate DeepEP A2A data:
+        # the module table itself pins the EP axis it covers and dies loudly
+        # at its own query beyond that axis.
+        return None
 
     gpus_per_node = 0
     if database is not None and hasattr(database, "system_spec"):
