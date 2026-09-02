@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from aiconfigurator.cli.api import EstimateResult
+from aiconfigurator.cli.api import CLIResult, EstimateResult, cli_exp
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
@@ -26,7 +26,7 @@ from aiconfigurator.cli.main import (
     configure_parser,
 )
 from aiconfigurator.cli.main import main as cli_main
-from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
+from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot, get_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
@@ -870,3 +870,57 @@ class TestInclusiveTpot:
         df = self._make_df(ttft=500.0, tpot=20.0, osl=1)
         result = _apply_inclusive_tpot(df)
         assert abs(result["tpot"].iloc[0] - 500.0) < 1e-9
+
+
+class TestInclusiveTpotScalar:
+    """Unit tests for get_inclusive_tpot scalar transformation."""
+
+    def test_formula(self):
+        """Verify the inclusive TPOT formula calculation."""
+        result = get_inclusive_tpot(ttft=500.0, tpot=20.0, osl=30)
+        expected = (500.0 + 20.0 * 29) / 30
+        assert abs(result - expected) < 1e-9
+
+    def test_osl_one_equals_ttft(self):
+        """Edge case: osl=1 should return ttft (zero decode tokens)."""
+        result = get_inclusive_tpot(ttft=500.0, tpot=20.0, osl=1)
+        assert abs(result - 500.0) < 1e-9
+
+    def test_large_osl(self):
+        """With large osl, inclusive TPOT approaches regular tpot."""
+        result = get_inclusive_tpot(ttft=500.0, tpot=20.0, osl=10000)
+        # Should be very close to 20.0 when osl is large
+        assert abs(result - 20.0) < 0.1
+
+    def test_zero_ttft(self):
+        """Zero TTFT is a valid edge case."""
+        result = get_inclusive_tpot(ttft=0.0, tpot=20.0, osl=30)
+        expected = (0.0 + 20.0 * 29) / 30
+        assert abs(result - expected) < 1e-9
+
+
+class TestInclusiveTpotApiContract:
+    """Lock the Python-API inclusive_tpot contract (output-only, matching #1141).
+
+    The flag transforms terminal/CSV output only; returned DataFrames stay raw,
+    so SDK callers get inter-token latency and apply get_inclusive_tpot() if
+    needed.
+    """
+
+    @patch("aiconfigurator.cli.api.build_experiment_tasks")
+    @patch("aiconfigurator.cli.api._execute_and_wrap_result")
+    def test_cli_exp_returns_raw_tpot(self, mock_exec, mock_build):
+        """Returned DataFrames keep raw (inter-token) TPOT even with the flag on."""
+        df = pd.DataFrame({"ttft": [500.0], "tpot": [20.0], "osl": [30]})
+        mock_build.return_value = {"exp1": MagicMock()}
+        mock_exec.return_value = CLIResult(
+            chosen_exp="exp1",
+            best_configs={"exp1": df},
+            pareto_fronts={"exp1": df},
+            best_throughputs={"exp1": 1.0},
+            tasks={"exp1": MagicMock()},
+        )
+
+        result = cli_exp(yaml_path="experiments.yaml", inclusive_tpot=True)
+
+        assert result.best_configs["exp1"]["tpot"].iloc[0] == 20.0

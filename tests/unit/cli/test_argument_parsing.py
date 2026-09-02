@@ -119,6 +119,41 @@ class TestCLIArgumentParsing:
                 ]
             )
 
+    def test_inclusive_tpot_default_false_in_estimate_mode(self, cli_parser):
+        """--inclusive-tpot defaults to False in estimate mode."""
+        args = cli_parser.parse_args(["estimate", "--model-path", "Qwen/Qwen3-32B", "--system", "h200_sxm"])
+        assert args.inclusive_tpot is False
+
+    def test_inclusive_tpot_enabled_in_estimate_mode(self, cli_parser):
+        """--inclusive-tpot can be enabled in estimate mode."""
+        args = cli_parser.parse_args(
+            ["estimate", "--model-path", "Qwen/Qwen3-32B", "--system", "h200_sxm", "--inclusive-tpot"]
+        )
+        assert args.inclusive_tpot is True
+
+    def test_inclusive_tpot_default_false_in_recommend_mode(self, cli_parser):
+        """--inclusive-tpot defaults to False in recommend mode."""
+        args = cli_parser.parse_args(
+            ["recommend", "--model-path", "Qwen/Qwen3-32B", "--system", "h200_sxm", "--target-request-rate", "50"]
+        )
+        assert args.inclusive_tpot is False
+
+    def test_inclusive_tpot_enabled_in_recommend_mode(self, cli_parser):
+        """--inclusive-tpot can be enabled in recommend mode."""
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "50",
+                "--inclusive-tpot",
+            ]
+        )
+        assert args.inclusive_tpot is True
+
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
