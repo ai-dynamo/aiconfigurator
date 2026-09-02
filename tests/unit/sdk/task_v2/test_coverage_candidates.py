@@ -70,9 +70,12 @@ def _a2a_rows(backends=(("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS))) -> 
                             "hidden_size": SYNTH_HIDDEN,
                             "topk": SYNTH_TOPK,
                             "num_experts": SYNTH_EXPERTS,
-                            "sms": 20,
+                            "sms": 0 if backend == "deepep_ll" else 20,
                             "num_tokens": num_tokens,
-                            "latency": 50.0,
+                            # Positive slope plus finite intercept: DeepEP-LL
+                            # coverage now validates the same OLS viability
+                            # contract that runtime calibration enforces.
+                            "latency": 10.0 + num_tokens * 0.1,
                             "power": 300.0,
                         }
                     )
@@ -105,6 +108,29 @@ def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list
     return rows
 
 
+def _standard_moe_rows(ep_rows: list[dict]) -> list[dict]:
+    """Ordinary fused-MoE rows for LL at generation-covered EP sizes."""
+    eps = sorted({row["moe_ep_size"] for row in ep_rows if row["inference_phase"] == "generation"})
+    return [
+        {
+            "kernel_source": "moe_torch_flow",
+            "moe_dtype": _EP_QUANT,
+            "distribution": "power_law_1.2",
+            "topk": SYNTH_TOPK,
+            "num_experts": SYNTH_EXPERTS,
+            "hidden_size": SYNTH_HIDDEN,
+            "inter_size": SYNTH_INTER,
+            "moe_tp_size": 1,
+            "moe_ep_size": ep_size,
+            "num_tokens": num_tokens,
+            "latency": 1.5,
+            "power": 400.0,
+        }
+        for ep_size in eps
+        for num_tokens in (128, 1024)
+    ]
+
+
 def _write_version_dir(root: str, family: str, filename: str, rows: list[dict]) -> None:
     version_dir = os.path.join(root, "data", family, SYNTH_BACKEND, SYNTH_VERSION)
     os.makedirs(version_dir, exist_ok=True)
@@ -112,8 +138,14 @@ def _write_version_dir(root: str, family: str, filename: str, rows: list[dict]) 
     # Legacy compatibility sidecar: these synthetic rows do not model the
     # runtime and collection-event history required by Collector V3 schema v2.
     stem = filename.split(".")[0]
-    with open(os.path.join(version_dir, "collection_meta.yaml"), "w", encoding="utf-8") as f:
-        yaml.safe_dump({"schema_version": 1, "tables": {stem: {"status": "complete"}}}, f)
+    meta_path = os.path.join(version_dir, "collection_meta.yaml")
+    meta = {"status": "complete", "schema_version": 2, "tables": {}}
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = yaml.safe_load(f) or meta
+    meta.setdefault("tables", {})[stem] = {"status": "complete"}
+    with open(meta_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(meta, f)
 
 
 @pytest.fixture(autouse=True)
@@ -163,6 +195,9 @@ def _build_synth_root(tmp_path, a2a_rows, ep_rows) -> str:
         )
     _write_version_dir(root, "comm", "moe_a2a_perf.parquet", a2a_rows)
     _write_version_dir(root, "moe", "moe_expert_compute_perf.parquet", ep_rows)
+    standard_rows = _standard_moe_rows(ep_rows)
+    if standard_rows:
+        _write_version_dir(root, "moe", "moe_perf.parquet", standard_rows)
     return root
 
 
@@ -309,6 +344,7 @@ def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
         system_spec={"node": {"num_gpus_per_node": 8}, "gpu": {"sm_version": 100}},
         moe_a2a_coverage=lambda *_args: {"deepep_ht": {(8, 1)}, "deepep_ll": {(8, 1)}},
         moe_expert_compute_coverage=lambda *_args: {128},
+        moe_compute_coverage=lambda *_args: {128},
     )
     model_config = ModelConfig(attention_dp_size=128, moe_tp_size=1, moe_ep_size=128)
 
@@ -321,6 +357,40 @@ def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
     )
 
     assert resolved == {"context": "deepep_ht", "generation": "deepep_ll"}
+
+
+def test_exact_resolver_uses_emitted_ll_workload_distribution():
+    observed_distributions = []
+
+    def ll_compute_coverage(*args):
+        observed_distributions.append(args[-1])
+        return {128}
+
+    database = SimpleNamespace(
+        system="synthetic",
+        version="1.0",
+        system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
+        moe_a2a_coverage=lambda *_args: {"deepep_ll": {(8, 1)}},
+        moe_expert_compute_coverage=lambda *_args: set(),
+        moe_compute_coverage=ll_compute_coverage,
+    )
+    model_config = ModelConfig(
+        attention_dp_size=128,
+        moe_tp_size=1,
+        moe_ep_size=128,
+        workload_distribution="uniform",
+    )
+
+    resolved = resolve_model_config_moe_comm(
+        model_config,
+        model_path=SYNTH_MODEL,
+        backend_name="sglang",
+        database=database,
+        required_phases=("generation",),
+    )
+
+    assert resolved == {"generation": "deepep_ll"}
+    assert observed_distributions == ["uniform"]
 
 
 @pytest.mark.parametrize(
@@ -345,6 +415,7 @@ def test_exact_resolver_accepts_node1_deepep_substitution_for_other_frameworks(f
             "trtllm_deepep_ll": {(4, 1)},
         },
         moe_expert_compute_coverage=lambda *_args: set(),
+        moe_compute_coverage=lambda *_args: {64},
         legacy_moe_compute_coverage=lambda *_args: {64},
     )
     model_config = ModelConfig(attention_dp_size=64, moe_tp_size=1, moe_ep_size=64)
@@ -483,6 +554,15 @@ def test_compute_coverage_is_quant_specific(synth_systems):
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]  # fused defaults
 
 
+def test_eplb_prunes_deepep_ll_before_model_build(synth_systems):
+    """Stage 1 must not generate a candidate that the LL op will reject."""
+    t = _synth_task(enable_eplb=True)
+    coverage = t._large_ep_coverage("agg")
+
+    assert "deepep_ll" not in coverage.get("generation", {})
+    assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8)) is None
+
+
 def test_unready_family_never_resolves_a_backend(synth_systems, monkeypatch):
     """Gate on the families whose model classes are wired for large-EP
     emission; an unlisted family keeps the fused path even with full data."""
@@ -512,6 +592,7 @@ def test_build_model_config_reuses_task_coverage_snapshot(synth_systems, monkeyp
 
     monkeypatch.setattr(database, "moe_a2a_coverage", unexpected_probe)
     monkeypatch.setattr(database, "moe_expert_compute_coverage", unexpected_probe)
+    monkeypatch.setattr(database, "moe_compute_coverage", unexpected_probe)
 
     point = _tuple(dp=16, moe_ep=16)
     model_config = t.build_model_config(role="agg", parallel=point)
@@ -615,17 +696,16 @@ def test_disagg_replica_budget_follows_coverage(synth_systems):
 
 
 # ---------------------------------------------------------------------------
-# (b) no coverage -> fused defaults everywhere, one INFO log
+# (b) generation-only LL coverage -> fused defaults and one asymmetry warning
 # ---------------------------------------------------------------------------
 
 
 def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
-    """Shipped h200_sxm/sglang carries no moe_a2a rows for the Qwen3 shape, so
-    the task keeps the fused ladders and states which collector to run."""
+    """A node-local LL donor without HT context coverage cannot enable the tuple."""
     import aiconfigurator.sdk.task_v2 as task_v2
 
     task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.clear()  # restored by the autouse fixture
-    with caplog.at_level(logging.INFO, logger="aiconfigurator.sdk.task_v2"):
+    with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v2"):
         t = Task(
             serving_mode="agg",
             model_path=SYNTH_MODEL,
@@ -637,7 +717,7 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     assert t.agg_num_gpu_candidates == [1, 2, 4, 8]  # capped to total_gpus=8
     assert all(t._resolve_moe_comm_backend("agg", tup) is None for tup in t.iter_parallel("agg"))
-    hits = [r for r in caplog.records if "large-EP" in r.message and "collector" in r.message]
+    hits = [r for r in caplog.records if "large-EP" in r.message and "asymmetric" in r.message]
     assert len(hits) == 1, [r.message for r in caplog.records]
 
 

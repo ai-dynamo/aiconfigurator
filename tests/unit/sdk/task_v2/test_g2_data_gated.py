@@ -6,7 +6,7 @@
 
 A MoE shape NO shipped checkpoint has (hidden 5120, topk 4, 64 experts;
 verified against the bundled model_configs) becomes large-EP-explorable the
-moment its ``moe_a2a_perf`` + ``moe_expert_compute_perf`` parquets exist for a system --
+moment its communication, wide-EP compute, and fused-MoE parquets exist for a system --
 with ZERO source changes: no new model class, no new family registration, no
 builder variant, no flag. On sglang AND vllm:
 
@@ -43,6 +43,7 @@ from aiconfigurator.sdk.models import get_model, get_model_family
 from aiconfigurator.sdk.operations.moe_comm import MoEAllToAll, MoEExpertCompute
 from aiconfigurator.sdk.perf_database import databases_cache, get_database, set_systems_paths
 from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator_core.sdk.operations.moe import MoE
 
 pytestmark = pytest.mark.unit
 
@@ -94,11 +95,12 @@ def _a2a_rows() -> list[dict]:
         for ep_size, node_num in _PAIRS:
             for phase in ("dispatch", "combine"):
                 for num_tokens in _TOKEN_POINTS:
+                    comm_dtype = ("fp8" if phase == "dispatch" else "bfloat16") if backend == "deepep_ll" else "default"
                     rows.append(
                         {
                             "comm_backend": backend,
                             "phase": phase,
-                            "comm_dtype": "default",
+                            "comm_dtype": comm_dtype,
                             "ep_size": ep_size,
                             "node_num": node_num,
                             "hidden_size": SYNTH_HIDDEN,
@@ -106,7 +108,11 @@ def _a2a_rows() -> list[dict]:
                             "num_experts": SYNTH_EXPERTS,
                             "sms": sms,
                             "num_tokens": num_tokens,
-                            "latency": 50.0,  # us (loader divides by 1000)
+                            # Positive-slope LL curves are required for the
+                            # Stage-1 OLS calibration. The HT rows may use the
+                            # same synthetic curve without changing their test
+                            # purpose.
+                            "latency": 20.0 + 0.01 * num_tokens,  # us
                             "power": 300.0,
                         }
                     )
@@ -140,6 +146,28 @@ def _ep_rows() -> list[dict]:
                     }
                 )
     return rows
+
+
+def _standard_moe_rows() -> list[dict]:
+    """Ordinary fused-MoE curves used by DeepEP-LL Stage 1 compute."""
+    return [
+        {
+            "kernel_source": "moe_torch_flow",
+            "moe_dtype": "bfloat16",
+            "distribution": "power_law_1.2",
+            "topk": SYNTH_TOPK,
+            "num_experts": SYNTH_EXPERTS,
+            "hidden_size": SYNTH_HIDDEN,
+            "inter_size": SYNTH_INTER,
+            "moe_tp_size": 1,
+            "moe_ep_size": ep_size,
+            "num_tokens": num_tokens,
+            "latency": 1.5,
+            "power": 400.0,
+        }
+        for ep_size, _node in _PAIRS
+        for num_tokens in _TOKEN_POINTS
+    ]
 
 
 def _trtllm_fp8_a2a_rows() -> list[dict]:
@@ -181,8 +209,14 @@ def _write_version_dir(root: str, family: str, backend: str, filename: str, rows
     os.makedirs(version_dir, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), os.path.join(version_dir, filename))
     stem = filename.split(".")[0]
-    with open(os.path.join(version_dir, "collection_meta.yaml"), "w", encoding="utf-8") as f:
-        yaml.safe_dump({"schema_version": 1, "tables": {stem: {"status": "complete"}}}, f)
+    meta_path = os.path.join(version_dir, "collection_meta.yaml")
+    meta = {"status": "complete", "schema_version": 2, "tables": {}}
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = yaml.safe_load(f) or meta
+    meta.setdefault("tables", {})[stem] = {"status": "complete"}
+    with open(meta_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(meta, f)
 
 
 @pytest.fixture(scope="module")
@@ -225,6 +259,7 @@ def synth_systems(tmp_path):
     for backend in BACKENDS:
         _write_version_dir(root, "comm", backend, "moe_a2a_perf.parquet", _a2a_rows())
         _write_version_dir(root, "moe", backend, "moe_expert_compute_perf.parquet", _ep_rows())
+        _write_version_dir(root, "moe", backend, "moe_perf.parquet", _standard_moe_rows())
     _write_version_dir(root, "comm", "trtllm", "moe_a2a_perf.parquet", _trtllm_fp8_a2a_rows())
     _write_version_dir(root, "moe", "trtllm", "moe_expert_compute_perf.parquet", _trtllm_fp8_ep_rows())
     databases_cache.clear()
@@ -314,12 +349,12 @@ def test_build_model_config_carries_backend_and_node_width(synth_systems, synth_
 
 
 def _large_ep_ops(op_list) -> list:
-    """All MoEAllToAll/MoEExpertCompute instances, recursing into OverlapOp groups."""
+    """All large-EP communication/compute ops, recursing into overlap groups."""
     found = []
     stack = list(op_list)
     while stack:
         op = stack.pop()
-        if isinstance(op, (MoEAllToAll, MoEExpertCompute)):
+        if isinstance(op, (MoEAllToAll, MoEExpertCompute, MoE)):
             found.append(op)
         for group in ("_group_a", "_group_b"):
             stack.extend(getattr(op, group, None) or [])
@@ -350,7 +385,14 @@ def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, s
         "generation_moe_combine",
         "generation_moe_dispatch",
     ]
-    assert sorted(type(op).__name__ for op in large_ops) == ["MoEAllToAll"] * 4 + ["MoEExpertCompute"] * 2
+    assert sorted(type(op).__name__ for op in large_ops) == [
+        "MoE",
+        "MoEAllToAll",
+        "MoEAllToAll",
+        "MoEAllToAll",
+        "MoEAllToAll",
+        "MoEExpertCompute",
+    ]
 
     # Every emitted large-EP op queries the synthetic tables successfully:
     # x=128 per-rank tokens -> 128 on the comm curve (in range) and
@@ -396,7 +438,9 @@ def test_uncovered_tuple_of_the_same_task_builds_the_fused_graph(synth_systems, 
     task's ep=4 candidate builds the fused emission with zero large-EP ops."""
     t = _synth_task(synth_model_path, backend)
     model = _built_model(t, synth_model_path, backend, (1, 1, 4, 1, 4, 1))
-    assert _large_ep_ops(model.context_ops) + _large_ep_ops(model.generation_ops) == []
+    found = _large_ep_ops(model.context_ops) + _large_ep_ops(model.generation_ops)
+    assert len(found) == 2
+    assert all(isinstance(op, MoE) for op in found)
     fused_names = {op._name for op in model.context_ops}
     assert {"context_moe_pre_dispatch", "context_moe", "context_moe_post_dispatch"} <= fused_names
 

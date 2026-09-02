@@ -7,7 +7,10 @@ Dumps stratified ``(key, num_tokens) -> MoEAllToAll twin evaluation``
 samples from the shipped h200_sxm/sglang and gb200/trtllm data to
 ``src/perf_database/testdata/moe_a2a_oracle.json``; the Rust
 ``#[cfg(test)] moe_a2a_matches_python_oracle`` test loads the same parquet
-files through ``MoeA2aTable`` and asserts a relative error <= 1e-9.
+files through ``MoeA2aTable`` and asserts a relative error <= 1e-9. DeepEP-LL
+is intentionally excluded: its operation now applies calibration and Monte
+Carlo rather than exposing raw table interpolation, and dedicated Rust tests
+cover that modeled path.
 
 Regenerate (from the repo root, after `git lfs pull`):
 
@@ -97,7 +100,10 @@ def candidates_for(db):
     """Build the per-category candidate lists for one database tuple."""
     MoEAllToAll.load_data(db)
     store = db._moe_a2a_data
-    slices = sorted(walk_store(store), key=lambda item: item[0])
+    slices = sorted(
+        (item for item in walk_store(store) if item[0][0] != "deepep_ll"),
+        key=lambda item: item[0],
+    )
 
     # sms values collected per shape prefix (everything above the sms level).
     sms_by_prefix: dict[tuple, list[int]] = {}
@@ -210,7 +216,7 @@ def build_samples(db, data_root):
 def main() -> None:
     samples = []
     for system, backend, version in TUPLES:
-        db = get_database(system, backend, version, shared_layer=False)
+        db = get_database(system, backend, version, shared_layer=False, allow_unlisted_version=True)
         if db is None:
             raise SystemExit(f"no database for {system}/{backend}/{version}")
         data_root = os.path.join(db.system_spec["data_dir"], backend, version)
@@ -218,7 +224,7 @@ def main() -> None:
 
     header = {
         "_regenerate": (".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_a2a_oracle.py"),
-        "_source": "MoEAllToAll via engine._evaluate_single_op (shared_layer=False), SILICON mode",
+        "_source": "non-LL MoEAllToAll via engine._evaluate_single_op (shared_layer=False), SILICON mode",
         "_tuples": [f"{s}/{b}/{v}" for s, b, v in TUPLES],
     }
     out_path = os.path.normpath(OUT_PATH)

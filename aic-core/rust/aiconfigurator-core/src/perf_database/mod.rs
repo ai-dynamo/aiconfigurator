@@ -503,7 +503,11 @@ impl PerfDatabase {
             attention: AttentionTable::with_sources(data_root.clone(), spec.clone(), &resolver)?,
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), &resolver)?,
             moe: MoeTable::with_sources(data_root.clone(), &resolver)?,
-            moe_a2a: MoeA2aTable::with_sources(data_root.clone(), &resolver)?,
+            moe_a2a: MoeA2aTable::with_sources_and_node_width(
+                data_root.clone(),
+                &resolver,
+                spec.node.num_gpus_per_node,
+            )?,
             moe_expert_compute: MoeExpertComputeTable::with_sources(
                 data_root.clone(),
                 spec.clone(),

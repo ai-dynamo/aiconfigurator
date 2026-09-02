@@ -1,0 +1,42 @@
+[
+  {
+    "name": "dispatch_typed_then_legacy",
+    "backend": "deepep_ll",
+    "phase": "dispatch",
+    "requested": "fp8",
+    "available": ["default", "fp8"],
+    "expected": ["fp8", "default"]
+  },
+  {
+    "name": "dispatch_alias_then_legacy",
+    "backend": "deepep_ll",
+    "phase": "dispatch",
+    "requested": "fp8_block",
+    "available": ["default", "fp8"],
+    "expected": ["fp8", "default"]
+  },
+  {
+    "name": "combine_typed_then_legacy",
+    "backend": "deepep_ll",
+    "phase": "combine",
+    "requested": "bfloat16",
+    "available": ["default", "bfloat16"],
+    "expected": ["bfloat16", "default"]
+  },
+  {
+    "name": "incompatible_dtype_rejects_legacy",
+    "backend": "deepep_ll",
+    "phase": "dispatch",
+    "requested": "nvfp4",
+    "available": ["default"],
+    "expected": []
+  },
+  {
+    "name": "non_ll_preserves_sole_default",
+    "backend": "deepep_ht",
+    "phase": "dispatch",
+    "requested": "fp8",
+    "available": ["default"],
+    "expected": ["default"]
+  }
+]

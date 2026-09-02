@@ -540,15 +540,17 @@ class TestImbalanceScaleParity:
 # --------------------------------------------------------------------------- #
 
 
-_WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
-_WIDEEP_SGLANG_SYSTEM = "h200_sxm"
+_WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-R1"
+_WIDEEP_SGLANG_SYSTEM = "gb200"
 _WIDEEP_SGLANG_VERSION = "0.5.14"
+
+_H200_WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
+_H200_WIDEEP_SGLANG_SYSTEM = "h200_sxm"
+_H200_WIDEEP_SGLANG_VERSION = "0.5.6.post2"
 
 
 def _build_wideep_sglang():
-    """(model, backend, database, spec_json) for the SGLang WideEP config;
-    shared by the parity tests (handle side) and the golden capture (python
-    references)."""
+    """Runnable GB200 Stage-1 DeepEP config for parity and golden capture."""
     from aiconfigurator.sdk import common
 
     database = _quiet(
@@ -556,19 +558,27 @@ def _build_wideep_sglang():
         _WIDEEP_SGLANG_SYSTEM,
         "sglang",
         _WIDEEP_SGLANG_VERSION,
-        # current slot: the wideEP tables backfill from their sole-source
-        # 0.5.6.post2/0.5.9/0.5.10/0.5.12 dirs while gemm/attention resolve
-        # on the primary — the production large-EP query shape.
+        # Current-slot primary data plus approved cross-version donors for
+        # the large-EP tables form the production GB200 query shape.
     )
-    if database is None:
-        pytest.skip(f"no perf database for {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION}")
+    assert database is not None, f"missing shipped {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION} database"
+    fused_moe_eps = database.moe_compute_coverage(
+        hidden_size=7168,
+        inter_size=2048,
+        topk=8,
+        num_experts=256,
+        quant_mode=common.MoEQuantMode.fp8_block,
+        workload_distribution="power_law_1.01",
+    )
+    assert 32 in fused_moe_eps, "GB200 Stage-1 parity requires the shipped ordinary fused-MoE EP32 curve"
     model_config = config.ModelConfig(
-        tp_size=8,
+        tp_size=1,
+        pp_size=1,
+        attention_dp_size=32,
         moe_tp_size=1,
-        moe_ep_size=8,
+        moe_ep_size=32,
         moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
-        num_gpus_per_node=8,
-        attention_backend="flashinfer",
+        num_gpus_per_node=4,
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.fp8_block,
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
@@ -591,6 +601,60 @@ def _build_wideep_sglang():
     return model, backend, database, spec_json
 
 
+def _build_h200_wideep_sglang_spec():
+    """Historical H200 graph/wire surface without evaluating missing LL EP8 compute data."""
+    from aiconfigurator.sdk import common
+
+    database = _quiet(
+        perf_database.get_database,
+        _H200_WIDEEP_SGLANG_SYSTEM,
+        "sglang",
+        _H200_WIDEEP_SGLANG_VERSION,
+        allow_unlisted_version=True,
+    )
+    assert database is not None, (
+        f"missing shipped {_H200_WIDEEP_SGLANG_SYSTEM}/sglang/{_H200_WIDEEP_SGLANG_VERSION} database"
+    )
+    fused_moe_eps = database.moe_compute_coverage(
+        hidden_size=7168,
+        inter_size=2048,
+        topk=8,
+        num_experts=256,
+        quant_mode=common.MoEQuantMode.fp8_block,
+        workload_distribution="power_law_1.01",
+    )
+    assert 8 not in fused_moe_eps, (
+        "the historical H200 database unexpectedly gained ordinary fused-MoE EP8 coverage; "
+        "revisit the strict Stage-1 data-miss contract and restore numerical parity"
+    )
+    model_config = config.ModelConfig(
+        tp_size=8,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+        num_gpus_per_node=8,
+        attention_backend="flashinfer",
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.fp8_block,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+    )
+    model = _quiet(get_model, _H200_WIDEEP_SGLANG_MODEL, model_config, "sglang")
+    spec_json = _quiet(
+        engine.build_engine_spec_json,
+        model,
+        model_path=_H200_WIDEEP_SGLANG_MODEL,
+        system=_H200_WIDEEP_SGLANG_SYSTEM,
+        backend="sglang",
+        backend_version=_H200_WIDEEP_SGLANG_VERSION,
+        kv_block_size=None,
+        systems_path=None,
+        nextn=0,
+        database=database,
+    )
+    return database, spec_json
+
+
 def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
     import aiconfigurator_core
 
@@ -598,16 +662,12 @@ def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
 
 
 class TestWideEpDeepEpParity:
-    """SGLang large-EP DeepSeek (deepep_ht/deepep_ll) end-to-end parity.
+    """GB200 SGLang DeepEP HT/LL end-to-end numerical parity.
 
     Covers three previously-divergent surfaces at once: the WideEP MLA
-    per-rank-heads table coordinate (tp=8 -> heads=16; the bridge used to emit
-    raw tp), the deepep MoE compute routing (Rust used to read `moe_perf`
-    where Python reads the wideep context/generation tables), and the DeepEP
-    dispatch flavor emission (the emitter used to map every sglang dispatch to
-    CustomAllReduce). Runs on the current slot; the deepep dispatch and
-    wideEP tables reach it through cross-version backfill from their
-    sole-source dirs."""
+    coordinate, the split HT/LL compute routing, and the DeepEP dispatch
+    flavor emission. It runs on the current slot; approved cross-version
+    donors supply the large-EP tables where required."""
 
     def test_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_sglang()
@@ -623,6 +683,49 @@ class TestWideEpDeepEpParity:
         new_decode = handle.decode_step_latency(2, 1024, 4)
         _assert_within("wideep_mixed", _golden_reference("wideep_sglang::mixed_step"), new_mixed, backend="sglang")
         _assert_within("wideep_decode", _golden_reference("wideep_sglang::decode_step"), new_decode, backend="sglang")
+
+
+def test_h200_wideep_graph_and_wire_contract_remain_covered_without_ll_compute_fallback() -> None:
+    """Keep the historical H200 surfaces alive without hiding them behind skip.
+
+    H200 0.5.6.post2 has no ordinary fused-MoE EP8 row, so Stage 1 correctly
+    cannot produce an end-to-end LL number. Graph emission and the complete
+    JSON -> bincode -> EngineHandle wire still have an independent regression
+    anchor instead of being retired with the numerical scenario.
+    """
+    import aiconfigurator_core
+
+    _database, spec_json = _build_h200_wideep_sglang_spec()
+    spec = json.loads(spec_json)
+    context_ops = spec["context_ops"]
+    generation_ops = spec["generation_ops"]
+
+    context_mla = [op["WideEpContextMla"] for op in context_ops if "WideEpContextMla" in op]
+    generation_mla = [op["WideEpGenerationMla"] for op in generation_ops if "WideEpGenerationMla" in op]
+    assert len(context_mla) == len(generation_mla) == 1
+    assert context_mla[0]["num_heads"] == generation_mla[0]["num_heads"] == 16
+
+    context_a2a = [op["MoeAllToAll"] for op in context_ops if "MoeAllToAll" in op]
+    generation_a2a = [op["MoeAllToAll"] for op in generation_ops if "MoeAllToAll" in op]
+    assert {op["phase"] for op in context_a2a} == {"dispatch", "combine"}
+    assert {op["comm_backend"] for op in context_a2a} == {"deepep_ht"}
+    assert {op["phase"] for op in generation_a2a} == {"dispatch", "combine"}
+    assert {op["comm_backend"] for op in generation_a2a} == {"deepep_ll"}
+    assert {op["phase"]: op["comm_dtype"] for op in generation_a2a} == {
+        "dispatch": "fp8",
+        "combine": "bfloat16",
+    }
+    assert any("MoeExpertCompute" in op for op in context_ops)
+    assert not any("Moe" in op for op in context_ops)
+    assert any("Moe" in op for op in generation_ops)
+    assert not any("MoeExpertCompute" in op for op in generation_ops)
+    assert not any("CustomAllReduce" in op for op in context_ops + generation_ops)
+
+    # Rust serde accepts every emitted variant, and EngineHandle can decode
+    # the resulting bincode without querying the unavailable LL EP8 compute.
+    spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
+    assert spec_bytes
+    engine.EngineHandle(spec_bytes)
 
 
 # --------------------------------------------------------------------------- #

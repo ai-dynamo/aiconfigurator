@@ -9,12 +9,13 @@ tombstones since #1357 PR-5, so the legacy side of each comparison is the
 RAW loaded table row itself, probed at EXACT collected token points (three
 per slice: min / median / max — off-grid interpolation and the beyond-range
 util-hold retired to the compiled engine and are anchored by the frozen
-parity goldens). For EVERY slice of the legacy tables the engine-routed
+parity goldens). For every unchanged HT/TRT-LLM slice, the engine-routed
 ``query_moe_a2a`` must reproduce the raw row at rel <= 1e-9:
 
 - sglang h200_sxm 0.5.6.post2: ``deepep_ht`` dispatch+combine == the DeepEP
-  normal row (summed legs, us -> ms); ``deepep_ll`` dispatch+combine == the
-  DeepEP LL row (sms=0 path).
+  normal row (summed legs, us -> ms). DeepEP-LL exact token points are still
+  probed, but Stage 1 deliberately routes them through the calibrated Monte
+  Carlo model, so they are required to be finite rather than raw-row equal.
 - trtllm gb200 1.3.0rc10: every (kernel_source, op_name, moe_dtype) slice ==
   the alltoall row. Mapped comm_dtype is the slice's run dtype for
   prepare/dispatch/standard combine and "fp4" for the low-precision combine
@@ -124,16 +125,32 @@ def test_l1_deepep_query_equivalence():
     legacy_ll = fetch_table_view(db, "_wideep_deepep_ll_data")
     assert legacy_ll
     ll_comparisons = 0
+    modeled_deltas = []
     for (node, hidden, topk, experts), tokens in _iter_slices(legacy_ll, 4):
         ep = node * 8
+        # Historical benchmark sweeps include shapes such as N=288, EP=64.
+        # They are useful raw measurements but are not valid Stage-1 model
+        # configurations because contiguous equal expert placement requires
+        # N to be divisible by P.
+        if experts % ep != 0:
+            continue
         for tok in _exact_token_probes(tokens):
             unified = _query_a2a(
                 db, "deepep_ll", "dispatch", "default", ep, node, hidden, topk, experts, tok, sms=0
             ) + _query_a2a(db, "deepep_ll", "combine", "default", ep, node, hidden, topk, experts, tok, sms=0)
             context = f"deepep_ll {node=} {hidden=} {topk=} {experts=} {tok=}"
-            assert float(unified) == pytest.approx(tokens[tok]["latency"] / 1000.0, rel=REL_TOL), context
+            modeled = float(unified)
+            assert modeled > 0.0, context
+            modeled_deltas.append(abs(modeled - tokens[tok]["latency"] / 1000.0))
             ll_comparisons += 1
-    assert ll_comparisons == sum(len(_exact_token_probes(t)) for _, t in _iter_slices(legacy_ll, 4))
+    expected_ll_comparisons = sum(
+        len(_exact_token_probes(tokens))
+        for (node, _hidden, _topk, experts), tokens in _iter_slices(legacy_ll, 4)
+        if experts % (node * 8) == 0
+    )
+    assert ll_comparisons == expected_ll_comparisons
+    assert ll_comparisons > 0
+    assert max(modeled_deltas) > 1e-9, "LL exact points must not bypass Stage-1 modeling"
 
 
 # ---------------------------------------------------------------------------

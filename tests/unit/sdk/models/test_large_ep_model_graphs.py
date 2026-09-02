@@ -235,7 +235,10 @@ class TestDeepSeekSglangLargeEP:
 
         gen_dispatch, gen_moe, gen_combine = model.generation_ops[-3:]
         assert gen_dispatch._comm_backend == gen_combine._comm_backend == "deepep_ll"
+        assert gen_dispatch._comm_dtype == "fp8"
+        assert gen_combine._comm_dtype == "bfloat16"
         assert gen_dispatch._attention_tp_size == 1  # generation never divides
+        assert isinstance(gen_moe, ops.MoE)
         assert gen_moe._workload_distribution == "power_law_1.01"
         assert [op._scale_factor for op in model.generation_ops[-3:]] == [float(DS_LAYERS)] * 3
 
@@ -268,11 +271,11 @@ class TestDeepSeekSglangLargeEP:
         model = _deepseek_sglang(enable_eplb=True)
         assert model.context_ops[-2]._workload_distribution == "power_law_0.6"
         assert model.context_ops[-2]._enable_eplb is True
-        # The legacy class passed enable_eplb=False in decode; MoEExpertCompute gates the
-        # 0.8 token correction on inference_phase == "context", so the decode
-        # op's flag is inert (deepseek.py:1359 @ 8372e60 vs moe_comm.py:1295).
+        # LL compute uses the ordinary fused-MoE predictor. Its surrounding
+        # A2A op carries EPLB and will reject the query explicitly in Stage 1.
         assert model.generation_ops[-2]._workload_distribution == "power_law_1.01"
-        assert model.generation_ops[-2]._inference_phase == "generation"
+        assert isinstance(model.generation_ops[-2], ops.MoE)
+        assert model.generation_ops[-3]._enable_eplb is True
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +700,7 @@ class TestMOEModelLargeEP:
         assert model.context_ops[7]._comm_backend == "deepep_ht"
         assert model.generation_ops[7]._comm_backend == "deepep_ll"
         assert isinstance(model.context_ops[8], ops.MoEExpertCompute)
+        assert isinstance(model.generation_ops[8], ops.MoE)
         assert model.context_ops[8]._scale_factor == QWEN3_LAYERS
         assert model.generation_ops[8]._scale_factor == float(QWEN3_LAYERS)
 
@@ -719,10 +723,11 @@ class TestMOEModelLargeEP:
         model = _moe_sglang_large_ep(enable_eplb=True)
         assert model.context_ops[8]._workload_distribution == "power_law_0.6"
         assert model.context_ops[8]._enable_eplb is True
-        # Decode keeps the family alpha; the EPLB token correction is
-        # prefill-only inside MoEExpertCompute (moe_comm.py:1295).
+        # Decode keeps the family alpha on ordinary MoE; LL communication
+        # rejects EPLB explicitly until placement traces arrive in Stage 3.
         assert model.generation_ops[8]._workload_distribution == "power_law_1.2"
-        assert model.generation_ops[8]._inference_phase == "generation"
+        assert isinstance(model.generation_ops[8], ops.MoE)
+        assert model.generation_ops[7]._enable_eplb is True
 
     def test_trtllm_eplb_uses_suffixed_family_distribution_in_both_phases(self):
         model = _build(

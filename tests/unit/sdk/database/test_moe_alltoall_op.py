@@ -17,7 +17,9 @@ sources feeding ``load_moe_a2a_data`` resolve under the ``comm/`` family dir
 and the comm hard-exclusion keeps them primary-only (design §6.5 rule 5).
 """
 
+import json
 import os
+import pickle
 from pathlib import Path
 
 import pytest
@@ -156,6 +158,29 @@ def test_ctor_rejects_phase_outside_backend_comm_phases():
 
 def test_get_weights_is_zero():
     assert _make_op().get_weights() == 0.0
+
+
+def test_stage1_fields_survive_json_and_pickle_round_trips():
+    import aiconfigurator_core
+
+    op = _make_op(
+        comm_backend="deepep_ll",
+        comm_dtype="fp8",
+        sms=0,
+        workload_distribution="power_law_1.01",
+        enable_eplb=True,
+    )
+    wire = json.loads(op._spec_json())
+    fields = wire["MoeAllToAll"]
+    assert fields["workload_distribution"] == "power_law_1.01"
+    assert fields["enable_eplb"] is True
+
+    from_json = aiconfigurator_core.op_from_spec_json(json.dumps(wire))
+    from_pickle = pickle.loads(pickle.dumps(op))
+    for restored in (from_json, from_pickle):
+        assert restored._spec_json() == op._spec_json()
+        assert restored._workload_distribution == "power_law_1.01"
+        assert restored._enable_eplb is True
 
 
 # ---------------------------------------------------------------------------

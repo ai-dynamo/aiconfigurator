@@ -1,0 +1,84 @@
+[
+  {
+    "name": "exact_ols",
+    "requested_dispatch_dtype": "fp8",
+    "requested_combine_dtype": "bfloat16",
+    "target_ep": 16,
+    "target_nodes": 2,
+    "expected": true,
+    "rows": [
+      {
+        "ep": 16,
+        "nodes": 2,
+        "dispatch_dtype": "fp8",
+        "combine_dtype": "bfloat16",
+        "points": [[32, 0.032], [64, 0.048]]
+      }
+    ]
+  },
+  {
+    "name": "exact_one_shot_with_system_t0",
+    "requested_dispatch_dtype": "fp8",
+    "requested_combine_dtype": "bfloat16",
+    "target_ep": 16,
+    "target_nodes": 2,
+    "expected": true,
+    "rows": [
+      {
+        "ep": 16,
+        "nodes": 2,
+        "dispatch_dtype": "fp8",
+        "combine_dtype": "bfloat16",
+        "points": [[64, 0.080]]
+      },
+      {
+        "ep": 8,
+        "nodes": 1,
+        "dispatch_dtype": "default",
+        "combine_dtype": "default",
+        "points": [[1, 0.017], [2, 0.018]]
+      }
+    ]
+  },
+  {
+    "name": "single_point_without_system_t0",
+    "requested_dispatch_dtype": "fp8",
+    "requested_combine_dtype": "bfloat16",
+    "target_ep": 16,
+    "target_nodes": 2,
+    "expected": false,
+    "rows": [
+      {
+        "ep": 16,
+        "nodes": 2,
+        "dispatch_dtype": "fp8",
+        "combine_dtype": "bfloat16",
+        "points": [[64, 0.080]]
+      }
+    ]
+  },
+  {
+    "name": "alternate_viable_donor",
+    "requested_dispatch_dtype": "fp8",
+    "requested_combine_dtype": "bfloat16",
+    "target_ep": 16,
+    "target_nodes": 2,
+    "expected": true,
+    "rows": [
+      {
+        "ep": 8,
+        "nodes": 1,
+        "dispatch_dtype": "fp8",
+        "combine_dtype": "bfloat16",
+        "points": [[32, 0.040], [64, 0.040]]
+      },
+      {
+        "ep": 4,
+        "nodes": 1,
+        "dispatch_dtype": "fp8",
+        "combine_dtype": "bfloat16",
+        "points": [[32, 0.032], [64, 0.048]]
+      }
+    ]
+  }
+]

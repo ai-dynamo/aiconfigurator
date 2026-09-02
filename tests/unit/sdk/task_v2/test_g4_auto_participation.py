@@ -17,9 +17,9 @@ covered model out into a different candidate set. The goal has two halves:
 
 - SHIPPED-DATA CONTROLS (this module): on the same shipped h200_sxm/sglang
   tree, flagless DeepSeek-R1 (covered shape) explores large-EP tuples with
-  the deepep per-phase backends, while Qwen3-235B (no moe_a2a/moe_ep rows
-  for its shape) gets ZERO large-EP tuples and purely fused ladders -- data
-  is the only gate that separates the two.
+  the deepep per-phase backends. Qwen3-235B has a generation-only LL donor
+  plus ordinary fused-MoE compute coverage, but no matching HT context path;
+  the asymmetric coverage therefore yields zero large-EP aggregate tuples.
 
 Both tests read the shipped h200_sxm sglang wideEP parquets and skip when
 the data is absent (same gate as ``test_moe_block_builder_large_ep.py``).
@@ -48,6 +48,7 @@ H200_SGLANG_LARGE_EP_PATHS = [
         "wideep_deepep_ll_perf.parquet",
         "wideep_context_moe_perf.parquet",
         "wideep_generation_moe_perf.parquet",
+        "moe_perf.parquet",
     )
 ]
 
@@ -104,14 +105,20 @@ def test_deepseek_r1_flagless_default_search_explores_large_ep():
 
 
 @h200_large_ep_data_present
-def test_qwen3_no_coverage_control_stays_fully_fused():
-    """Negative control: same system, same backend, same (present) large-EP
-    tables -- but no rows for the Qwen3-235B shape. The task must keep the
-    fused defaults, resolve NO tuple to a comm backend, and hand every tuple
-    a ModelConfig without one (no spurious ``moe_comm_backend``)."""
+def test_qwen3_generation_only_coverage_stays_fully_fused():
+    """Negative control: LL coverage alone cannot enable an aggregate tuple.
+
+    The Stage-1 LL resolver finds a same-shape calibration donor and ordinary
+    fused-MoE compute rows, but the context phase has no matching HT coverage.
+    The task must therefore retain fused defaults and resolve no tuple to a
+    communication backend.
+    """
     t = _h200_sglang_task(QWEN3)
 
-    assert t._large_ep_coverage("agg") == {}
+    coverage = t._large_ep_coverage("agg")
+    assert set(coverage) == {"generation"}
+    assert set(coverage["generation"]) == {"deepep_ll"}
+    assert coverage["generation"]["deepep_ll"]
     # Fused defaults, not the unioned multi-node ladders.
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     assert t.agg_num_gpu_candidates == [1, 2, 4, 8, 16]

@@ -110,6 +110,8 @@ def communication_dtype_for(
     quantization = str(quantization)
     normalized = {"none": "bfloat16", "fp8_block": "fp8"}.get(quantization, quantization)
 
+    if comm_backend == "deepep_ll":
+        return "bfloat16" if communication_phase == "combine" else "fp8"
     if comm_backend.startswith("deepep"):
         return "default"
     if comm_backend == "trtllm_deepep_ht":

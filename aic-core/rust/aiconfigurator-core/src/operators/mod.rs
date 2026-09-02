@@ -30,6 +30,7 @@ pub mod moe;
 pub mod moe_a2a;
 pub mod moe_dispatch;
 pub mod moe_expert_compute;
+mod moe_ll_monte_carlo;
 pub mod msa;
 pub mod op;
 pub mod overlap;

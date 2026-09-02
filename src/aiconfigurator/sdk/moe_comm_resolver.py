@@ -15,7 +15,11 @@ from aiconfigurator.sdk.models import (
     _get_model_info,
     check_is_moe,
 )
-from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
+from aiconfigurator.sdk.models.blocks.moe import (
+    LARGE_EP_READY_FAMILIES,
+    MoEBlockShape,
+    deepep_ll_workload_distribution,
+)
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
 from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -36,13 +40,20 @@ def a2a_covers_parallel(
 ) -> bool:
     """Whether A2A data can serve a target EP/node scale.
 
-    Prefer an exact scale. Otherwise, vLLM/TRT-LLM DeepEP HT/LL may use the
-    physical full-node ``(ep=gpus_per_node, node_num=1)`` row. SGLang keeps
-    its legacy normalized ``(ep=8, node_num=1)`` coordinate from PR #1314.
-    The query engine marks every substitution as estimated.
+    Prefer an exact scale. DeepEP-LL Stage 1 may use any matching single-domain
+    row because the Rust estimator applies topology-aware donor scaling.
+    Other vLLM/TRT-LLM DeepEP backends may use the physical full-node
+    ``(ep=gpus_per_node, node_num=1)`` row, while SGLang HT keeps its legacy
+    normalized ``(ep=8, node_num=1)`` coordinate from PR #1314. The query
+    engine marks every substitution as estimated.
     """
     if (moe_ep_size, expected_nodes) in pairs:
         return True
+    if comm_backend == "deepep_ll":
+        # LL Stage 1 calibrates any target topology from a same-H/K/N
+        # single-domain curve. GB legacy rows are EP4 while HGX rows are EP8,
+        # so the donor coordinate is intentionally not hardcoded.
+        return any(node_num == 1 for _ep_size, node_num in pairs)
     if comm_backend not in _DEEPEP_NODE1_FALLBACK_BACKENDS or expected_nodes <= 1:
         return False
     if framework == "sglang":
@@ -176,6 +187,7 @@ def resolve_model_config_moe_comm(
         resolved = {}
     if coverage_snapshot is None and family in LARGE_EP_READY_FAMILIES and database is not None:
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
+        ll_compute_probe = getattr(database, "moe_compute_coverage", None)
         for phase in dict.fromkeys(required_phases):
             a2a = (
                 a2a_probe(
@@ -198,8 +210,25 @@ def resolve_model_config_moe_comm(
                 quant_mode=model_config.moe_quant_mode,
                 phase=phase,
             )
+            ll_compute_eps = (
+                ll_compute_probe(
+                    shape.hidden_size,
+                    shape.moe_inter_size,
+                    shape.topk,
+                    shape.num_experts,
+                    model_config.moe_quant_mode,
+                    deepep_ll_workload_distribution(family, model_config.workload_distribution),
+                )
+                if ll_compute_probe is not None
+                else set()
+            )
             for comm_backend, backend_spec in MOE_A2A_BACKENDS.items():
                 if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
+                    continue
+                if comm_backend == "deepep_ll" and model_config.enable_eplb:
+                    # DeepEP-LL + EPLB is intentionally unsupported in Stage
+                    # 1. Prune it during coverage resolution instead of
+                    # admitting a configuration that fails only at runtime.
                     continue
                 if backend_name == "trtllm" and int(model_config.attention_dp_size or 1) <= 1:
                     # Keep parity with Task._resolve_moe_comm_backend: TRT-LLM
@@ -215,7 +244,7 @@ def resolve_model_config_moe_comm(
                         expected_nodes=expected_nodes,
                         gpus_per_node=gpus_per_node,
                     )
-                    and moe_ep_size in compute_eps
+                    and moe_ep_size in (ll_compute_eps if comm_backend == "deepep_ll" else compute_eps)
                     and backend_spec.feasible(
                         topk=shape.topk,
                         num_experts=shape.num_experts,

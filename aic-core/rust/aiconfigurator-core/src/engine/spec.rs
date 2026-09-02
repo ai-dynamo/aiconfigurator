@@ -574,6 +574,8 @@ mod tests {
             node_num: 2,
             sms: 24,
             attention_tp_size: 2,
+            workload_distribution: "power_law_1.01".into(),
+            enable_eplb: true,
         }
     }
 

@@ -42,6 +42,14 @@ from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, commun
 LARGE_EP_READY_FAMILIES = frozenset({"MOE", "DEEPSEEK", "DEEPSEEKV32", "KIMIK25"})
 
 
+def deepep_ll_workload_distribution(model_family: str, base: str = "power_law") -> str:
+    """Distribution key emitted by the Stage-1 LL fused-MoE predictor."""
+    if base != "power_law":
+        return base
+    alpha = 1.2 if model_family == "MOE" else 1.01
+    return f"power_law_{alpha}"
+
+
 @dataclass(frozen=True)
 class MoEBlockShape:
     """Checkpoint-level shape of a model's MoE block(s).
@@ -425,8 +433,10 @@ def _default_moe_block_ops(
 def _dispatch_dtype(comm_backend: str, quant_mode, *, system: str | None, inference_phase: str) -> str:
     """Comm-table dtype key for the prepare/dispatch phases.
 
-    DeepEP rows have no dtype axis — the adapted tables key everything under
-    ``"default"`` (moe_comm.py ``_adapt_legacy_deepep``). The trtllm nvlink
+    DeepEP-LL decode dispatches FP8 activations plus scale metadata. Legacy
+    rows still have no dtype axis, so the Rust calibration resolver may map
+    this explicit ``"fp8"`` request to their sole ``"default"`` slice.
+    DeepEP-HT keeps the legacy ``"default"`` key. The trtllm nvlink
     rows key the run's ``moe_dtype`` string, i.e. the ``MoEQuantMode`` member
     name (``_adapt_legacy_trtllm_alltoall`` passes the parquet string through
     and the legacy loader spells it via ``MoEQuantMode[...]``); ``fp8_block``
@@ -445,7 +455,9 @@ def _dispatch_dtype(comm_backend: str, quant_mode, *, system: str | None, infere
 def _combine_dtype(comm_backend: str, quant_mode, inference_phase: str, *, system: str | None) -> str:
     """Comm-table dtype key for the combine phase.
 
-    DeepEP: ``"default"`` (no dtype axis). nvlink: the adapted tables pin the
+    DeepEP-LL decode combine returns BF16 activations. Legacy rows still
+    resolve through their sole ``"default"`` slice. DeepEP-HT remains
+    ``"default"``. nvlink: the adapted tables pin the
     low-precision combine kernel under ``"fp4"``; the legacy graph enables it
     only in GENERATION for nvfp4 runs (``use_low_precision_combine=
     (moe_quant_mode == nvfp4)``, deepseek.py:1005-1011) while the context
@@ -586,6 +598,8 @@ def _large_ep_block_ops(
         # parallelism contributes to that attention width just like TP does;
         # generation remains unsharded here.
         "attention_tp_size": cfg.tp_size * cfg.cp_size if is_deepep and is_context else 1,
+        "workload_distribution": workload_distribution,
+        "enable_eplb": cfg.enable_eplb,
     }
 
     # Routed path: router GEMM (spec section 4.4.4 — always emitted here; the
@@ -616,24 +630,47 @@ def _large_ep_block_ops(
                 **a2a_kwargs,
             )
         )
-    routed_ops.append(
-        ops.MoEExpertCompute(
-            f"{prefix}_moe",
-            scale_factor,
-            hidden_size=shape.hidden_size,
-            inter_size=shape.moe_inter_size,
-            topk=shape.topk,
-            num_experts=shape.num_experts,
-            moe_ep_size=cfg.moe_ep_size,
-            quant_mode=quant_mode,
-            workload_distribution=workload_distribution,
-            attention_dp_size=cfg.attention_dp_size,
-            inference_phase=inference_phase,
-            num_slots=cfg.wideep_num_slots or None,
-            is_gated=shape.is_gated,
-            enable_eplb=cfg.enable_eplb and is_deepep,
+    if comm_backend == "deepep_ll":
+        # LL decode uses the ordinary fused-MoE predictor at the model's
+        # existing power-law curve. The surrounding MoEAllToAll ops already
+        # represent dispatch/combine, so no ordinary EP pre/post-dispatch ops
+        # are emitted and compute is not skew-amplified a second time.
+        routed_ops.append(
+            ops.MoE(
+                f"{prefix}_moe",
+                scale_factor,
+                shape.hidden_size,
+                shape.moe_inter_size,
+                shape.topk,
+                shape.num_experts,
+                cfg.moe_tp_size,
+                cfg.moe_ep_size,
+                quant_mode,
+                workload_distribution,
+                cfg.attention_dp_size,
+                is_context=is_context,
+                is_gated=shape.is_gated,
+            )
         )
-    )
+    else:
+        routed_ops.append(
+            ops.MoEExpertCompute(
+                f"{prefix}_moe",
+                scale_factor,
+                hidden_size=shape.hidden_size,
+                inter_size=shape.moe_inter_size,
+                topk=shape.topk,
+                num_experts=shape.num_experts,
+                moe_ep_size=cfg.moe_ep_size,
+                quant_mode=quant_mode,
+                workload_distribution=workload_distribution,
+                attention_dp_size=cfg.attention_dp_size,
+                inference_phase=inference_phase,
+                num_slots=cfg.wideep_num_slots or None,
+                is_gated=shape.is_gated,
+                enable_eplb=cfg.enable_eplb and is_deepep,
+            )
+        )
     routed_ops.append(
         ops.MoEAllToAll(
             f"{prefix}_moe_combine",

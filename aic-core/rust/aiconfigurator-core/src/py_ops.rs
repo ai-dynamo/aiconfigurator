@@ -2103,7 +2103,7 @@ impl PyMoEAllToAll {
     const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, *, phase, comm_backend, hidden_size, topk, num_experts, moe_ep_size, node_num, comm_dtype="default", sms=0, attention_tp_size=1))]
+    #[pyo3(signature = (name, scale_factor, *, phase, comm_backend, hidden_size, topk, num_experts, moe_ep_size, node_num, comm_dtype="default", sms=0, attention_tp_size=1, workload_distribution="power_law_1.2", enable_eplb=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -2118,6 +2118,8 @@ impl PyMoEAllToAll {
         comm_dtype: &str,
         sms: u32,
         attention_tp_size: u32,
+        workload_distribution: &str,
+        enable_eplb: bool,
     ) -> PyResult<(Self, PyOperation)> {
         let inner = Op::MoeAllToAll(crate::operators::MoeAllToAllOp {
             name,
@@ -2132,6 +2134,8 @@ impl PyMoEAllToAll {
             node_num,
             sms,
             attention_tp_size,
+            workload_distribution: workload_distribution.to_string(),
+            enable_eplb,
         });
         Ok((PyMoEAllToAll, PyOperation { inner }))
     }
@@ -2153,6 +2157,8 @@ impl PyMoEAllToAll {
         kwargs.set_item("comm_dtype", o.comm_dtype.clone())?;
         kwargs.set_item("sms", o.sms)?;
         kwargs.set_item("attention_tp_size", o.attention_tp_size)?;
+        kwargs.set_item("workload_distribution", o.workload_distribution.clone())?;
+        kwargs.set_item("enable_eplb", o.enable_eplb)?;
         Ok((args, kwargs))
     }
 
@@ -2204,6 +2210,16 @@ impl PyMoEAllToAll {
     #[getter(_attention_tp_size)]
     fn attention_tp_size(slf: PyRef<'_, Self>) -> PyResult<u32> {
         Ok(slf.as_super().moe_a2a()?.attention_tp_size)
+    }
+
+    #[getter(_workload_distribution)]
+    fn workload_distribution(slf: PyRef<'_, Self>) -> PyResult<String> {
+        Ok(slf.as_super().moe_a2a()?.workload_distribution.clone())
+    }
+
+    #[getter(_enable_eplb)]
+    fn enable_eplb(slf: PyRef<'_, Self>) -> PyResult<bool> {
+        Ok(slf.as_super().moe_a2a()?.enable_eplb)
     }
 }
 

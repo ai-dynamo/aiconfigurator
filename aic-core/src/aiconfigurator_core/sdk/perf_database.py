@@ -45,6 +45,38 @@ def _factor_message_size(size: int) -> tuple[int, int]:
     return x, per_token
 
 
+def _moe_a2a_dtype_candidates(
+    available_dtypes: Iterable[str],
+    required_dtype: str | None,
+    phase: str,
+    comm_backend: str,
+) -> list[str]:
+    """Return the shape-local A2A dtype fallback chain used by coverage.
+
+    DeepEP-LL's legacy ``default`` rows carry a known physical dtype rather
+    than an arbitrary wildcard: FP8 for dispatch and BF16 for combine.
+    """
+    available = list(available_dtypes)
+    if required_dtype is None:
+        return available
+    names: list[str] = []
+
+    def add(name: str) -> None:
+        if name in available and name not in names:
+            names.append(name)
+
+    add(required_dtype)
+    if required_dtype == "fp8_block":
+        add("fp8")
+    default_matches = required_dtype == "default" or (
+        comm_backend == "deepep_ll"
+        and (phase, required_dtype) in {("dispatch", "fp8"), ("dispatch", "fp8_block"), ("combine", "bfloat16")}
+    )
+    if default_matches or (comm_backend != "deepep_ll" and available == ["default"]):
+        add("default")
+    return names
+
+
 SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
 INCOMPLETE_MARKER = "INCOMPLETE.txt"
 # Structured provenance markers (Collector V3 design §5/§6.3), yaml-first with the
@@ -2748,9 +2780,12 @@ class PerfDatabase:
         Returns ``comm_backend -> {(ep_size, node_num)}`` where BOTH the
         dispatch AND combine phases carry a non-empty token curve for the
         shape. When model quantization and inference phase are supplied, each
-        phase must exist under the exact serving communication dtype; omitted
-        arguments preserve the legacy ANY-dtype introspection behavior. SMS
-        remains an ANY axis and prepare is not required. Read-only key walk over the table bound by
+        phase must exist under the serving communication dtype or an explicit
+        alias. DeepEP-LL additionally permits only its phase-compatible legacy
+        ``default`` row and requires a viable OLS or one-shot calibration;
+        omitted arguments preserve ANY-dtype introspection. SMS remains an ANY
+        axis for other backends and is fixed to zero for DeepEP-LL. Prepare is
+        not required. Read-only key walk over the table bound by
         ``MoEAllToAll.load_data`` — no query execution, and non-vivifying
         (``.get`` only: injected stores may be auto-vivifying defaultdicts).
         An absent or unloaded table — including a ``LoadedOpData`` wrapping
@@ -2768,15 +2803,85 @@ class PerfDatabase:
         if not table:
             return {}
 
-        def pairs_for(by_phase, phase: str, required_dtype: str | None) -> set[tuple[int, int]]:
+        def pairs_for(
+            by_phase,
+            phase: str,
+            required_dtype: str | None,
+            comm_backend: str,
+        ) -> set[tuple[int, int]]:
+            import math
+            import statistics
+
             pairs: set[tuple[int, int]] = set()
             by_dtype = by_phase.get(phase) or {}
-            dtype_slices = by_dtype.values() if required_dtype is None else (by_dtype.get(required_dtype) or {},)
+
+            def latency(leaf) -> float:
+                value = leaf.get("latency") if isinstance(leaf, dict) else leaf
+                return float(value)
+
+            def ols(curve) -> tuple[float, float] | None:
+                if len(curve) < 2:
+                    return None
+                points = [(float(tokens), latency(leaf)) for tokens, leaf in curve.items()]
+                if not all(math.isfinite(x) and math.isfinite(y) for x, y in points):
+                    return None
+                mean_x = sum(x for x, _ in points) / len(points)
+                mean_y = sum(y for _, y in points) / len(points)
+                variance_x = sum((x - mean_x) ** 2 for x, _ in points)
+                covariance = sum((x - mean_x) * (y - mean_y) for x, y in points)
+                if not math.isfinite(variance_x) or variance_x <= 0:
+                    return None
+                slope = covariance / variance_x
+                intercept = mean_y - slope * mean_x
+                if not math.isfinite(slope) or slope <= 0 or not math.isfinite(intercept):
+                    return None
+                return slope, max(intercept, 0.0)
+
+            names = _moe_a2a_dtype_candidates(by_dtype, required_dtype, phase, comm_backend)
+            system_t0 = None
+            if comm_backend == "deepep_ll":
+                # A direct legacy request still has a known physical dtype for
+                # each LL phase; prefer an equivalent typed row when deduping
+                # the system-wide OLS pool.
+                pool_names = list(names)
+                if required_dtype == "default":
+                    typed = {"dispatch": "fp8", "combine": "bfloat16"}.get(phase)
+                    if typed in by_dtype:
+                        pool_names = [typed, *[name for name in pool_names if name != typed]]
+                unique_intercepts = {}
+                for name in pool_names:
+                    for ep_size, by_node in (by_dtype.get(name) or {}).items():
+                        for node_num, by_hidden in by_node.items():
+                            for hidden, by_topk in by_hidden.items():
+                                for selected_topk, by_experts in by_topk.items():
+                                    for experts, by_sms in by_experts.items():
+                                        curve = by_sms.get(0) or {}
+                                        identity = (ep_size, node_num, hidden, selected_topk, experts, 0)
+                                        if identity not in unique_intercepts and (fit := ols(curve)) is not None:
+                                            unique_intercepts[identity] = fit[1]
+                intercepts = list(unique_intercepts.values())
+                if intercepts:
+                    system_t0 = statistics.median(intercepts)
+
+            def viable(curve) -> bool:
+                if ols(curve) is not None:
+                    return True
+                if comm_backend != "deepep_ll" or len(curve) != 1 or system_t0 is None:
+                    return False
+                ((tokens, leaf),) = curve.items()
+                measured = latency(leaf)
+                return tokens > 0 and math.isfinite(measured) and measured > system_t0
+
+            dtype_slices = (by_dtype[name] for name in names)
             for by_ep in dtype_slices:
                 for ep_size, by_node in by_ep.items():
                     for node_num, by_hidden in by_node.items():
                         by_sms = ((by_hidden.get(hidden_size) or {}).get(topk) or {}).get(num_experts) or {}
-                        if any(by_sms.values()):  # ANY sms with a non-empty token curve
+                        if comm_backend == "deepep_ll":
+                            covered = viable(by_sms.get(0) or {})
+                        else:
+                            covered = any(by_sms.values())
+                        if covered:
                             pairs.add((ep_size, node_num))
             return pairs
 
@@ -2800,8 +2905,8 @@ class PerfDatabase:
                     }
                 except ValueError:
                     continue
-            covered = pairs_for(by_phase, "dispatch", required["dispatch"]) & pairs_for(
-                by_phase, "combine", required["combine"]
+            covered = pairs_for(by_phase, "dispatch", required["dispatch"], comm_backend) & pairs_for(
+                by_phase, "combine", required["combine"], comm_backend
             )
             if covered:
                 coverage[comm_backend] = covered
@@ -2842,6 +2947,38 @@ class PerfDatabase:
                     covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
         return covered
 
+    def moe_compute_coverage(
+        self,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str = "power_law_1.2",
+    ) -> set[int]:
+        """Return ordinary fused-MoE EP coverage for a DeepEP-LL shape.
+
+        Stage 1 uses the standard :class:`MoE` predictor for LL expert
+        compute, not the wide-EP ``MoeExpertCompute`` table. Coverage follows
+        the ordinary predictor's distribution resolution:
+        use the requested model curve (for example ``power_law_1.01`` or
+        ``power_law_1.2``), then its existing ``uniform`` fallback. An
+        unrelated power-law curve must not enable a candidate that would miss
+        when queried.
+        """
+        from aiconfigurator_core.sdk.operations.moe import MoE
+
+        MoE.load_data(self)
+        table = self._moe_data
+        if not table:
+            return set()
+        by_distribution = table.get(quant_mode) or {}
+        by_topk = by_distribution.get(workload_distribution) or by_distribution.get("uniform") or {}
+        by_hidden = ((by_topk.get(topk) or {}).get(num_experts) or {}).get(hidden_size) or {}
+        by_tp = by_hidden.get(inter_size) or {}
+        by_ep = by_tp.get(1) or {}  # large-EP resolution requires pure EP
+        return {ep_size for ep_size, tokens in by_ep.items() if tokens}
+
     def legacy_moe_compute_coverage(
         self,
         hidden_size: int,
@@ -2853,7 +2990,7 @@ class PerfDatabase:
         """Return EP sizes covered by the regular expert-kernel MoE table.
 
         vLLM and TensorRT-LLM publish expert compute in ``moe_perf.parquet``
-        rather than the WideEP-specific compute tables.  This probe is used
+        rather than the WideEP-specific compute tables. This probe is used
         only to gate the compute leg of a graph whose communication is already
         owned by :class:`MoEAllToAll`; it does not enable the legacy
         ``MoEDispatch``/NCCL graph.

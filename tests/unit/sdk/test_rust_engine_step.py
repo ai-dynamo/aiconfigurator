@@ -1205,8 +1205,12 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
             "node_num",
             "sms",
             "attention_tp_size",
+            "workload_distribution",
+            "enable_eplb",
         }
     )
+    assert a2a_spec["MoeAllToAll"]["workload_distribution"] == "power_law_1.2"
+    assert a2a_spec["MoeAllToAll"]["enable_eplb"] is False
 
     ep = MoEExpertCompute(
         "context_moe",
@@ -1258,29 +1262,12 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     assert fields["is_gated"] is True and fields["enable_eplb"] is True
 
 
-def _h200_sglang_wideep_paths() -> list[str]:
-    from aiconfigurator.sdk.operations.base import resolve_op_data_path
-
-    return [
-        resolve_op_data_path(str(_SYSTEMS_DATA_ROOT / "h200_sxm"), "sglang", "0.5.6.post2", filename)
-        for filename in (
-            "wideep_deepep_normal_perf.parquet",
-            "wideep_deepep_ll_perf.parquet",
-            "wideep_context_moe_perf.parquet",
-            "wideep_generation_moe_perf.parquet",
-            "wideep_context_mla_perf.parquet",
-            "wideep_generation_mla_perf.parquet",
-        )
-    ]
-
-
-@pytest.mark.skipif(
-    not all(os.path.exists(p) for p in _h200_sglang_wideep_paths()),
-    reason="shipped h200_sxm sglang wideEP parquets not present",
-)
 def test_large_ep_op_graph_compiles_natively(caplog):
-    """AIC-1601 (PR 2.5): the large-EP ops (MoEAllToAll / MoEExpertCompute) now have
-    Rust op constructors and wire mirrors, so a large-EP model compiles
+    """Large-EP communication and both compute predictors compile natively.
+
+    Context/HT retains ``MoEExpertCompute``; generation/LL uses ordinary
+    fused ``MoE`` in Stage 1. Both have Rust constructors and wire mirrors, so
+    the model compiles
     into the Rust engine natively — the documented Python-step fallback this
     test used to pin is retired. A rust-routed static run must answer with
     the scalar engine-step keys and match the Python step on the same
@@ -1293,7 +1280,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import get_database
 
-    # A shipped-data large-EP config: DeepSeek-R1 EP32 on h200/sglang, the
+    # A shipped-data large-EP config: DeepSeek-R1 EP32 on GB200/sglang. The
+    # database resolver follows the approved moe-family reuse.yaml donors for
+    # ordinary/wide compute instead of requiring physical files in 0.5.12.
+    # It also carries the
     # per-phase comm backends + node width the enumerator would set, and the
     # legacy wideEP quant set (fp8_block MLA slices, fp8 KV cache).
     cfg = ModelConfig(
@@ -1307,13 +1297,13 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
         fmha_quant_mode=common.FMHAQuantMode.fp8_block,
         moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
-        num_gpus_per_node=8,
+        num_gpus_per_node=4,
     )
     model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
     # Current slot: the wideEP tables backfill from their 0.5.6.post2/0.5.9/
     # 0.5.10/0.5.12 sole-source dirs while gemm/attention resolve on the
     # primary — the production large-EP query shape.
-    database = get_database("h200_sxm", "sglang", "0.5.14")
+    database = get_database("gb200", "sglang", "0.5.14")
 
     # (1) The op graph compiles into an EngineSpec carrying the tagged
     # large-EP variants, with the per-phase comm backends the config set.
@@ -1321,7 +1311,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         build_engine_spec_json(
             model,
             model_path="deepseek-ai/DeepSeek-R1",
-            system="h200_sxm",
+            system="gb200",
             backend="sglang",
             backend_version="0.5.14",
             kv_block_size=None,
@@ -1333,11 +1323,18 @@ def test_large_ep_op_graph_compiles_natively(caplog):
     for phase_ops, comm_backend in ((spec["context_ops"], "deepep_ht"), (spec["generation_ops"], "deepep_ll")):
         a2a_fields = [op["MoeAllToAll"] for op in phase_ops if "MoeAllToAll" in op]
         ep_fields = [op["MoeExpertCompute"] for op in phase_ops if "MoeExpertCompute" in op]
-        assert a2a_fields and ep_fields, "the compiled spec must carry the large-EP variants"
+        moe_fields = [op["Moe"] for op in phase_ops if "Moe" in op]
+        assert a2a_fields, "the compiled spec must carry the large-EP communication variants"
         assert {fields["comm_backend"] for fields in a2a_fields} == {comm_backend}
+        assert all(fields["workload_distribution"] == "power_law_1.01" for fields in a2a_fields)
+        assert all(fields["enable_eplb"] is False for fields in a2a_fields)
         # Production graphs never pin a kernel: it crosses as null and the
         # Rust op auto-resolves per backend at query time.
-        assert all(fields["kernel_source"] is None for fields in ep_fields)
+        if comm_backend == "deepep_ht":
+            assert ep_fields and not moe_fields
+            assert all(fields["kernel_source"] is None for fields in ep_fields)
+        else:
+            assert moe_fields and not ep_fields
 
     rust_engine_step._engine_handle_cache_clear()
     try:
@@ -1382,9 +1379,11 @@ def test_large_ep_op_graph_compiles_natively(caplog):
 
 @pytest.mark.integration
 def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_parser, monkeypatch, caplog):
-    """The production-shaped EP32/node8 request must identify the EP8/node1
-    silicon rows the Rust query actually used, while keeping generic per-op
-    source tags as ``estimated``."""
+    """The production-shaped request reports each backend's actual donor row.
+
+    DeepEP-HT keeps its historical EP8/node1 donor, while DeepEP-LL uses the
+    physical four-GPU NVLink domain represented by the GB200 node1 rows.
+    """
     import logging
 
     from aiconfigurator.cli.api import cli_estimate
@@ -1448,7 +1447,8 @@ def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_p
             _run_estimate_mode(args)
         result = captured_results[0]
 
-        expected = (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
+        generation_fallback = MoECommFallback("generation", "deepep_ll", 32, 8, 4, 1)
+        expected = (_CONTEXT_FALLBACK, generation_fallback)
         assert result.moe_comm_fallbacks == expected
         assert result.summary is not None
         assert result.summary.get_moe_comm_fallbacks() == expected
@@ -1457,6 +1457,10 @@ def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_p
         assert (
             "Estimated MoE communication latency used fallback silicon data: "
             "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data." in caplog.messages
+        )
+        assert (
+            "Estimated MoE communication latency used fallback silicon data: "
+            "generation/deepep_ll: requested EP32/node8; using EP4/node1 silicon data." in caplog.messages
         )
 
         config = ModelConfig(
@@ -1523,7 +1527,7 @@ def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_p
 
         detail = format_estimate_detail_report(result, detail="source")
         assert "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data" in detail
-        assert "generation/deepep_ll: requested EP32/node8; using EP8/node1 silicon data" in detail
+        assert "generation/deepep_ll: requested EP32/node8; using EP4/node1 silicon data" in detail
 
     finally:
         rust_engine_step._engine_handle_cache_clear()

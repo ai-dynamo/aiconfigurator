@@ -17,8 +17,9 @@
 //!   (`_validate_a2a_request`, moe_comm.py:419-424) — Python raises
 //!   `ValueError`, so this is a hard config error, NOT a data miss.
 //! - the mode gate: SOL/SOL_FULL/EMPIRICAL have no estimation tier for this
-//!   family (moe_comm.py:610-614) and HYBRID's empirical leg is the same
-//!   raise (:639-643). See [`MoeAllToAllOp::query`].
+//!   family (moe_comm.py:610-614). HYBRID uses a valid DeepEP-LL calibration,
+//!   but reports `EmpiricalNotImplemented` after all LL calibration candidates
+//!   are exhausted. See [`MoeAllToAllOp::query`].
 //!
 //! `scale_factor` multiplies the resolved latency, exactly like every sibling
 //! op (moe_comm.py:674-678).
@@ -28,6 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::common::enums::DatabaseMode;
 use crate::common::error::AicError;
 use crate::operators::base::{MoeCommFallback, PerformanceResult, Source};
+use crate::operators::moe_ll_monte_carlo::{
+    self, LlCalibrationMode, LlCommPhase, MonteCarloRequest, RoutingDistribution,
+};
 use crate::perf_database::PerfDatabase;
 
 /// The `MOE_A2A_BACKENDS` registry knowledge the operator layer needs:
@@ -99,6 +103,72 @@ fn default_comm_dtype() -> String {
     "default".to_string()
 }
 
+fn default_workload_distribution() -> String {
+    "power_law_1.2".to_string()
+}
+
+fn deepep_ll_payload_bytes(phase: &str, hidden_size: u32) -> Result<(LlCommPhase, u64), AicError> {
+    match phase {
+        "dispatch" => {
+            if hidden_size % 128 != 0 {
+                return Err(AicError::InvalidEngineConfig(format!(
+                    "DeepEP-LL FP8 dispatch requires hidden_size divisible by 128, got {hidden_size}"
+                )));
+            }
+            Ok((
+                LlCommPhase::Dispatch,
+                u64::from(hidden_size) + 4 * u64::from(hidden_size / 128) + 16,
+            ))
+        }
+        "combine" => Ok((LlCommPhase::Combine, 2 * u64::from(hidden_size))),
+        _ => Err(AicError::InvalidEngineConfig(format!(
+            "DeepEP-LL payload is undefined for phase {phase:?}"
+        ))),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DeepepLlTopology {
+    nvl_domain_size: u32,
+    nvl_bandwidth: f64,
+    ib_bandwidth: f64,
+}
+
+fn deepep_ll_topology(
+    spec: &crate::common::system_spec::SystemSpec,
+    moe_ep_size: u32,
+) -> DeepepLlTopology {
+    let physical_node_width = spec.node.num_gpus_per_node.max(1);
+    let rack_width = spec.node.num_gpus_per_rack;
+    let nvl_domain_size = rack_width
+        .unwrap_or(physical_node_width)
+        .min(moe_ep_size)
+        .max(1);
+    let nvl_bandwidth = if rack_width.is_some() {
+        spec.node.intra_node_bw.min(spec.node.inter_node_bw)
+    } else {
+        spec.node.intra_node_bw
+    };
+    let ib_bandwidth = if moe_ep_size > nvl_domain_size {
+        rack_width
+            .and_then(|_| spec.node.inter_rack_bw)
+            .unwrap_or(spec.node.inter_node_bw)
+    } else {
+        0.0
+    };
+    DeepepLlTopology {
+        nvl_domain_size,
+        nvl_bandwidth,
+        ib_bandwidth,
+    }
+}
+
+fn deepep_ll_p50_latency(intercept_ms: f64, p50_variable_ms: f64) -> f64 {
+    // The estimate contains only the variable/path term. Startup is added
+    // once after Monte Carlo and therefore cannot be amplified by skew.
+    intercept_ms + p50_variable_ms
+}
+
 /// One comm phase of the unified large-EP all-to-all (Python
 /// `MoEAllToAll`; one op instance per phase).
 ///
@@ -117,8 +187,9 @@ pub struct MoeAllToAllOp {
     pub comm_backend: String,
     /// Payload dtype of THIS phase (dispatch and combine may differ). The
     /// table resolves it exact-first, then the `fp8_block` -> `fp8`
-    /// behavioral alias, then the sole collected dtype. Python default
-    /// `"default"` (moe_comm.py:497) — the legacy DeepEP key.
+    /// behavioral alias, then a physically compatible DeepEP-LL legacy
+    /// `default` key (dispatch=FP8, combine=BF16). Python default `"default"`
+    /// (moe_comm.py:497) — the legacy DeepEP key.
     #[serde(default = "default_comm_dtype")]
     pub comm_dtype: String,
     pub hidden_size: u32,
@@ -134,6 +205,16 @@ pub struct MoeAllToAllOp {
     /// (moe_comm.py:499).
     #[serde(default = "crate::operators::gemm::default_seq_split")]
     pub attention_tp_size: u32,
+    /// Routing-skew model used only by DeepEP-LL. Model-owned names such as
+    /// `power_law_1.01` preserve their alpha; bare/unknown power-law names
+    /// intentionally use the Stage-1 default 1.2.
+    #[serde(default = "default_workload_distribution")]
+    pub workload_distribution: String,
+    /// DeepEP-LL placement-aware EPLB requires collector routing traces and
+    /// the Stage-4 real-distribution model, so it is deliberately rejected in
+    /// Stage 1. Other backends retain their existing behavior.
+    #[serde(default)]
+    pub enable_eplb: bool,
 }
 
 impl MoeAllToAllOp {
@@ -178,6 +259,20 @@ impl MoeAllToAllOp {
                     self.comm_backend, self.phase
                 )))
             }
+        }
+        if self.comm_backend == "deepep_ll" {
+            return self.query_deepep_ll(db, tokens).map_err(|err| {
+                if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
+                    AicError::EmpiricalNotImplemented(format!(
+                        "HYBRID has no usable DeepEP-LL empirical calibration for {}/{} after \
+                         exact-topology, compatible-dtype, one-shot, and single-domain donor \
+                         resolution. Calibration miss: {err}",
+                        self.comm_backend, self.phase
+                    ))
+                } else {
+                    err
+                }
+            });
         }
         let exact_shape = db.moe_a2a.has_shape(
             &self.comm_backend,
@@ -243,6 +338,93 @@ impl MoeAllToAllOp {
         } else {
             Ok(result)
         }
+    }
+
+    /// Stage-1 DeepEP-LL estimator. The measured curve provides `t0` and the
+    /// fitted variable-time candidate. Exact-topology curves receive only the
+    /// Monte Carlo routing-skew factor; a single-domain donor additionally
+    /// compares that candidate with topology-spec NVLink/MNVL and IB times.
+    /// See `docs/DEEPEP_LL_MODELING.md`, sections 8-10.
+    fn query_deepep_ll(
+        &self,
+        db: &PerfDatabase,
+        tokens: u32,
+    ) -> Result<PerformanceResult, AicError> {
+        if self.enable_eplb {
+            return Err(AicError::InvalidEngineConfig(
+                "DeepEP-LL + EPLB is unsupported in Stage 1; placement-aware routing is a Stage 4 TODO"
+                    .to_string(),
+            ));
+        }
+        let (phase, payload_bytes) = deepep_ll_payload_bytes(&self.phase, self.hidden_size)?;
+        let spec = &db.system_spec;
+        let physical_node_width = spec.node.num_gpus_per_node.max(1);
+        let calibration = db.moe_a2a.deepep_ll_calibration(
+            &self.phase,
+            &self.comm_dtype,
+            self.moe_ep_size,
+            self.node_num,
+            self.hidden_size,
+            self.topk,
+            self.num_experts,
+            tokens,
+            physical_node_width,
+        )?;
+
+        // GB200/GB300 expose an NVL72 rack domain in SystemSpec; HGX systems
+        // expose only the physical-node NVLink domain. NVLink/MNVL and IB are
+        // independent paths, and each bandwidth is single-direction.
+        let topology = deepep_ll_topology(spec, self.moe_ep_size);
+        let fitted_variable_ms = (calibration.base_latency_ms - calibration.intercept_ms).max(0.0);
+        let distribution = RoutingDistribution::from_workload_name(&self.workload_distribution);
+        let (calibration_mode, nvl_bandwidth, ib_bandwidth) = if calibration.source.is_donor() {
+            (
+                LlCalibrationMode::SingleDomainDonor,
+                topology.nvl_bandwidth,
+                topology.ib_bandwidth,
+            )
+        } else {
+            // Exact measured curves must not depend on advertised path
+            // bandwidth. Zeroing these fields also makes the cache key
+            // independent of SystemSpec bandwidth for this mode.
+            (LlCalibrationMode::ExactTopology, 0.0, 0.0)
+        };
+        let latency_ms = if calibration_mode == LlCalibrationMode::ExactTopology
+            && distribution == RoutingDistribution::Balanced
+        {
+            // Strictly balanced exact routing has alpha_comm=1. Preserve the
+            // measured/interpolated anchor verbatim even for a noisy curve
+            // whose point happens to fall below the fitted OLS intercept.
+            calibration.base_latency_ms
+        } else {
+            let p50_variable_ms = moe_ll_monte_carlo::estimate(MonteCarloRequest {
+                phase,
+                calibration_mode,
+                per_rank_tokens: tokens,
+                num_ranks: self.moe_ep_size,
+                topk: self.topk,
+                num_experts: self.num_experts,
+                nvl_domain_size: topology.nvl_domain_size,
+                distribution,
+                payload_bytes,
+                fitted_variable_ms_bits: fitted_variable_ms.to_bits(),
+                nvl_bandwidth_bits: nvl_bandwidth.to_bits(),
+                ib_bandwidth_bits: ib_bandwidth.to_bits(),
+            })?;
+            deepep_ll_p50_latency(calibration.intercept_ms, p50_variable_ms)
+        };
+        let mut result =
+            PerformanceResult::new(latency_ms, Source::Estimated).scaled(self.scale_factor);
+        if calibration.source.is_fallback() {
+            result = result.with_moe_comm_fallback(MoeCommFallback {
+                comm_backend: "deepep_ll",
+                requested_ep_size: self.moe_ep_size,
+                requested_node_num: self.node_num,
+                measurement_ep_size: calibration.measurement_ep_size,
+                measurement_node_num: calibration.measurement_node_num,
+            });
+        }
+        Ok(result)
     }
 
     fn silicon_latency_at(
@@ -427,12 +609,14 @@ mod tests {
                 a2a_row("deepep_ht", "combine", 63, 6300.0),
                 a2a_row("deepep_ht", "combine", 64, 6400.0),
                 // an LL (generation) backend carrying the same token points.
+                a2a_row("deepep_ll", "dispatch", 32, 32000.0),
                 a2a_row("deepep_ll", "dispatch", 63, 63000.0),
                 a2a_row("deepep_ll", "dispatch", 64, 64000.0),
                 // Legacy node-1 DeepEP substitute (the unified adapter stores
                 // these rows at EP=8 regardless of the requested target EP).
                 a2a_row_at("deepep_ht", "dispatch", 8, 1, 20, 64, 1280.0),
                 a2a_row_at("deepep_ht", "combine", 8, 1, 20, 64, 2560.0),
+                a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 63, 12601.0),
                 a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 64, 12800.0),
                 a2a_row_at("trtllm_deepep_ht", "dispatch", 8, 1, 20, 64, 5120.0),
                 a2a_row_at("trtllm_deepep_ll", "dispatch", 8, 1, 0, 64, 25600.0),
@@ -459,7 +643,160 @@ mod tests {
             node_num: 2,
             sms: 0,
             attention_tp_size,
+            workload_distribution: "power_law_1.2".into(),
+            enable_eplb: false,
         }
+    }
+
+    #[test]
+    fn deepep_ll_phase_payloads_match_fp8_dispatch_and_bf16_combine() {
+        assert_eq!(
+            deepep_ll_payload_bytes("dispatch", 7168).unwrap(),
+            (LlCommPhase::Dispatch, 7_408)
+        );
+        assert_eq!(
+            deepep_ll_payload_bytes("combine", 7168).unwrap(),
+            (LlCommPhase::Combine, 14_336)
+        );
+        assert!(deepep_ll_payload_bytes("dispatch", 7169).is_err());
+    }
+
+    #[test]
+    fn deepep_ll_topology_distinguishes_nvl72_cross_rack_and_hgx_ib() {
+        let gb = crate::common::system_spec::SystemSpec::load(&systems_root().join("gb200.yaml"))
+            .unwrap();
+        let within_rack = deepep_ll_topology(&gb, 72);
+        assert_eq!(within_rack.nvl_domain_size, 72);
+        assert_eq!(within_rack.ib_bandwidth, 0.0);
+        let cross_rack = deepep_ll_topology(&gb, 128);
+        assert_eq!(cross_rack.nvl_domain_size, 72);
+        assert_eq!(cross_rack.ib_bandwidth, gb.node.inter_rack_bw.unwrap());
+
+        let h200 =
+            crate::common::system_spec::SystemSpec::load(&systems_root().join("h200_sxm.yaml"))
+                .unwrap();
+        let cross_node = deepep_ll_topology(&h200, 16);
+        assert_eq!(cross_node.nvl_domain_size, 8);
+        assert_eq!(cross_node.ib_bandwidth, h200.node.inter_node_bw);
+    }
+
+    #[test]
+    fn deepep_ll_exact_and_interpolated_tokens_are_both_estimated() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let ll = op("dispatch", "deepep_ll", 1);
+        let exact = ll.query(&db, 64).unwrap();
+        let interpolated = ll.query(&db, 48).unwrap();
+        assert_eq!(exact.source, Source::Estimated);
+        assert_eq!(interpolated.source, Source::Estimated);
+        assert!(exact.latency_ms > 0.0);
+        assert!(interpolated.latency_ms > 0.0);
+        assert_ne!(exact.latency_ms, interpolated.latency_ms);
+    }
+
+    #[test]
+    fn deepep_ll_balanced_exact_topology_reproduces_the_measured_curve() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut ll = op("dispatch", "deepep_ll", 1);
+        ll.workload_distribution = "balanced".into();
+        let got = ll.query(&db, 64).unwrap();
+        assert!((got.latency_ms - 64.0).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert!(got.moe_comm_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn deepep_ll_balanced_exact_preserves_noisy_point_below_ols_intercept() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_moe_a2a_parquet(
+            &tmp.path().join("moe_a2a_perf.parquet"),
+            &[
+                // Positive OLS slope, but the middle measured point is below
+                // the fitted intercept. Balanced exact must still return it.
+                a2a_row_at("deepep_ll", "dispatch", 16, 2, 0, 1, 200.0),
+                a2a_row_at("deepep_ll", "dispatch", 16, 2, 0, 2, 10.0),
+                a2a_row_at("deepep_ll", "dispatch", 16, 2, 0, 3, 210.0),
+            ],
+        );
+        let mut db = PerfDatabase::load(&systems_root(), "h200_sxm", "sglang", "0.5.6.post2")
+            .unwrap()
+            .with_mode(DatabaseMode::Silicon, TransferPolicy::ALL);
+        db.tables_mut().moe_a2a = MoeA2aTable::new(tmp.path().to_path_buf());
+        let mut ll = op("dispatch", "deepep_ll", 1);
+        ll.workload_distribution = "balanced".into();
+
+        let got = ll.query(&db, 2).unwrap();
+        assert!((got.latency_ms - 0.010).abs() < 1e-12, "got {got:?}");
+    }
+
+    #[test]
+    fn deepep_ll_exact_one_shot_is_estimated_and_records_fallback_provenance() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_moe_a2a_parquet(
+            &tmp.path().join("moe_a2a_perf.parquet"),
+            &[
+                // Exact one-point curve: 16us borrowed startup + 1us/token.
+                a2a_row("deepep_ll", "dispatch", 64, 80.0),
+                // Same-system multi-point curve supplies t0=16us.
+                a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 1, 17.0),
+                a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 2, 18.0),
+            ],
+        );
+        let mut db = PerfDatabase::load(&systems_root(), "h200_sxm", "sglang", "0.5.6.post2")
+            .unwrap()
+            .with_mode(DatabaseMode::Silicon, TransferPolicy::ALL);
+        db.tables_mut().moe_a2a = MoeA2aTable::new(tmp.path().to_path_buf());
+        let mut ll = op("dispatch", "deepep_ll", 1);
+        ll.workload_distribution = "balanced".into();
+
+        let got = ll.query(&db, 64).unwrap();
+        assert!((got.latency_ms - 0.080).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "deepep_ll",
+                requested_ep_size: 16,
+                requested_node_num: 2,
+                measurement_ep_size: 16,
+                measurement_node_num: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn deepep_ll_single_domain_donor_keeps_topology_guardrails_and_provenance() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut ll = op("dispatch", "deepep_ll", 1);
+        ll.workload_distribution = "balanced".into();
+        ll.moe_ep_size = 32;
+        ll.node_num = 4;
+        let got = ll.query(&db, 64).unwrap();
+        assert!(got.latency_ms > 0.0);
+        assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
+                comm_backend: "deepep_ll",
+                requested_ep_size: 32,
+                requested_node_num: 4,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn deepep_ll_eplb_fails_explicitly_in_stage1() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut ll = op("dispatch", "deepep_ll", 1);
+        ll.enable_eplb = true;
+        let err = ll.query(&db, 64).unwrap_err();
+        assert!(matches!(err, AicError::InvalidEngineConfig(message) if message.contains("EPLB")));
+    }
+
+    #[test]
+    fn deepep_ll_startup_is_added_once_not_skew_scaled() {
+        assert_eq!(deepep_ll_p50_latency(0.02, 0.25), 0.27);
     }
 
     // -----------------------------------------------------------------
@@ -479,14 +816,13 @@ mod tests {
             .query(&db, 128)
             .expect("context dispatch");
         assert!((ctx.latency_ms - 0.640).abs() < 1e-12, "got {ctx:?}");
-        // x = 64, tp = 1 -> 64 tokens on the LL curve -> 64000us.
+        // x = 64, tp = 1 -> 64 tokens calibrates the LL model. Unlike HT,
+        // every LL exact token hit still passes through Monte Carlo.
         let generation = op("dispatch", "deepep_ll", 1)
             .query(&db, 64)
             .expect("generation dispatch");
-        assert!(
-            (generation.latency_ms - 64.0).abs() < 1e-12,
-            "got {generation:?}"
-        );
+        assert_eq!(generation.source, Source::Estimated);
+        assert!(generation.latency_ms > 0.0, "got {generation:?}");
         // A tp=2 generation op would halve the key: 32 tokens is UNCOLLECTED
         // on the LL curve (points 63/64), so the boundary-hold value differs
         // from the 64-token point — the divide is observable either way.
@@ -615,7 +951,15 @@ mod tests {
         fallback.node_num = 8;
         fallback.sms = 0;
         let got = fallback.query(&db, 64).expect("node-1 fallback");
-        assert!((got.latency_ms - 12.800).abs() < 1e-12, "got {got:?}");
+        // DeepEP-LL donor rows are calibration anchors, not direct latency
+        // answers: Stage 1 applies Monte Carlo skew plus topology-spec floors.
+        // Dedicated LL tests pin that formula; this framework-integration
+        // test only requires a finite donor estimate that is no faster than
+        // the 12.8 ms single-domain anchor.
+        assert!(
+            got.latency_ms.is_finite() && got.latency_ms >= 12.800,
+            "got {got:?}"
+        );
         assert_eq!(got.source, Source::Estimated);
         assert_eq!(
             got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
@@ -875,6 +1219,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deepep_ll_hybrid_uses_calibration_and_only_converts_terminal_data_miss() {
+        let (_tmp, hybrid) = synthetic_db(DatabaseMode::Hybrid);
+        let mut ll = op("dispatch", "deepep_ll", 1);
+        ll.workload_distribution = "balanced".into();
+        assert!(ll.query(&hybrid, 64).is_ok());
+
+        ll.hidden_size = 4096;
+        let miss = ll.query(&hybrid, 64);
+        assert!(
+            matches!(&miss, Err(AicError::EmpiricalNotImplemented(message))
+                if message.contains("no usable DeepEP-LL empirical calibration")),
+            "got {miss:?}"
+        );
+
+        let (_tmp, silicon) = synthetic_db(DatabaseMode::Silicon);
+        let silicon_miss = ll.query(&silicon, 64);
+        assert!(matches!(silicon_miss, Err(AicError::PerfDatabase(_))));
+
+        ll.enable_eplb = true;
+        assert!(matches!(
+            ll.query(&hybrid, 64),
+            Err(AicError::InvalidEngineConfig(_))
+        ));
+    }
+
     /// The registry check precedes the mode gate (moe_comm.py:600 vs :610):
     /// an invalid backend under EMPIRICAL is still the `ValueError`.
     #[test]
@@ -888,7 +1258,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Serde defaults (Python ctor defaults, moe_comm.py:497-499)
+    // Serde defaults (Python ctor defaults, including LL Stage-1 fields)
     // -----------------------------------------------------------------
 
     #[test]
@@ -908,6 +1278,8 @@ mod tests {
         assert_eq!(op.comm_dtype, "default");
         assert_eq!(op.sms, 0);
         assert_eq!(op.attention_tp_size, 1);
+        assert_eq!(op.workload_distribution, "power_law_1.2");
+        assert!(!op.enable_eplb);
     }
 
     // -----------------------------------------------------------------
@@ -1025,10 +1397,21 @@ mod tests {
                 node_num: u32_of("node_num"),
                 sms: u32_of("sms"),
                 attention_tp_size: u32_of("attention_tp_size"),
+                workload_distribution: "power_law_1.2".into(),
+                enable_eplb: false,
             };
             let got = op
                 .query(db, u32_of("x"))
                 .unwrap_or_else(|err| panic!("oracle sample {sample} must resolve: {err}"));
+            if op.comm_backend == "deepep_ll" {
+                // The Python oracle predates Stage 1 and returns the raw
+                // table curve. Rust now deliberately routes exact and
+                // interpolated LL points through Monte Carlo.
+                assert_eq!(got.source, Source::Estimated, "sample {sample}");
+                assert!(got.latency_ms > 0.0, "sample {sample}");
+                checked += 1;
+                continue;
+            }
             let want = sample["latency_ms"].as_f64().expect("latency_ms");
             assert!(
                 want > 0.0,

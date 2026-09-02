@@ -1824,6 +1824,8 @@ mod tests {
                 node_num,
                 sms: 0,
                 attention_tp_size: 1,
+                workload_distribution: "power_law_1.2".into(),
+                enable_eplb: false,
             })
         };
         let spec = EngineSpec::new(config, Vec::new(), vec![a2a(32, 8), a2a(64, 16)]);
@@ -1843,8 +1845,8 @@ mod tests {
         assert_eq!(
             generation[0].4,
             Some((
-                ("generation", "deepep_ll", 32, 8, 8, 1),
-                vec![("generation", "deepep_ll", 64, 16, 8, 1)],
+                ("generation", "deepep_ll", 32, 8, 4, 1),
+                vec![("generation", "deepep_ll", 64, 16, 4, 1)],
             ))
         );
     }

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-labelledby="title desc">
+  <title id="title">GB200 DeepEP-LL measured latency and OLS fits</title>
+  <desc id="desc">Dispatch and combine latency measurements for hidden size 7168, top-k 8, 256 experts, with linear regression lines.</desc>
+  <rect width="960" height="520" fill="#ffffff"/>
+  <text x="480" y="26" text-anchor="middle" font-family="sans-serif" font-size="18" font-weight="600">GB200 DeepEP-LL: H=7168, K=8, N=256, EP=4</text>
+  <g stroke="#d8dee9" stroke-width="1">
+    <path d="M80 440H900 M80 351.1H900 M80 262.2H900 M80 173.3H900 M80 84.4H900"/>
+    <path d="M80 40V440 M285 40V440 M490 40V440 M695 40V440 M900 40V440"/>
+  </g>
+  <g stroke="#20242a" stroke-width="1.5">
+    <path d="M80 40V440H900" fill="none"/>
+  </g>
+  <g fill="#4b5563" font-family="sans-serif" font-size="12">
+    <text x="70" y="444" text-anchor="end">0</text>
+    <text x="70" y="355" text-anchor="end">40</text>
+    <text x="70" y="266" text-anchor="end">80</text>
+    <text x="70" y="177" text-anchor="end">120</text>
+    <text x="70" y="88" text-anchor="end">160</text>
+    <text x="80" y="462" text-anchor="middle">0</text>
+    <text x="285" y="462" text-anchor="middle">256</text>
+    <text x="490" y="462" text-anchor="middle">512</text>
+    <text x="695" y="462" text-anchor="middle">768</text>
+    <text x="900" y="462" text-anchor="middle">1024</text>
+    <text x="490" y="493" text-anchor="middle" font-size="14">Per-rank source tokens</text>
+    <text x="20" y="240" text-anchor="middle" font-size="14" transform="rotate(-90 20 240)">Latency (µs)</text>
+  </g>
+  <path d="M80 404.6 L900 191.9" fill="none" stroke="#2563eb" stroke-width="2.5"/>
+  <path d="M80 402.5 L900 66.6" fill="none" stroke="#dc2626" stroke-width="2.5"/>
+  <g fill="#2563eb" stroke="#ffffff" stroke-width="1.2">
+    <circle cx="80.8" cy="403.2" r="4"/><circle cx="81.6" cy="402.6" r="4"/>
+    <circle cx="83.2" cy="402.1" r="4"/><circle cx="86.4" cy="401.2" r="4"/>
+    <circle cx="92.8" cy="400.1" r="4"/><circle cx="105.6" cy="397.4" r="4"/>
+    <circle cx="131.2" cy="391.9" r="4"/><circle cx="182.5" cy="380.3" r="4"/>
+    <circle cx="285" cy="356.7" r="4"/><circle cx="490" cy="300.9" r="4"/>
+    <circle cx="900" cy="189.1" r="4"/>
+  </g>
+  <g fill="#dc2626" stroke="#ffffff" stroke-width="1.2">
+    <circle cx="80.8" cy="399.7" r="4"/><circle cx="81.6" cy="400.9" r="4"/>
+    <circle cx="83.2" cy="399.8" r="4"/><circle cx="86.4" cy="398.5" r="4"/>
+    <circle cx="92.8" cy="398.7" r="4"/><circle cx="105.6" cy="396.9" r="4"/>
+    <circle cx="131.2" cy="382.3" r="4"/><circle cx="182.5" cy="359.5" r="4"/>
+    <circle cx="285" cy="318.3" r="4"/><circle cx="490" cy="235.6" r="4"/>
+    <circle cx="900" cy="66.0" r="4"/>
+  </g>
+  <g font-family="sans-serif" font-size="13">
+    <rect x="105" y="52" width="370" height="63" rx="5" fill="#ffffff" stroke="#cbd5e1"/>
+    <path d="M121 72H151" stroke="#2563eb" stroke-width="2.5"/><circle cx="136" cy="72" r="4" fill="#2563eb"/>
+    <text x="160" y="76" fill="#1f2937">dispatch: y = 0.0934x + 15.935 µs, β_fit = 634.3 GB/s</text>
+    <path d="M121 96H151" stroke="#dc2626" stroke-width="2.5"/><circle cx="136" cy="96" r="4" fill="#dc2626"/>
+    <text x="160" y="100" fill="#1f2937">combine: y = 0.1476x + 16.861 µs, β_fit = 776.8 GB/s</text>
+  </g>
+</svg>

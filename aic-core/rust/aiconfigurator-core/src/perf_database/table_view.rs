@@ -1269,6 +1269,7 @@ pub fn view_moe_a2a(
     legacy_normal: &[PrioritizedSource],
     legacy_ll: &[PrioritizedSource],
     legacy_trtllm_alltoall: &[PrioritizedSource],
+    legacy_ll_gpus_per_node: u32,
 ) -> Result<Option<ViewNode>, AicError> {
     let mut root = ViewNode::branch();
     let mut any_loaded = false;
@@ -1283,6 +1284,7 @@ pub fn view_moe_a2a(
             &tier.legacy_normal,
             &tier.legacy_ll,
             &tier.legacy_trtllm_alltoall,
+            legacy_ll_gpus_per_node,
         )? {
             root.merge_fill(tier_root);
             any_loaded = true;
@@ -1299,12 +1301,14 @@ fn view_moe_a2a_tier(
     legacy_normal: &[PerfSource],
     legacy_ll: &[PerfSource],
     legacy_trtllm_alltoall: &[PerfSource],
+    legacy_ll_gpus_per_node: u32,
 ) -> Result<Option<ViewNode>, AicError> {
     let mut root = ViewNode::branch();
     let mut legacy_loaded = false;
 
     // _adapt_legacy_deepep (normal -> deepep_ht with the 4-way µs split; ll ->
-    // deepep_ll with per-phase averages). ep_size = node_num * 8, dtype "default".
+    // deepep_ll with per-phase averages). Legacy LL EP uses the physical
+    // system node width; HT retains its historical eight-GPU adapter.
     for (legacy_sources, comm_backend, phase_columns) in [
         (
             legacy_normal,
@@ -1341,11 +1345,19 @@ fn view_moe_a2a_tier(
                     latency_us += ctx.row.f64(r.col(column)?)?;
                 }
                 let latency = latency_us / 1000.0;
+                let ep_size = if comm_backend == "deepep_ll" {
+                    crate::perf_database::moe_a2a::legacy_deepep_ll_ep_size(
+                        node_num,
+                        legacy_ll_gpus_per_node,
+                    )
+                } else {
+                    crate::perf_database::moe_a2a::legacy_deepep_ep_size(node_num)
+                };
                 let path = [
                     comm_backend.to_string(),
                     phase.to_string(),
                     crate::perf_database::moe_a2a::LEGACY_DEEPEP_DTYPE.to_string(),
-                    crate::perf_database::moe_a2a::legacy_deepep_ep_size(node_num).to_string(),
+                    ep_size.to_string(),
                     node_num.to_string(),
                     ctx.row.u32(r.col("hidden_size")?)?.to_string(),
                     ctx.row.u32(r.col("num_topk")?)?.to_string(),
@@ -2507,6 +2519,7 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
             &prioritized_src("wideep_deepep_normal_perf.parquet")?,
             &prioritized_src("wideep_deepep_ll_perf.parquet")?,
             &prioritized_src("trtllm_alltoall_perf.parquet")?,
+            tables.system_spec.node.num_gpus_per_node,
         )?,
         "_moe_ep_data" => view_moe_expert_compute(
             &src("moe_expert_compute_perf.parquet")?,
