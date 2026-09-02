@@ -1722,7 +1722,7 @@ def draw_pareto_to_string(
             keys "df", "label", "color", "marker" similar to ``series``.
     """
 
-    plotext.plot_size(80, 30)
+    plotext.plotsize(80, 30)
     plotext.theme("clear")
 
     palette = [

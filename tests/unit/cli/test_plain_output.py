@@ -10,6 +10,7 @@ import sys
 from unittest.mock import MagicMock
 
 import pandas as pd
+import plotext
 import pytest
 
 from aiconfigurator.cli.report_and_save import (
@@ -76,7 +77,9 @@ def test_colored_formatter_force_no_color_disables_colors():
 
 
 @pytest.mark.parametrize("use_ansi", [True, False])
-def test_draw_pareto_to_string(use_ansi):
+def test_draw_pareto_to_string(monkeypatch, use_ansi):
+    plotsize = MagicMock(wraps=plotext.plotsize)
+    monkeypatch.setattr(plotext, "plotsize", plotsize)
     setup_logging(no_color=not use_ansi)
     df = pd.DataFrame({"tokens/s/user": [1.0, 2.0], "tokens/s/gpu_cluster": [10.0, 20.0]})
     out = draw_pareto_to_string(
@@ -84,6 +87,7 @@ def test_draw_pareto_to_string(use_ansi):
         [{"df": df, "label": "a"}],
         highlight={"df": df.head(1), "label": "best"},
     )
+    plotsize.assert_called_once_with(80, 30)
     assert (_ESC in out) == use_ansi
 
 
