@@ -188,19 +188,19 @@
     },
     "wideep_sglang::decode_step": {
       "engine": "rust",
-      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
+      "git_head": "5a07a67905fcd99fc93bc2951bda6a13140364e3"
     },
     "wideep_sglang::mixed_step": {
       "engine": "rust",
-      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
+      "git_head": "5a07a67905fcd99fc93bc2951bda6a13140364e3"
     },
     "wideep_sglang::static_ctx": {
       "engine": "rust",
-      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
+      "git_head": "5a07a67905fcd99fc93bc2951bda6a13140364e3"
     },
     "wideep_sglang::static_gen": {
       "engine": "rust",
-      "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
+      "git_head": "5a07a67905fcd99fc93bc2951bda6a13140364e3"
     },
     "wideep_trtllm::static_ctx": {
       "engine": "rust",
@@ -255,10 +255,10 @@
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::mixed_step": 11.641467399954287,
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::static_ctx": 11.095808703250695,
     "qwen3-30b-a3b-b200-vllm-isl1024-osl2::static_gen": 2.935499428684405,
-    "wideep_sglang::decode_step": 11.229328650354006,
-    "wideep_sglang::mixed_step": 104.03654358645551,
-    "wideep_sglang::static_ctx": 100.62218918767189,
-    "wideep_sglang::static_gen": 30.43431689973646,
+    "wideep_sglang::decode_step": 18.280983653308724,
+    "wideep_sglang::mixed_step": 166.08675117503486,
+    "wideep_sglang::static_ctx": 159.23352020631503,
+    "wideep_sglang::static_gen": 51.560485655836516,
     "wideep_trtllm::static_ctx": 81.1084122560448,
     "wideep_trtllm::static_gen": 50.115260968358655
   }
