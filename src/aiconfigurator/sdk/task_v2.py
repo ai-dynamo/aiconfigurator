@@ -495,6 +495,51 @@ def _lookup_num_gpus_per_node(system_name: str) -> int | None:
 # Task
 # ---------------------------------------------------------------------------
 
+# Fields that _build_recommend_tasks (cli/api.py) must reset to None when
+# rebuilding a Task at a different GPU budget, so Task.__post_init__ re-derives
+# them at the new budget rather than carrying forward stale single-node values.
+#
+# Encoder and AFD candidates are intentionally excluded: encoder_tp can be
+# pinned by the caller and AFD dimensions do not participate in recommend
+# escalation.  Keep this set in sync with _resolve_agg_search /
+# _resolve_disagg_search whenever new budget-sensitive fields are added.
+TASK_REBUILD_FIELDS: frozenset[str] = frozenset(
+    {
+        # Agg search space
+        "agg_num_gpu_candidates",
+        "agg_tp_candidates",
+        "agg_pp_candidates",
+        "agg_dp_candidates",
+        "agg_moe_tp_candidates",
+        "agg_moe_ep_candidates",
+        "agg_cp_candidates",
+        # Disagg prefill search space
+        "prefill_num_gpu_candidates",
+        "prefill_tp_candidates",
+        "prefill_pp_candidates",
+        "prefill_dp_candidates",
+        "prefill_moe_tp_candidates",
+        "prefill_moe_ep_candidates",
+        "prefill_cp_candidates",
+        # Disagg decode search space
+        "decode_num_gpu_candidates",
+        "decode_tp_candidates",
+        "decode_pp_candidates",
+        "decode_dp_candidates",
+        "decode_moe_tp_candidates",
+        "decode_moe_ep_candidates",
+        "decode_cp_candidates",
+        # Non-candidate fields also resolved by __post_init__ from total_gpus.
+        # Without resetting these, _apply_total_gpus_budget carries forward the
+        # old node-sized ceiling (e.g. max_gpu_per_replica=8) and disagg
+        # escalation is silently defeated at every larger budget.
+        "max_gpu_per_replica",
+        "num_gpu_per_replica",
+        "max_prefill_workers",
+        "max_decode_workers",
+    }
+)
+
 
 @dataclass
 class Task:
@@ -1604,7 +1649,7 @@ class Task:
         if self.serving_mode == "agg":
             self._resolve_agg_search()
         else:
-            self._resolve_disagg_search()
+            self._resolve_disagg_search(defaulted)
         self._apply_large_pipeline_parallel(defaulted)
         self._apply_total_gpus_budget()
 
@@ -1689,7 +1734,13 @@ class Task:
 
         if not self._is_moe:
             blackwell = self.system_name in ("gb200", "gb300")
-            wide = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
+            base = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
+            # Extend to the full GPU budget so _build_recommend_tasks escalation
+            # actually explores new configs (e.g. tp=32 at budget=32).
+            # _apply_total_gpus_budget trims agg_num_gpu_candidates afterward;
+            # tp_candidates must also include budget values since num_gpu == tp
+            # for dense (dp=1, moe_ep=1).
+            wide = sorted(set(base) | {n for n in [16, 32, 64] if self.total_gpus and n <= self.total_gpus})
             _set("agg_num_gpu_candidates", wide)
             _set("agg_tp_candidates", wide)
             _set("agg_pp_candidates", [1])
@@ -1726,6 +1777,14 @@ class Task:
         else:
             x = [1, 2, 4, 8, 16] if self._is_moe else [1, 2, 4, 8]
             fused = {"num_gpu": x, "tp": x, "pp": [1], "dp": x, "moe_tp": x, "moe_ep": x}
+
+        # Extend num_gpu to cover the full escalation budget on fused paths so
+        # _build_recommend_tasks escalation at budget 32/64 actually reaches new
+        # configs.  tp/dp/ep stay at fused defaults — they bound per-dimension
+        # parallelism and combining them (e.g. tp=8, dp=4) already reaches 32 GPUs.
+        # _apply_total_gpus_budget trims the list to <= total_gpus afterward.
+        if self.total_gpus is not None:
+            fused["num_gpu"] = sorted(set(fused["num_gpu"]) | {n for n in [32, 64] if n <= self.total_gpus})
 
         # Large-EP ladder, offered when the perf data covers this model shape on
         # this system (no flag): the single task explores BOTH regimes, so the
@@ -1771,7 +1830,7 @@ class Task:
         for dim, values in fused.items():
             _set(f"agg_{dim}_candidates", values)
 
-    def _resolve_disagg_search(self) -> None:
+    def _resolve_disagg_search(self, defaulted: set[str]) -> None:
         def _lists(wide: bool) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
             return build_disagg_parallel_lists(
                 backend_name=self.prefill_backend_name,
@@ -1807,6 +1866,21 @@ class Task:
                     }
                     src = {dim: sorted(set(values) | set(ladder.get(dim, []))) for dim, values in src.items()}
             self._fill_role_search(role, src)
+
+        # Extend per-worker num_gpu candidates to the full escalation budget on
+        # fused (non-large-EP) paths — same rationale as the agg fix above.
+        # Only extend fields the user did not supply (same contract as _set in
+        # _resolve_agg_search): a user-pinned candidate list wins unchanged.
+        # _apply_total_gpus_budget trims both fields to <= total_gpus afterward.
+        if self.total_gpus is not None:
+            for _field in ("prefill_num_gpu_candidates", "decode_num_gpu_candidates"):
+                if _field not in defaulted:
+                    continue
+                _current = getattr(self, _field)
+                if _current is not None:
+                    _extras = {n for n in [32, 64] if n <= self.total_gpus}
+                    if _extras:
+                        setattr(self, _field, sorted(set(_current) | _extras))
 
         # Replica defaults. Keyed on the resolved CANDIDATES, not on coverage:
         # a user list that pins the search to fused tuples (e.g. moe_ep=[1])

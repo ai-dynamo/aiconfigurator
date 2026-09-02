@@ -44,7 +44,7 @@ from aiconfigurator.sdk.speculative import (
 from aiconfigurator.sdk.speculative import (
     normalize_speculative_decoding as _normalize_nextn,
 )
-from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator.sdk.task_v2 import TASK_REBUILD_FIELDS, Task
 
 # Default per-phase latency-correction scales for single-point disagg estimates.
 # (Migrated from the legacy V1 task module; same values as Task's field defaults.)
@@ -383,23 +383,21 @@ _MAX_GPUS_PER_WORKER = 64
 
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
-    """Scale GPU candidates for recommend mode."""
-    import dataclasses
+    """Rebuild recommend tasks at a new GPU budget.
 
-    num_gpu_candidates = [1 << i for i in range(total_gpus.bit_length()) if (1 << i) <= total_gpus]
+    Resets every field listed in ``TASK_REBUILD_FIELDS`` to None, then
+    replaces ``total_gpus``.  This causes Task's ``__post_init__`` →
+    ``_resolve_agg_search`` / ``_resolve_disagg_search`` to recompute every
+    parallelism dimension at the new budget, preserving all backend-specific
+    and topology-specific caps (e.g. deepep_moe intra-node EP limits,
+    non-MoE pinned-to-1 dims) without any manual extension logic.
+    """
+    import dataclasses
 
     rebuilt = {}
     for name, task in base_tasks.items():
-        overrides = {
-            "total_gpus": total_gpus,
-            "agg_num_gpu_candidates": num_gpu_candidates,
-        }
-        if task.serving_mode == "disagg":
-            overrides.update(
-                prefill_num_gpu_candidates=num_gpu_candidates,
-                decode_num_gpu_candidates=num_gpu_candidates,
-            )
-        rebuilt[name] = dataclasses.replace(task, **overrides)
+        reset = {f.name: None for f in dataclasses.fields(task) if f.name in TASK_REBUILD_FIELDS}
+        rebuilt[name] = dataclasses.replace(task, total_gpus=total_gpus, **reset)
     return rebuilt
 
 
@@ -571,15 +569,36 @@ def cli_recommend(
         attention_backend=attention_backend,
     )
 
-    # Build escalation sequence: gpus_per_node, *2, *4, *8, capped at _MAX_GPUS_PER_WORKER.
-    budgets = [gpus_per_node]
+    # Build escalation sequence: *2, *4, *8 from gpus_per_node, capped at _MAX_GPUS_PER_WORKER.
+    # Attempt 0 uses base_tasks directly (already built at gpus_per_node — no rebuild needed).
+    escalation_budgets = []
     budget = gpus_per_node * 2
     while budget <= _MAX_GPUS_PER_WORKER:
-        budgets.append(budget)
+        escalation_budgets.append(budget)
         budget *= 2
 
-    result = None
-    for attempt, gpu_budget in enumerate(budgets):
+    result = _execute_and_wrap_result(
+        base_tasks,
+        mode="default",
+        top_n=top_n,
+        strict_sla=strict_sla,
+        target_request_rate=target_request_rate,
+        target_concurrency=target_concurrency,
+        parallel_experiments=True,
+    )
+    retriable = [
+        name
+        for name, outcome in result.outcomes.items()
+        if outcome.error is not None and is_gpu_retriable(outcome.error)
+    ]
+    for attempt, gpu_budget in enumerate(escalation_budgets):
+        if not retriable:
+            break
+        logger.info(
+            "Recommend: %s may fit at larger budget; escalating to %d GPUs.",
+            ", ".join(retriable),
+            gpu_budget,
+        )
         tasks = _build_recommend_tasks(base_tasks, gpu_budget)
         result = _execute_and_wrap_result(
             tasks,
@@ -595,13 +614,6 @@ def cli_recommend(
             for name, outcome in result.outcomes.items()
             if outcome.error is not None and is_gpu_retriable(outcome.error)
         ]
-        if not retriable or attempt == len(budgets) - 1:
-            break
-        logger.info(
-            "Recommend: %s may fit at larger budget; escalating to %d.",
-            ", ".join(retriable),
-            budgets[attempt + 1],
-        )
 
     if not result.best_configs:
         raise NoFeasibleConfigError("No feasible GPU configuration found for the given load target.")
