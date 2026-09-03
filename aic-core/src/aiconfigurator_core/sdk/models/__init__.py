@@ -184,6 +184,7 @@ from aiconfigurator_core.sdk.models.gemma4 import Gemma4MixModel
 from aiconfigurator_core.sdk.models.gpt import GPTModel
 from aiconfigurator_core.sdk.models.hybrid_moe import HybridMoEModel
 from aiconfigurator_core.sdk.models.llama import LLAMAModel
+from aiconfigurator_core.sdk.models.mistral3 import Mistral3Model
 from aiconfigurator_core.sdk.models.moe import MOEModel
 from aiconfigurator_core.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator_core.sdk.models.nemotron_nas import NemotronNas
@@ -200,6 +201,7 @@ __all__ = [
     "HybridMoEModel",
     "LLAMAModel",
     "MOEModel",
+    "Mistral3Model",
     "NemotronHModel",
     "NemotronNas",
     "Qwen3VLMoEModel",
