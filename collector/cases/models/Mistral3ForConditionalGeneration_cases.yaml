@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Mistral3ForConditionalGeneration
+model_path: mistralai/Mistral-Medium-3.5-128B
+include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
+framework_specific_base_ops:
+  # Pixtral ViT is head_dim=104. TensorRT-LLM has no FMHA kernel for that head
+  # size (raises "FMHA kernels are not found ... D : 104" on SM90), so it cannot
+  # run this vision encoder; only sglang and vllm collect it. Verified on
+  # 8xH200 (SM90), trtllm 1.3.0rc20, 2026-09-03.
+  sglang:
+    - encoder_attention
+  vllm:
+    - encoder_attention
+description: >
+  Mistral-Medium-3.5: dense GQA text decoder plus a Pixtral vision encoder.
+  The text attention row is the exact-hit profile (head_dim 128); the
+  encoder_attention row adds the Pixtral head_dim=104 grid that no base sweep
+  covers and which the SDK requires as an exact EncoderKey partition.
+
+model_case_values:
+  attention:
+    - id: mistral_medium_3_5_attention
+      model_path: mistralai/Mistral-Medium-3.5-128B
+      num_attention_heads: 96
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+  encoder_attention:
+    # Pixtral ViT: hidden 1664 / 16 heads -> head_dim 104. TP shards the head
+    # count to 16 // {1,2,4,8,16} = {16,8,4,2,1}; each is a single-GPU shape
+    # microbench crossed with the base encoder shape sweep.
+    - id: mistral_medium_3_5_encoder_attention
+      model_path: mistralai/Mistral-Medium-3.5-128B
+      num_attention_heads: 16
+      head_dim: 104
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
