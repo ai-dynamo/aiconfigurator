@@ -27,14 +27,21 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - name: Install and run cargo-deny
+      - name: Install cargo-deny
+        # Use a prebuilt binary instead of `cargo install cargo-deny@0.19.0`,
+        # which compiles cargo-deny and its dependency tree from source and
+        # currently fails building the transitive `tinyvec` crate under the
+        # runner's Rust toolchain (its `use alloc::vec::{self, Vec}` shadows the
+        # `vec!` macro, now a hard error). Same pinned version, no compile.
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-deny@0.19.0
+      - name: Run cargo-deny
         working-directory: aic-core/rust/aiconfigurator-core
         # Default log level (warn) surfaces "license inferred from file" notes
         # so any crate that may need a [[licenses.clarify]] entry is named.
         # --show-stats prints a per-license usage summary at the end.
-        run: |
-          cargo-deny --version || cargo install cargo-deny@0.19.0
-          cargo-deny --all-features check --show-stats licenses bans
+        run: cargo-deny --all-features check --show-stats licenses bans
 
   core-public-api-contract:
     name: aic-core public API contract
