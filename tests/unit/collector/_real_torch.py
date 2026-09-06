@@ -17,7 +17,11 @@ _real_torch: ModuleType | None = None
 
 @contextmanager
 def real_torch() -> Iterator[ModuleType]:
-    """Cache torch's native registrations and restore the caller's module entry."""
+    """Borrow torch, restoring any existing module entry on exit.
+
+    A first import remains registered when there was no previous entry. Removing
+    it would make a later ordinary import repeat torch's native registrations.
+    """
     global _real_torch
     previous = sys.modules.get("torch")
     try:
