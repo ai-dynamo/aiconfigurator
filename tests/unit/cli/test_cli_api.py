@@ -34,6 +34,7 @@ class _FakeRecommendTask:
     serving_mode: str = "agg"
     enable_wideep: bool = False
     moe_backend: str | None = None
+    recommend_done: bool | None = None
 
 
 class TestCLIEstimateUnit:
@@ -1048,6 +1049,7 @@ class TestCLIRecommendUnit:
         from aiconfigurator.sdk.errors import ExperimentOutcome, InsufficientMemoryError
 
         call_count = 0
+        captured_tasks = []
 
         def fake_build_default_tasks(**kwargs):
             return {"agg": _FakeRecommendTask()}
@@ -1055,6 +1057,7 @@ class TestCLIRecommendUnit:
         def fake_execute(tasks, mode, **kwargs):
             nonlocal call_count
             call_count += 1
+            captured_tasks.append(tasks)
             if call_count == 1:
                 oom = InsufficientMemoryError("model does not fit")
                 return ("none", {}, {}, {}, {}, {"agg": ExperimentOutcome("agg", error=oom)})
@@ -1070,6 +1073,10 @@ class TestCLIRecommendUnit:
         )
 
         assert call_count == 2
+        # Initial attempt: recommend_done=False (interim, escalation budgets available)
+        assert captured_tasks[0]["agg"].recommend_done is False
+        # Escalation attempt: recommend_done=True (final, this is the last budget)
+        assert captured_tasks[1]["agg"].recommend_done is True
 
     def test_escalation_ceiling(self, monkeypatch):
         import aiconfigurator.cli.api as api
