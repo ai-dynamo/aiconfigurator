@@ -8,6 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SUCCESSOR_URL = "https://github.com/ai-dynamo/aisimulate"
+RELEASES_URL = f"{SUCCESSOR_URL}/releases"
 MIGRATION_URL = "https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md"
 FIX_SCOPE = "bug, security, and migration-blocking fixes"
 pytestmark = pytest.mark.unit
@@ -29,12 +30,19 @@ def test_contributor_entry_points_enforce_the_transition_scope() -> None:
         assert SUCCESSOR_URL in content, path
         assert FIX_SCOPE in content, path
 
+    issue_config = _read(".github/ISSUE_TEMPLATE/config.yml")
+    assert SUCCESSOR_URL in issue_config
+
 
 def test_migration_install_is_gated_on_stable_artifact_publication() -> None:
     migration_guide = _read("docs/aisimulate_migration.md")
     assert "only after stable" in migration_guide
     assert "development releases do not satisfy this publication gate" in migration_guide
-    assert "https://github.com/ai-dynamo/aisimulate/releases" in migration_guide
+    assert RELEASES_URL in migration_guide
+
+    readme = _read("README.md")
+    assert "published on PyPI" in readme
+    assert RELEASES_URL in readme
 
 
 def test_python_package_metadata_names_the_successor() -> None:

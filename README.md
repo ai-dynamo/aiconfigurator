@@ -65,8 +65,11 @@ installing the latest supported AIC release:
 python -m pip install aiconfigurator
 ```
 
-After the stable AISimulate 0.12 artifacts are published, migrate the installed
-distribution while retaining the established `aiconfigurator` command:
+After the stable AISimulate 0.12 artifacts are published on PyPI and the
+corresponding release is announced in
+[AISimulate releases](https://github.com/ai-dynamo/aisimulate/releases), migrate
+the installed distribution while retaining the established `aiconfigurator`
+command:
 
 ```bash
 python -m pip uninstall -y aiconfigurator aiconfigurator-core
