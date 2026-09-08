@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SUCCESSOR_URL = "https://github.com/ai-dynamo/aisimulate"
@@ -30,8 +31,18 @@ def test_contributor_entry_points_enforce_the_transition_scope() -> None:
         assert SUCCESSOR_URL in content, path
         assert FIX_SCOPE in content, path
 
-    issue_config = _read(".github/ISSUE_TEMPLATE/config.yml")
-    assert SUCCESSOR_URL in issue_config
+    issue_config = yaml.safe_load(_read(".github/ISSUE_TEMPLATE/config.yml"))
+    assert issue_config["blank_issues_enabled"] is False
+    assert SUCCESSOR_URL in issue_config["contact_links"][0]["url"]
+    assert issue_config["contact_links"][1]["url"].endswith("/security/policy")
+
+    maintenance_form = yaml.safe_load(_read(".github/ISSUE_TEMPLATE/aic_maintenance_report.yml"))
+    assert SUCCESSOR_URL in maintenance_form["body"][0]["attributes"]["value"]
+    scope = next(field for field in maintenance_form["body"] if field.get("id") == "maintenance_scope")
+    assert scope["attributes"]["options"] == [
+        "Regression in previously supported AIC behavior",
+        "Blocker to migration from AIC to AISimulate",
+    ]
 
 
 def test_migration_install_is_gated_on_stable_artifact_publication() -> None:
