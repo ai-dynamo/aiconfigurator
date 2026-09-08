@@ -3,7 +3,6 @@
 
 """Exercise real tensor operations across repeated mock-preserving imports."""
 
-import importlib
 import sys
 from unittest.mock import MagicMock
 
@@ -25,9 +24,10 @@ def test_repeated_borrows_preserve_module_entry(monkeypatch, entry):
         with real_torch() as torch:
             assert sys.modules["torch"] is torch
             assert torch.arange(3).sum().item() == 3
-        assert sys.modules["torch"] is (torch if entry is None else entry)
         if entry is None:
-            assert importlib.import_module("torch") is torch
+            assert "torch" not in sys.modules
+        else:
+            assert sys.modules["torch"] is entry
 
 
 def test_borrow_restores_mock_when_body_raises(monkeypatch):

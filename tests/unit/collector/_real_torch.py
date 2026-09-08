@@ -13,17 +13,14 @@ from unittest.mock import MagicMock
 import pytest
 
 _real_torch: ModuleType | None = None
+_MISSING = object()
 
 
 @contextmanager
 def real_torch() -> Iterator[ModuleType]:
-    """Borrow torch, restoring any existing module entry on exit.
-
-    A first import remains registered when there was no previous entry. Removing
-    it would make a later ordinary import repeat torch's native registrations.
-    """
+    """Borrow torch, restoring the original module state on exit."""
     global _real_torch
-    previous = sys.modules.get("torch")
+    previous = sys.modules.get("torch", _MISSING)
     try:
         if _real_torch is None:
             if isinstance(previous, MagicMock):
@@ -35,5 +32,7 @@ def real_torch() -> Iterator[ModuleType]:
         sys.modules["torch"] = _real_torch
         yield _real_torch
     finally:
-        if previous is not None:
+        if previous is _MISSING:
+            sys.modules.pop("torch", None)
+        else:
             sys.modules["torch"] = previous
