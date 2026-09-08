@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+blank_issues_enabled: true
+contact_links:
+  - name: AISimulate features and new coverage
+    url: https://github.com/ai-dynamo/aisimulate/issues/new/choose
+    about: Propose new features, models, hardware, frameworks, and active product work in AISimulate.

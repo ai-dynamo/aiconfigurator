@@ -10,6 +10,14 @@ distribution and Sweeper workflows to AISimulate. The established
 `aiconfigurator` CLI command continues to work, while the legacy AIC
 distribution and direct Sweeper entry points emit targeted migration warnings.
 
+> [!IMPORTANT]
+> Run the replacement installation commands only after stable
+> `aisimulate==0.12.0` artifacts are published on PyPI and announced in the
+> [AISimulate releases](https://github.com/ai-dynamo/aisimulate/releases).
+> Until then, existing users should remain on the latest supported AIC release.
+> AISimulate development releases do not satisfy this publication gate and are
+> not the stable transition baseline.
+
 ## Install the replacement
 
 ```bash
@@ -64,3 +72,9 @@ Code installed from `aisimulate==0.12.0` may temporarily continue importing
 the migrated AIC namespace while it moves to the supported AISimulate APIs.
 Do not use that compatibility namespace for new integrations: it is retained
 only to make the one-release migration window non-breaking.
+
+## Maintainer repository cutover
+
+The code changes in this repository do not update GitHub settings or publish
+release artifacts. Before announcing the stable cutover, maintainers must
+complete the [AIC repository cutover checklist](../.github/AIC_MIGRATION_CHECKLIST.md).

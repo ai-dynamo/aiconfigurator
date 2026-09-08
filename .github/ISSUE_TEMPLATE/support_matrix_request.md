@@ -1,11 +1,18 @@
 ---
-name: Support Matrix Coverage Request
-about: Request support for a model, hardware, or framework combination
-title: "[Support Matrix] Request coverage for <model/hardware/framework>"
+name: AIC Compatibility Coverage Gap
+about: Report a regression or migration blocker for previously supported AIC coverage
+title: "[AIC Compatibility] Coverage gap for <model/hardware/framework>"
 labels: support-matrix
 ---
 
-## What coverage are you requesting?
+> [!IMPORTANT]
+> New model, hardware, and framework coverage belongs in
+> [AISimulate](https://github.com/ai-dynamo/aisimulate/issues). AIConfigurator
+> accepts only bug, security, and migration-blocking fixes during its
+> maintenance-only compatibility window. Continue here only if this combination
+> was already supported by AIC or the gap blocks migration to AISimulate.
+
+## What existing coverage regressed or blocks migration?
 
 **Model (HuggingFace ID):**
 <!-- e.g. meta-llama/Llama-4-Scout-17B-16E-Instruct -->
@@ -27,4 +34,4 @@ labels: support-matrix
 
 ## Additional context
 
-<!-- Any other details about your use case, urgency, or environment. -->
+<!-- Include the last working AIC version and evidence that the combination was supported, or explain exactly how the gap blocks AISimulate migration. -->
