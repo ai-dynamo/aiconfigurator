@@ -33,8 +33,9 @@ def test_contributor_entry_points_enforce_the_transition_scope() -> None:
 
     issue_config = yaml.safe_load(_read(".github/ISSUE_TEMPLATE/config.yml"))
     assert issue_config["blank_issues_enabled"] is False
-    assert SUCCESSOR_URL in issue_config["contact_links"][0]["url"]
-    assert issue_config["contact_links"][1]["url"].endswith("/security/policy")
+    contact_links = {link["name"]: link["url"] for link in issue_config["contact_links"]}
+    assert SUCCESSOR_URL in contact_links["AISimulate features and new coverage"]
+    assert contact_links["Report a security vulnerability"].endswith("/security/policy")
 
     maintenance_form = yaml.safe_load(_read(".github/ISSUE_TEMPLATE/aic_maintenance_report.yml"))
     assert SUCCESSOR_URL in maintenance_form["body"][0]["attributes"]["value"]
@@ -51,9 +52,11 @@ def test_migration_install_is_gated_on_stable_artifact_publication() -> None:
     assert "development releases do not satisfy this publication gate" in migration_guide
     assert RELEASES_URL in migration_guide
 
-    readme = _read("README.md")
-    assert "published on PyPI" in readme
-    assert RELEASES_URL in readme
+    readme = " ".join(_read("README.md").splitlines())
+    assert (
+        "After the stable AISimulate 0.12 artifacts are published on PyPI and the corresponding release "
+        f"is announced in [AISimulate releases]({RELEASES_URL}), migrate the installed distribution"
+    ) in readme
 
 
 def test_python_package_metadata_names_the_successor() -> None:
