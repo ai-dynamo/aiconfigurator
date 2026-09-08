@@ -8,10 +8,9 @@
 
 <!-- Select the single reason this change still belongs in the frozen AIC repository. -->
 
-- [ ] Bug fix to supported AIC behavior
+- [ ] Bug fix to supported AIC behavior, including corrective documentation or tests
 - [ ] Security fix (do not disclose vulnerabilities in a public PR)
-- [ ] Migration-blocking compatibility fix
-- [ ] Documentation or test correction with no new product behavior
+- [ ] Migration-blocking compatibility fix, including transition documentation or tests
 
 #### Overview:
 
