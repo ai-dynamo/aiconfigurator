@@ -725,7 +725,7 @@ class Task:
     # not a primitive value).
     predictor: Any = field(default=None, repr=False)
 
-    # ====== 10. AFD config (serving_mode='afd') ======
+    # ====== 9. AFD config (serving_mode='afd') ======
     afd_total_gpus: int | None = None  # AFD GPU budget (defaults to total_gpus)
     afd_combined_with_pd: bool = True
     afd_comm_overhead_factor: float = 1.0
@@ -757,6 +757,10 @@ class Task:
     afd_decode_degradation: float | None = None
     afd_ttft_correction_factor: float | None = None
     afd_decode_latency_correction: float = 1.0
+
+    # ====== 10. Recommend escalation context ======
+    # None=default mode, False=recommend interim, True=recommend final
+    recommend_done: bool | None = None
 
     # ====== 11. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
@@ -2719,6 +2723,7 @@ class Task:
             # Per-cell (per-replica) budget for the E+agg rate matching; a
             # plain agg row is a single worker and ignores it.
             "num_gpu_list": self._replica_num_gpu_list() if self.enable_epd else None,
+            "recommend_done": self.recommend_done,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database, encoder_database=None) -> dict[str, Any]:
@@ -2769,6 +2774,7 @@ class Task:
             "max_encoder_workers": self.max_encoder_workers,
             "encoder_latency_correction": self.encoder_latency_correction,
             "encoder_database": encoder_database,
+            "recommend_done": self.recommend_done,
         }
 
     def sweep_afd_kwargs(self, *, database) -> dict[str, Any]:
