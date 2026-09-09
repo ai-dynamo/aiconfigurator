@@ -1,36 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 from argparse import Namespace
-from unittest.mock import MagicMock
 
 import pytest
 
-_saved_mock = sys.modules.get("torch")
-_restore_mock = isinstance(_saved_mock, MagicMock)
-if _restore_mock:
-    sys.modules.pop("torch")
+from tests.unit.collector._real_torch import real_torch
 
-try:
-    import torch as _real_torch
-except ImportError:
-    if _restore_mock:
-        sys.modules["torch"] = _saved_mock
-    pytest.skip("real torch required for tensor operations", allow_module_level=True)
-
-try:
+with real_torch() as torch:
     from collector.sglang.collect_dsv4_megamoe import build_cases
     from collector.sglang.dsv4_megamoe_workload import (
         _sampled_power_law_xmax,
         build_routing_plan,
         parse_distribution,
     )
-finally:
-    if _restore_mock:
-        sys.modules["torch"] = _saved_mock
 
-torch = _real_torch
+
+@pytest.fixture(autouse=True)
+def _use_real_torch():
+    # Routing helpers import torch lazily while the other collector tests need a mock.
+    with real_torch():
+        yield
 
 
 @pytest.mark.unit
