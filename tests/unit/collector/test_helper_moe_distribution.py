@@ -46,6 +46,9 @@ finally:
 from collector.helper import (
     _generate_power_law_distribution,
     _round_robin_adjust_per_rank,
+    _router_logits_from_selected_experts,
+    balanced_logits,
+    power_law_logits_v3,
 )
 
 pytestmark = pytest.mark.unit
@@ -165,3 +168,25 @@ def test_power_law_distribution_assignment_shape():
     num_tokens, num_experts, topk, ep, alpha = 128, 8, 2, 2, 1.5
     _, assignments = _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha)
     assert assignments.shape == (num_tokens, topk)
+
+
+def test_int32_scatter_router_logits_are_bit_identical_to_legacy_one_hot():
+    import torch.nn.functional as functional
+
+    selected = torch.tensor([[0, 2, 2], [1, 3, 4], [0, 1, 4]], dtype=torch.int64)
+    actual = _router_logits_from_selected_experts(selected, 5)
+    expected = functional.softmax(functional.one_hot(selected, num_classes=5).sum(1).bfloat16(), dim=1)
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("use_eplb", [False, True])
+def test_router_logit_generators_do_not_materialize_one_hot(monkeypatch, use_eplb):
+    import torch.nn.functional as functional
+
+    def fail_one_hot(*_args, **_kwargs):
+        raise AssertionError("router logits must not materialize a one-hot cube")
+
+    monkeypatch.setattr(functional, "one_hot", fail_one_hot)
+    balanced_logits(128, 16, 4)
+    power_law_logits_v3(128, 16, 4, 4, 1.2, use_eplb=use_eplb, num_slots=16)

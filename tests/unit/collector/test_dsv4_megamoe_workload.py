@@ -25,6 +25,7 @@ try:
         _sampled_power_law_xmax,
         build_routing_plan,
         parse_distribution,
+        sampled_power_law_logits,
     )
 finally:
     if _restore_mock:
@@ -106,6 +107,40 @@ def test_sampled_power_law_builds_valid_routing_plan():
 
 
 @pytest.mark.unit
+def test_sampled_power_law_logits_do_not_materialize_one_hot(monkeypatch):
+    import torch.nn.functional as functional
+
+    def fail_one_hot(*_args, **_kwargs):
+        raise AssertionError("sampled routing must not materialize a one-hot cube")
+
+    monkeypatch.setattr(functional, "one_hot", fail_one_hot)
+    torch.manual_seed(123)
+    logits = sampled_power_law_logits(128, 64, 4, 8, 1.9)
+
+    assert logits.shape == (128, 64)
+    assert logits.dtype == torch.bfloat16
+
+
+@pytest.mark.unit
+def test_sampled_power_law_scatter_is_bit_identical_to_legacy_one_hot():
+    import torch.nn.functional as functional
+
+    from collector.sglang import dsv4_megamoe_workload as workload
+
+    torch.manual_seed(123)
+    actual = sampled_power_law_logits(128, 64, 4, 8, 1.9)
+
+    torch.manual_seed(123)
+    expert_weights = workload.sample_power_law(64, 1.9, 1, workload._sampled_power_law_xmax(128))
+    expert_weights = expert_weights.to(dtype=torch.float64, device="cpu").clamp_min(1e-20)
+    selected_experts = torch.multinomial(expert_weights.expand(128, -1).contiguous(), 4, replacement=False)
+    selected_experts = workload._swap_max_rank_to_rank0(selected_experts, num_experts=64, ep=8)
+    expected = functional.softmax(functional.one_hot(selected_experts, num_classes=64).sum(1).bfloat16(), dim=1)
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.unit
 def test_sampled_power_law_xmax_is_fixed_to_collected_default():
     assert _sampled_power_law_xmax(64) == pytest.approx(1024.0)
     assert _sampled_power_law_xmax(1024) == pytest.approx(1024.0)
@@ -153,3 +188,99 @@ def test_build_cases_keeps_single_seed_for_non_sampled_power_law():
     cases = build_cases(_case_args(distributions="power_law_1.2", routing_seed=5), ep_size=16)
 
     assert [case.routing_seed for case in cases] == [5]
+
+
+def _legacy_build_routing_plan(
+    *,
+    distribution,
+    tokens_per_rank,
+    routed_num_experts,
+    routed_topk,
+    ep_size,
+    rank,
+    routing_seed=0,
+    norm_topk_prob=True,
+):
+    """The pre-optimization routing plan, kept ONLY as a test oracle.
+
+    Materializes the full global permutation and every rank's contiguous slice
+    (that is exactly the memory blow-up the production path removed). The rows
+    it produces must stay bit-identical, because 192 already-collected perf rows
+    (EP=4/8/16) were measured against this implementation -- any drift would mix
+    an implementation change into the EP axis of the dataset.
+    """
+    import torch
+
+    from collector.sglang.dsv4_megamoe_workload import _logits_for_distribution, parse_distribution
+
+    spec = parse_distribution(distribution)
+    global_num_tokens = int(sum(tokens_per_rank))
+    rng_state = torch.random.get_rng_state()
+    torch.manual_seed(int(routing_seed))
+    try:
+        logits = _logits_for_distribution(
+            spec=spec,
+            global_num_tokens=global_num_tokens,
+            routed_num_experts=routed_num_experts,
+            routed_topk=routed_topk,
+            ep_size=ep_size,
+        )
+    finally:
+        torch.random.set_rng_state(rng_state)
+    topk_weights, topk_ids = torch.topk(logits, k=routed_topk, dim=-1, largest=True, sorted=False)
+    if norm_topk_prob:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(1e-20)
+    topk_ids = topk_ids.to(dtype=torch.int32, device="cpu").contiguous()
+    topk_weights = topk_weights.to(dtype=torch.float32, device="cpu").contiguous()
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(routing_seed))
+    permutation = torch.randperm(global_num_tokens, generator=generator)
+    topk_ids = topk_ids[permutation].contiguous()
+    topk_weights = topk_weights[permutation].contiguous()
+
+    offset = 0
+    for index, tokens in enumerate(tokens_per_rank):
+        end = offset + tokens
+        if index == rank:
+            return topk_ids[offset:end].contiguous(), topk_weights[offset:end].contiguous()
+        offset = end
+    raise AssertionError("rank out of range")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "distribution",
+    ["balanced", "power_law_1.01", "power_law_1.2", "power_law_sampled_1.9"],
+)
+@pytest.mark.parametrize(("ep_size", "tokens"), [(4, 128), (8, 64), (32, 16)])
+def test_streaming_routing_plan_is_bit_identical_to_legacy(distribution, ep_size, tokens):
+    """Narrowing materialization must not perturb a single routed token.
+
+    Checks every rank (not just rank 0), since the optimization changed how each
+    rank's slice is gathered out of the global permutation.
+    """
+    tokens_per_rank = [tokens] * ep_size
+    for rank in range(ep_size):
+        plan = build_routing_plan(
+            distribution=distribution,
+            tokens_per_rank=tokens_per_rank,
+            routed_num_experts=896,
+            routed_topk=16,
+            ep_size=ep_size,
+            rank=rank,
+            routing_seed=7,
+        )
+        legacy_ids, legacy_weights = _legacy_build_routing_plan(
+            distribution=distribution,
+            tokens_per_rank=tokens_per_rank,
+            routed_num_experts=896,
+            routed_topk=16,
+            ep_size=ep_size,
+            rank=rank,
+            routing_seed=7,
+        )
+        assert _real_torch.equal(plan.local_topk_ids, legacy_ids), f"{distribution} ep={ep_size} rank={rank} ids drift"
+        assert _real_torch.equal(plan.local_topk_weights, legacy_weights), (
+            f"{distribution} ep={ep_size} rank={rank} weights drift"
+        )

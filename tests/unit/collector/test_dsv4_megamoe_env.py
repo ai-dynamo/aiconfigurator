@@ -22,10 +22,13 @@ sys.modules["torch"] = MagicMock()
 sys.modules["torch.distributed"] = MagicMock()
 try:
     from collector.sglang.collect_dsv4_megamoe import (
+        DEFAULT_MODEL_CONFIGS,
         CaseRunResult,
         MegaMoECase,
+        activation_for_lane,
         aggregate_case_run_results,
         group_cases_for_logging,
+        routed_scale_for_measurement,
     )
 finally:
     sys.modules.pop(_MODULE, None)
@@ -67,3 +70,45 @@ def test_aggregate_case_run_results_averages_latency_and_power():
     assert aggregated.row["latency"] == "2.000000"
     assert aggregated.row["distribution"] == "power_law_sampled_1.9"
     assert aggregated.power_stats["power"] == 200.0
+
+
+def test_routed_scale_measurement_applies_identity_factor_for_k3():
+    # kimi_k3 default factor is 1.0; skipping the mul used to persist
+    # includes_routed_scale=true while the timed region omitted the scale op.
+    assert DEFAULT_MODEL_CONFIGS["kimi_k3"]["routed_scaling_factor"] == 1.0
+    column, scale = routed_scale_for_measurement(
+        include_routed_scale=True,
+        routed_scaling_factor=1.0,
+    )
+    assert column == "true"
+    assert scale == 1.0
+
+
+def test_routed_scale_measurement_matches_flag_and_rejects_nonpositive():
+    assert routed_scale_for_measurement(include_routed_scale=True, routed_scaling_factor=2.5) == (
+        "true",
+        2.5,
+    )
+    assert routed_scale_for_measurement(include_routed_scale=False, routed_scaling_factor=2.5) == (
+        "false",
+        None,
+    )
+    with pytest.raises(ValueError, match="positive"):
+        routed_scale_for_measurement(include_routed_scale=True, routed_scaling_factor=0.0)
+
+
+def test_vllm_lane_selects_situ_by_name_not_clamp_sentinel():
+    """sglang keys SiTU off activation_clamp==0.03125; vLLM names the activation.
+
+    Verified in-container at vllm v0.27.0: fp8_fp4_mega_moe takes
+    ``activation: str = 'swiglu'`` and K3 serving passes activation="situ" with
+    activation_clamp=None. Collecting the vLLM lane with the sglang sentinel
+    would benchmark a kernel path serving never runs.
+    """
+    k3_clamp = DEFAULT_MODEL_CONFIGS["kimi_k3"]["activation_clamp"]
+    assert k3_clamp == 0.03125
+    assert activation_for_lane(pre_dispatch="vllm", activation_clamp=k3_clamp) == ("situ", None)
+    assert activation_for_lane(pre_dispatch="sglang_jit", activation_clamp=k3_clamp) == ("swiglu", k3_clamp)
+    # dsv4 profiles (non-sentinel clamp) stay swiglu on both lanes.
+    assert activation_for_lane(pre_dispatch="vllm", activation_clamp=10.0) == ("swiglu", 10.0)
+    assert activation_for_lane(pre_dispatch="sglang_jit", activation_clamp=10.0) == ("swiglu", 10.0)

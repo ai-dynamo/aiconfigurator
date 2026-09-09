@@ -56,11 +56,11 @@ def _read_staging_rows(staging_csv: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _runtime_metadata(*, version: str, image_ref: str) -> dict[str, str]:
+def _runtime_metadata(*, version: str, image_ref: str, framework: str = "sglang") -> dict[str, str]:
     image, separator, digest = image_ref.partition("@")
     if not image:
         raise ValueError("container image must be non-empty")
-    runtime = {"framework": "sglang", "version": version, "image": image}
+    runtime = {"framework": framework, "version": version, "image": image}
     if separator:
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise ValueError(f"container image digest must be sha256:<64 lowercase hex>, got {digest!r}")
@@ -236,7 +236,13 @@ def publish_validated(args: argparse.Namespace) -> tuple[Path, Path]:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.collector_hash):
         raise ValueError("collector_hash must be sha256:<64 lowercase hex>")
 
-    runtime_meta = _runtime_metadata(version=args.target_sglang_version, image_ref=args.image)
+    runtime_meta = _runtime_metadata(
+        version=args.target_sglang_version,
+        image_ref=args.image,
+        # Default keeps the sglang lane (and any caller predating --framework)
+        # working unchanged; the vLLM MegaMoE lane passes framework=vllm.
+        framework=getattr(args, "framework", None) or "sglang",
+    )
     existing_tables = _existing_tables_for_merge(target_dir, runtime_meta=runtime_meta)
     case_ids = _planned_case_ids(args)
 
@@ -295,6 +301,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-summary", required=True, type=Path)
     parser.add_argument("--target-dir", required=True, type=Path)
     parser.add_argument("--target-sglang-version", required=True)
+    parser.add_argument(
+        "--framework",
+        choices=["sglang", "vllm"],
+        default="sglang",
+        help="Runtime framework recorded in provenance (sglang or vllm lane).",
+    )
     parser.add_argument("--image", required=True)
     parser.add_argument("--collector-ref", required=True)
     parser.add_argument("--collector-hash", required=True)

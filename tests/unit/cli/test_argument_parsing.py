@@ -521,6 +521,17 @@ class TestCLIArgumentParsing:
         assert args.target_request_rate == 50.0
         assert args.target_concurrency is None
 
+    def test_estimate_mode_parses_moe_backend(self, cli_parser):
+        """--moe-backend exists on the estimate mode (megamoe lane reaches the
+        single-config estimator, not only the sweeps)."""
+        common_args = ["--model-path", "moonshotai/Kimi-K3", "--system", "gb300", "--backend", "vllm"]
+        args = cli_parser.parse_args(["estimate", *common_args])
+        assert args.moe_backend is None
+        args = cli_parser.parse_args(["estimate", *common_args, "--moe-backend", "megamoe"])
+        assert args.moe_backend == "megamoe"
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(["estimate", *common_args, "--moe-backend", "not_a_backend"])
+
     def test_recommend_mode_parses_concurrency(self, cli_parser):
         args = cli_parser.parse_args(
             [

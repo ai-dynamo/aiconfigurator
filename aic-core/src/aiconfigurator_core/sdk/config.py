@@ -47,7 +47,7 @@ class ModelConfig:
     overwrite_num_layers: int = 0
     # model builder falvors
     sms: int = 20
-    moe_backend: str = None  # SGLang MoE backend: deepep_moe, megamoe, or None
+    moe_backend: str = None  # MoE backend override: deepep_moe (SGLang only), megamoe (SGLang/vLLM), or None
     # Attention kernel selection. Two consumers, one knob:
     #   * sglang WideEP MLA picks its kernel-source table ('flashinfer' | 'fa3';
     #     the ops apply the 'flashinfer' default themselves when unset).

@@ -7,7 +7,8 @@ runtime:
   framework: sglang
   version: 0.5.10
 tables:
-  wideep_context_moe_perf:
-    status: complete
-  wideep_generation_moe_perf:
+  # DeepSeek-V4-Pro MegaMoE module rows (moved moe/ -> megamoe/ family
+  # 2026-08-13; sibling vllm tables under <system>/megamoe/vllm/). The moe/
+  # family keeps moe_perf + wideep_*_moe_perf.
+  dsv4_megamoe_module_perf:
     status: complete
