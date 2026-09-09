@@ -7,7 +7,7 @@ version = "0.12.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
-description = "aiconfigurator: automatic disaggregated serving offline configuration"
+description = "AIConfigurator compatibility distribution; active development has moved to AISimulate"
 
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -84,6 +84,8 @@ service = [
 [project.urls]
 GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
+AISimulate = "https://github.com/ai-dynamo/aisimulate"
+Migration = "https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

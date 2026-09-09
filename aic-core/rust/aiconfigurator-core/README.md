@@ -1,5 +1,11 @@
 # AIConfigurator Rust Core
 
+> **Maintenance-only transition:** active development has moved to
+> [AISimulate](https://github.com/ai-dynamo/aisimulate). This crate remains
+> available as an AIConfigurator compatibility surface while the documented
+> migration and removal gates are completed. See the
+> [migration guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md).
+
 Rust-native core that estimates prefill, decode, and forward-pass latency from
 AIC model metadata and perf files, without re-entering Python on the hot path.
 

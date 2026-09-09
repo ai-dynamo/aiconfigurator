@@ -5,6 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # aiconfigurator
 
+> [!WARNING]
+> **AIConfigurator is in a maintenance-only transition to
+> [AISimulate](https://github.com/ai-dynamo/aisimulate).** New features, model
+> coverage, and other active development belong in the AISimulate repository.
+> AIC accepts only bug, security, and migration-blocking fixes while its 0.12
+> compatibility window is completed. Existing releases and repository history
+> remain available; follow the
+> [AISimulate migration guide](docs/aisimulate_migration.md) after the stable
+> replacement artifacts are published.
+
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/aiconfigurator)
 [![Discord](https://dcbadge.limes.pink/api/server/mRJ2KNzwYE?style=flat)](https://discord.gg/mRJ2KNzwYE)
 
@@ -23,19 +33,13 @@ For a technical deep dive into the design and methodology of AIConfigurator, ple
 The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
 configurations and runs anywhere via the CLI.
 
-Let's get started.
-
-> [!WARNING]
-> AIConfigurator 0.12.0 is the compatibility release for moving the
-> application distribution and Sweeper workflows to AISimulate. The
-> `aiconfigurator` CLI command remains supported from the `aisimulate` wheel;
-> users change the installed package, not the command name. Follow the
-> [AISimulate migration guide](docs/aisimulate_migration.md) for installation,
-> API guidance, and the temporary compatibility behavior.
-
 ## Build and Install
 
-### Install from PyPI
+### Compatibility install from PyPI
+
+New development and new integrations should target AISimulate. Until the
+stable AISimulate 0.12 artifacts are published, existing AIC users may continue
+installing the latest supported AIC release:
 
 > **Public PyPI support: Linux x86-64 only.** The required
 > `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is
@@ -58,8 +62,23 @@ Let's get started.
 > Windows has no supported installation path.
 
 ```bash
-pip3 install aiconfigurator
+python -m pip install aiconfigurator
 ```
+
+After the stable AISimulate 0.12 artifacts are published on PyPI and the
+corresponding release is announced in
+[AISimulate releases](https://github.com/ai-dynamo/aisimulate/releases), migrate
+the installed distribution while retaining the established `aiconfigurator`
+command:
+
+```bash
+python -m pip uninstall -y aiconfigurator aiconfigurator-core
+python -m pip install "aisimulate==0.12.0"
+```
+
+Do not substitute an AISimulate development build for the stable transition
+artifact. See the [migration guide](docs/aisimulate_migration.md) for the
+publication gate, supported platforms, CLI behavior, and API changes.
 
 The upper `aiconfigurator` wheel contains the CLI, generator, and versioned
 server-config adapter.
@@ -77,12 +96,14 @@ from aiconfigurator.sdk.task_v2 import Task
 The core wheel intentionally does not expose `task_v2`; the standalone core
 never depends back on the application package.
 
-#### Upgrading from 0.9
+#### Upgrading an existing AIC environment from 0.9
 
 Version 0.9 shipped core files inside `aiconfigurator`. Package installers cannot
 safely transfer those same paths to the new dependency during a normal in-place
 upgrade because dependencies are installed before dependents. Remove the old
-owner first when crossing this package boundary:
+owner first when crossing this package boundary. This compatibility path applies
+only after the matching AIC 0.12 artifact is published; it is not the starting
+point for new development or integrations:
 
 ```bash
 python3 -m pip uninstall -y aiconfigurator aiconfigurator-core

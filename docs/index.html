@@ -20,6 +20,16 @@ tailwind.config = {
 </head>
 <body class="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 min-h-screen flex flex-col font-sans">
 
+<div role="alert" class="mx-6 mt-5 rounded-lg border border-amber-300 bg-amber-50 px-5 py-4 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+  <strong>Maintenance-only transition:</strong>
+  new features, model coverage, and active development have moved to
+  <a class="font-semibold underline" href="https://github.com/ai-dynamo/aisimulate">AISimulate</a>.
+  AIConfigurator accepts only bug, security, and migration-blocking fixes while compatibility closes.
+  Existing users should follow the
+  <a class="font-semibold underline" href="https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md">migration guide</a>
+  after stable replacement artifacts are published.
+</div>
+
 <div class="flex justify-end p-3 px-6">
   <button id="theme-toggle" title="Toggle dark/light mode"
     class="border border-slate-200 dark:border-slate-700 rounded-md px-2 py-1 cursor-pointer

@@ -5,9 +5,10 @@
 name = "aiconfigurator-core"
 version = "0.12.0"
 edition = "2021"
-description = "Rust-native core latency estimator for AIConfigurator"
+description = "AIConfigurator compatibility core; active development has moved to AISimulate"
 license = "Apache-2.0"
 repository = "https://github.com/ai-dynamo/aiconfigurator"
+homepage = "https://github.com/ai-dynamo/aisimulate"
 documentation = "https://docs.rs/aiconfigurator-core"
 readme = "README.md"
 

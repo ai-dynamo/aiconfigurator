@@ -5,32 +5,39 @@ SPDX-License-Identifier: Apache-2.0
 
 # Contribution Guidelines
 
-Contributions that fix documentation errors or that make small changes
-to existing code can be contributed directly by following the rules
-below and submitting an appropriate PR.
+## AIConfigurator transition scope
 
-Contributions intended to add significant new functionality must
-follow a more collaborative path described in the following
-points. Before submitting a large PR that adds a major enhancement or
-extension, be sure to submit a GitHub issue that describes the
-proposed change so that the Dynamo team can provide feedback.
+AIConfigurator is in a maintenance-only transition to
+[AISimulate](https://github.com/ai-dynamo/aisimulate). New features, model or
+hardware coverage, and other active development must be proposed and
+implemented in AISimulate. The AIC repository accepts only bug, security, and
+migration-blocking fixes during its compatibility window.
 
-- As part of the GitHub issue discussion, a design for your change
+Documentation corrections and small fixes to existing AIC behavior can be
+contributed here by following the rules below. Report security vulnerabilities
+through [SECURITY.md](SECURITY.md), not through a public issue or pull request.
+
+Before submitting a significant AIC compatibility or migration fix, open an
+[AIC issue](https://github.com/ai-dynamo/aiconfigurator/issues) describing the
+problem so the Dynamo team can confirm that it belongs in this frozen
+repository rather than AISimulate.
+
+- As part of the GitHub issue discussion, the scope of your fix
   will be agreed upon. An up-front design discussion is required to
-  ensure that your enhancement is done in a manner that is consistent
-  with Dynamo's overall architecture.
+  ensure that it preserves the AIC compatibility contract and does not create
+  new active-product behavior in this repository.
 
-- The Dynamo project is spread across multiple GitHub Repositories.
-  The Dynamo team will provide guidance about how and where your enhancement
+- The Dynamo project is spread across multiple GitHub repositories.
+  The Dynamo team will provide guidance about how and where your change
   should be implemented.
 
 - Testing is a critical part of any Dynamo
-  enhancement. You should plan on spending significant time on
+  change. You should plan on spending significant time on
   creating tests for your change. The Dynamo team will help you to
   design your testing so that it is compatible with existing testing
   infrastructure.
 
-- If your enhancement provides a user visible feature then you need to
+- If your fix changes user-visible behavior then you need to
   provide documentation.
 
 

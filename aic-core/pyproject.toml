@@ -7,8 +7,8 @@ version = "0.12.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
-description = "Standalone core modeling, data, and Rust estimators for AIConfigurator"
-readme = { text = "Standalone core modeling, data, and Rust estimators for AIConfigurator.", content-type = "text/markdown" }
+description = "AIConfigurator core compatibility distribution; active development has moved to AISimulate"
+readme = { text = "AIConfigurator core compatibility distribution. Active development has moved to [AISimulate](https://github.com/ai-dynamo/aisimulate); see the [migration guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md).", content-type = "text/markdown" }
 license = "Apache-2.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
@@ -19,6 +19,12 @@ dependencies = [
     "pyyaml>=6.0",
     "scipy>=1.13.1",
 ]
+
+[project.urls]
+GitHub = "https://github.com/ai-dynamo/aiconfigurator"
+Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
+AISimulate = "https://github.com/ai-dynamo/aisimulate"
+Migration = "https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md"
 
 [build-system]
 requires = ["maturin>=1.12,<2"]
