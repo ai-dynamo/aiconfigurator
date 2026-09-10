@@ -8,4 +8,7 @@ runtime:
   version: 0.24.0
 tables:
   encoder_attention_perf:
+    # 2026-09-03: appended 1100 Pixtral head_dim=104 encoder-attention rows
+    # (num_heads {16,8,4,2,1}) for Mistral-Medium-3.5, collected on 8xH200
+    # (SM90) with vllm/vllm-openai:v0.24.0. The base 64/72/80 grid stays legacy.
     status: complete
