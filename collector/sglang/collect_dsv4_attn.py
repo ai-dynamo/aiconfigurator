@@ -1225,6 +1225,11 @@ def _resolve_local_heads(*, native_heads: int, module_heads: int | None, tp_size
     cross-checked, never persisted — a value matching neither is a geometry
     surprise worth failing the case over.
     """
+    if int(native_heads) % tp_size != 0:
+        raise RuntimeError(
+            f"DSV4 attention head geometry mismatch: native_heads={int(native_heads)} "
+            f"is not divisible by tp_size={tp_size}"
+        )
     local_heads = max(1, int(native_heads) // tp_size)
     if module_heads is not None and int(module_heads) not in (int(native_heads), local_heads):
         raise RuntimeError(
