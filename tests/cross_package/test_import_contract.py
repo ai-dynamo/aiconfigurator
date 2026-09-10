@@ -43,6 +43,7 @@ CORE_SDK_LEAF_MODULES = [
     "models.kimi_k3",
     "models.llama",
     "models.minimax_m3",
+    "models.mistral3",
     "models.moe",
     "models.nemotron_h",
     "models.nemotron_nas",
