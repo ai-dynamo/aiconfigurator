@@ -13,11 +13,19 @@ pytestmark = pytest.mark.unit
 
 def test_perf_data_filename_enum_entries():
     assert common.PerfDataFilename.moe_a2a.value == "moe_a2a_perf.parquet"
-    assert common.PerfDataFilename.moe_expert_compute.value == "moe_expert_compute_perf.parquet"
 
 
-def test_registry_has_exactly_the_four_backends():
-    assert set(MOE_A2A_BACKENDS) == {"deepep_ht", "deepep_ll", "nvlink_two_sided", "nvlink_one_sided"}
+def test_registry_has_all_framework_backend_identities():
+    assert set(MOE_A2A_BACKENDS) == {
+        "deepep_ht",
+        "deepep_ll",
+        "deepep_v2_context",
+        "deepep_v2_generation",
+        "trtllm_deepep_ht",
+        "trtllm_deepep_ll",
+        "nvlink_two_sided",
+        "nvlink_one_sided",
+    }
 
 
 @pytest.mark.parametrize(
@@ -25,6 +33,10 @@ def test_registry_has_exactly_the_four_backends():
     [
         ("deepep_ht", ("sglang", "vllm"), ("context",), ("dispatch", "combine"), 0),
         ("deepep_ll", ("sglang", "vllm"), ("generation",), ("dispatch", "combine"), 0),
+        ("deepep_v2_context", ("vllm",), ("context",), ("dispatch", "combine"), 0),
+        ("deepep_v2_generation", ("vllm",), ("generation",), ("dispatch", "combine"), 0),
+        ("trtllm_deepep_ht", ("trtllm",), ("context",), ("dispatch", "combine"), 0),
+        ("trtllm_deepep_ll", ("trtllm",), ("generation",), ("dispatch", "combine"), 0),
         ("nvlink_two_sided", ("trtllm",), ("context", "generation"), ("prepare", "dispatch", "combine"), 100),
         ("nvlink_one_sided", ("trtllm",), ("context", "generation"), ("dispatch", "combine"), 100),
     ],

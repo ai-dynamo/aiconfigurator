@@ -514,6 +514,30 @@ def test_vllm_moe_declares_representable_parallel_topologies(monkeypatch):
     assert any(tp == 1 and ep > 1 for tp, ep in topologies)
 
 
+def test_common_moe_population_can_declare_a_required_ep_world(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    baseline = get_common_moe_test_cases(backend="vllm")
+
+    for ep_size in (8, 16, 32):
+        constrained = get_common_moe_test_cases(
+            backend="vllm",
+            required_expert_parallel_size=ep_size,
+        )
+        assert constrained
+        baseline_shapes = {
+            (case.hidden_size, case.inter_size, case.topk, case.num_experts, case.model_name) for case in baseline
+        }
+        assert {
+            (case.hidden_size, case.inter_size, case.topk, case.num_experts, case.model_name) for case in constrained
+        } <= baseline_shapes
+        assert all(case.num_experts % ep_size == 0 for case in constrained)
+
+    with pytest.raises(ValueError, match="required_expert_parallel_size must be positive"):
+        get_common_moe_test_cases(backend="vllm", required_expert_parallel_size=0)
+
+
 def test_vllm_moe_cuda_graph_fails_closed():
     tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
     run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")

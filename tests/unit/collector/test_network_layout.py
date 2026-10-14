@@ -150,9 +150,9 @@ def test_advertised_default_worlds_expand_to_at_least_one_case(monkeypatch):
     from collector.wideep.sglang import collect_moe_a2a as a2a
 
     gpus_per_node = 4  # both launchers' default
-    shapes = a2a.get_moe_a2a_shapes()
     grid = a2a.get_moe_a2a_workload_grid()
     for world in _default_gpu_list(SUBMIT_MOE_A2A):
+        shapes = a2a.get_moe_a2a_shapes(required_expert_parallel_size=world)
         cases = a2a.build_case_plan(shapes=shapes, grid=grid, ep_size=world, node_num=world // gpus_per_node)
         assert cases, f"moe_a2a default world {world} expanded to zero cases"
 

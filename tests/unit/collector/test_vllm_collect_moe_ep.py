@@ -9,9 +9,9 @@ and are AST-extracted from the source, and the bench callable is injectable —
 the whole row/population contract is covered with a mocked bench (same
 ``MOE_EP_HEADER`` literal as the sglang/trtllm twins: one consumer contract).
 
-Dormancy per plan decision D3 is itself under test: no registry, no
-``wideep_vllm`` manifest entry, no hash-closures entry until a vLLM-DeepEP
-image is pinned.
+Dormancy per plan decision D3 is itself under test: the vLLM WideEP runtime
+and empty registry serve standalone A2A only; no ``moe_ep`` registry or hash
+closure entry exists until the compute path is verified.
 """
 
 import ast
@@ -338,21 +338,19 @@ def test_mocked_bench_rows_round_trip_the_frozen_header(tmp_path, moe_ep_symbols
 # ---------------------------------------------------------------------------
 
 
-def test_no_vllm_wideep_registry_exists():
-    import importlib.util
+def test_vllm_wideep_registry_exists_for_a2a_but_enrolls_no_single_host_op():
+    from collector.wideep.vllm.registry import REGISTRY
 
-    # find_spec on collector.wideep.<backend>.registry is the exact predicate
-    # collect.py's _wideep_registry_for_backend uses: no spec -> no wideep
-    # registry appended for vllm runs.
-    assert importlib.util.find_spec("collector.wideep.vllm.registry") is None
-    assert not (REPO_ROOT / "collector" / "wideep" / "vllm" / "registry.py").exists()
+    assert REGISTRY == []
+    assert not any(entry.op == "moe_ep" for entry in REGISTRY)
 
 
-def test_manifest_has_no_wideep_vllm_pin():
-    # D3: no fake pins against a nonexistent vLLM-DeepEP runtime.
+def test_manifest_pin_is_for_the_verified_a2a_runtime():
     from collector.framework_manifest import load_manifest
 
-    assert "wideep_vllm" not in load_manifest()["frameworks"]
+    runtime = load_manifest()["frameworks"]["wideep_vllm"]["default"]
+    assert runtime["version"] == "0.24.0"
+    assert runtime["source_commit"] == "ee0da84ab9e04ac7610e28580af62c365e898389"
 
 
 def test_hash_closures_has_no_entry_for_the_unregistered_module():
@@ -363,13 +361,10 @@ def test_hash_closures_has_no_entry_for_the_unregistered_module():
     assert "collector.wideep.vllm.collect_moe_ep" not in closures
 
 
-def test_registry_modules_have_no_wideep_vllm_entry():
-    # Enrollment surface #2 (README step 2): without this map entry,
-    # framework_manifest registry/runtime resolution raises for the key even
-    # after registry.py exists — the activation checklist flips this pin.
+def test_registry_module_maps_the_standalone_a2a_runtime_to_an_empty_registry():
     from collector.framework_manifest import _REGISTRY_MODULES
 
-    assert "wideep_vllm" not in _REGISTRY_MODULES
+    assert _REGISTRY_MODULES["wideep_vllm"] == "collector.wideep.vllm.registry"
 
 
 def test_kernel_source_backends_have_no_vllm_deepep_moe_mapping():

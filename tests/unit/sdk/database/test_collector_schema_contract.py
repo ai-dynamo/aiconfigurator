@@ -47,35 +47,16 @@ from aiconfigurator_core.sdk.perf_database import PerfDatabase
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-
-# Copied verbatim from the collector-side writer pins:
-# tests/unit/collector/test_collect_moe_a2a.py::MOE_A2A_HEADER (sglang DeepEP
-# writer) and tests/unit/collector/test_collect_trtllm_alltoall.py::
-# MOE_A2A_HEADER (trtllm NVLink alltoall writer) — both collectors emit this
-# exact header. No ``power`` column by design: per-phase power needs
-# winning-config re-runs (a hardware measurement-method design), and
-# log_perf's header-from-first-row property makes partial power columns
-# unrepresentable; the loader tolerates absence.
 MOE_A2A_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "comm_backend,phase,comm_dtype,ep_size,node_num,hidden_size,topk,num_experts,"
     "num_tokens,sms,transmit_us,notify_us,latency"
 )
-
-# Copied verbatim from the collector-side writer pins:
-# tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER, repeated
-# verbatim by tests/unit/collector/trtllm/test_collect_moe_ep.py and
-# tests/unit/collector/test_vllm_collect_moe_ep.py — all three moe_ep writers
-# emit this exact header.
 MOE_EXPERT_COMPUTE_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"
     "topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency"
 )
-
-# The collector twin files, with the literal each must pin. Paths are relative
-# to the repo root; existence itself is part of the contract (Tasks 2-5 landed
-# the writers and their pins).
 _TWIN_PINS = {
     "tests/unit/collector/test_collect_moe_a2a.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
     "tests/unit/collector/test_collect_trtllm_alltoall.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
@@ -122,14 +103,13 @@ def _view_db_over_row(tmp_path, header: str, row: dict, filename: str) -> PerfDa
     return PerfDatabase("h100_sxm", "sglang", "0.5.10", str(root), database_mode="HYBRID", strict_provenance=False)
 
 
-def test_moe_a2a_header_row_loads_with_us_to_ms_conversion(tmp_path):
-    # One 850 us DeepEP HT dispatch measurement: ep_size 8 on 4-GPU nodes.
+def test_moe_a2a_header_row_loads_with_us_converted_to_ms(tmp_path):
     row = {
         "framework": "SGLang",
-        "version": "0.5.10",
-        "device": "NVIDIA GB200",
+        "version": "0.5.12",
+        "device": "NVIDIA H200",
         "op_name": "moe_a2a",
-        "kernel_source": "deepep_ht",
+        "kernel_source": "deepep",
         "comm_backend": "deepep_ht",
         "phase": "dispatch",
         "comm_dtype": "default",
@@ -140,9 +120,9 @@ def test_moe_a2a_header_row_loads_with_us_to_ms_conversion(tmp_path):
         "num_experts": 256,
         "num_tokens": 4096,
         "sms": 24,
-        "transmit_us": 800.0,
-        "notify_us": 50.0,
-        "latency": 850.0,  # MICROSECONDS — the moe_a2a writer convention
+        "transmit_us": 700.0,
+        "notify_us": 150.0,
+        "latency": 850.0,
     }
     db = _view_db_over_row(tmp_path, MOE_A2A_HEADER, row, "moe_a2a_perf.parquet")
 

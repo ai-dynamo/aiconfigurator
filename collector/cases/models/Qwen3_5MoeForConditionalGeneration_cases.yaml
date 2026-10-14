@@ -105,12 +105,27 @@ model_case_values:
           allowed_modes: [nvfp4]
         vllm:
           allowed_modes: [nvfp4]
+    # NVFP4 artifact (experts-only ModelOpt recipe; kv fp8). Serving pin:
+    # sglang launched with --quantization modelopt_fp4 --moe-runner-backend
+    # flashinfer_trtllm (InferenceX runs 28131757535 / 28719981652,
+    # sglang v0.5.14-cu130 image); re-verify against sglang 0.5.14 moe
+    # runner dispatch on version bumps.
+    # SM100/103 resolve to flashinfer_trtllm even without the explicit
+    # --moe-runner-backend flag: ModelOptNvFp4FusedMoEMethod.create_moe_runner
+    # (modelopt_quant.py:2311-2323) leaves MARLIN only for capability in
+    # [8.0, 10.0) and defaults everything else -- SM100 (10,0) and SM103
+    # (10,3) both fail that upper-bound check -- to FLASHINFER_TRTLLM
+    # (modelopt_quant.py:2317-2323, "TRTLLM is currently the most performant
+    # and tested FP4 MoE backend"), same base_ops/moe.yaml:97-105 citation
+    # style/source as the other nvfp4-gated MoE models.
     - model_path: nvidia/Qwen3.5-397B-A17B-NVFP4
       hidden_size: 4096
       inter_size: 1024
       topk: 10
       num_experts: 512
       sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
       framework_quantization:
         sglang:
           allowed_modes: [nvfp4]
@@ -137,6 +152,17 @@ model_case_values:
       output_feature_sizes: [1, 8, 16]
       input_feature_sizes: [4096]
   gdn:
+    # Decode kernel_source dispatch (collect_gdn.py, not expressed as case
+    # shape axes below — kernel choice doesn't change GDN geometry):
+    #   sm 90, 120     -> fused_recurrent_gated_delta_rule_packed_decode (fla/triton, fp32 state)
+    #   sm 100, 103    -> fla/triton when mamba_ssm_dtype is float32;
+    #                     FlashInfer only when mamba_ssm_dtype is bfloat16
+    # sglang serving auto-selects the FlashInfer bf16-state decode kernel
+    # only when is_sm100_supported() (capability major EXACTLY 10 — sm
+    # 100/103 yes, sm 120 NO) AND the model's mamba_ssm_dtype is bfloat16
+    # (server_args.py _handle_linear_attn_backend, :4884-4915 @0.5.14).
+    # Every Qwen3.5/3.6 config pins mamba_ssm_dtype: float32 (declared per
+    # row below), so this plan schedules no FlashInfer invocation.
     - model_path: Qwen/Qwen3.5-35B-A3B
       model_aliases:
         - nvidia/Qwen3.6-35B-A3B-NVFP4
@@ -147,6 +173,7 @@ model_case_values:
       num_v_heads: 32
       head_v_dim: 128
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
+      mamba_ssm_dtype: float32
     # 122B/397B attention declares TP32, but num_k_heads=16 cannot shard 32 ways — no TP32 GDN geometry.
     - model_path: Qwen/Qwen3.5-122B-A10B
       model_aliases:
@@ -158,6 +185,7 @@ model_case_values:
       num_v_heads: 64
       head_v_dim: 128
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
+      mamba_ssm_dtype: float32
     - model_path: Qwen/Qwen3.5-397B-A17B
       model_aliases:
         - nvidia/Qwen3.5-397B-A17B-NVFP4
@@ -168,6 +196,7 @@ model_case_values:
       num_v_heads: 64
       head_v_dim: 128
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
+      mamba_ssm_dtype: float32
 
 all_frameworks_op_cases:
   moe:

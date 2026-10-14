@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::moe::MoeOp;
 use crate::perf_database::PerfDatabase;
 
 /// Python `_EP_PHASES` (moe_comm.py:939).
@@ -177,25 +178,55 @@ impl MoeExpertComputeOp {
                 )))
             }
         }
-        let latency = self
-            .silicon_latency(db, &kernel_source, tokens)
-            .map_err(|err| {
-                if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
-                    // moe_comm.py:1270-1274 — HYBRID's empirical fallback for
-                    // this family is itself the typed not-implemented raise.
-                    AicError::EmpiricalNotImplemented(format!(
-                        "HYBRID empirical fallback is not available for moe_expert_compute \
+        let result = match self.silicon_latency(db, &kernel_source, tokens) {
+            Ok(latency) => PerformanceResult::new(latency, Source::Silicon),
+            Err(err)
+                if err.is_missing_perf_data()
+                    && matches!(db.backend.as_str(), "vllm" | "trtllm") =>
+            {
+                // vLLM/TRT-LLM historically publish expert-kernel measurements in
+                // moe_perf.parquet rather than the WideEP-specific compute tables.
+                // Reuse that compute-only table while MoEAllToAll owns communication;
+                // this must not reconstruct the legacy MoEDispatch/NCCL graph.
+                let legacy = MoeOp {
+                    name: self.name.clone(),
+                    scale_factor: 1.0,
+                    hidden_size: self.hidden_size,
+                    inter_size: self.inter_size,
+                    topk: self.topk,
+                    num_experts: self.num_experts,
+                    moe_tp_size: 1,
+                    moe_ep_size: self.moe_ep_size,
+                    attention_dp_size: 1,
+                    quant_mode: self.quant_mode,
+                    workload_distribution: self.workload_distribution.clone(),
+                    is_gated: self.is_gated,
+                    moe_backend: None,
+                    enable_eplb: false,
+                    is_context: self.inference_phase == "context",
+                };
+                legacy.silicon_pr(db, tokens)?
+            }
+            Err(err) => {
+                return Err(
+                    if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
+                        // moe_comm.py:1270-1274 — HYBRID's empirical fallback for
+                        // this family is itself the typed not-implemented raise.
+                        AicError::EmpiricalNotImplemented(format!(
+                            "HYBRID empirical fallback is not available for moe_expert_compute \
                          {kernel_source}/{}: silicon data required (estimation tier is a planned \
                          follow-up). Silicon miss: {err}",
-                        self.inference_phase
-                    ))
-                } else {
-                    err
-                }
-            })?;
+                            self.inference_phase
+                        ))
+                    } else {
+                        err
+                    },
+                );
+            }
+        };
         // Python: `PerformanceResult(float(result) * scale, source=...)` — no
         // clamp (nothing is subtracted on this path).
-        Ok(PerformanceResult::new(latency, Source::Silicon).scaled(self.scale_factor))
+        Ok(result.scaled(self.scale_factor))
     }
 
     fn silicon_latency(
@@ -643,6 +674,37 @@ mod tests {
             (uncorrected.latency_ms - 0.42).abs() < 1e-12,
             "got {uncorrected:?}"
         );
+    }
+
+    #[test]
+    fn vllm_uses_regular_moe_compute_when_wideep_compute_table_is_absent() {
+        let systems = systems_root();
+        let db = PerfDatabase::load(&systems, "h200_sxm", "vllm", "0.24.0")
+            .expect("h200_sxm/vllm/0.24.0 must load")
+            .with_mode(DatabaseMode::Silicon, TransferPolicy::ALL);
+        let fallback = MoeExpertComputeOp {
+            name: "generation_moe".into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_ep_size: 64,
+            quant_mode: MoeQuantMode::Fp8Block,
+            workload_distribution: "power_law_1.01".into(),
+            attention_dp_size: 1,
+            inference_phase: "generation".into(),
+            num_slots: None,
+            kernel_source: None,
+            is_gated: true,
+            enable_eplb: false,
+        };
+
+        let got = fallback
+            .query(&db, 32)
+            .expect("regular MoE compute fallback");
+        assert_eq!(got.source, Source::Silicon);
+        assert!(got.latency_ms > 0.0, "got {got:?}");
     }
 
     // -----------------------------------------------------------------

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import csv
 import os
 import time
@@ -90,6 +91,49 @@ def test_log_perf_raises_and_releases_lock_on_fsync_failure(tmp_path, monkeypatc
     with pytest.raises(helper.PerfLogError, match="fsync failed"):
         _log_perf(str(perf_path))
     assert not lock_path.exists()
+
+
+def test_log_perf_never_reopens_reactivated_retained_file_by_path(tmp_path, monkeypatch):
+    perf_path = tmp_path / "mla_perf.txt"
+    retained_path = helper.collector_retained_path(perf_path)
+    retained_path.write_bytes(b"retained staging")
+    foreign_path = tmp_path / "foreign.csv"
+    foreign_bytes = (
+        b"framework,version,device,op_name,kernel_source,batch_size,latency\nFOREIGN,0,foreign,foreign,foreign,99,99\n"
+    )
+    foreign_path.write_bytes(foreign_bytes)
+    displaced_path = tmp_path / "displaced-owned.csv"
+    swapped = False
+    real_open = builtins.open
+    real_fdopen = helper.os.fdopen
+
+    def swap_before_writer_open() -> None:
+        nonlocal swapped
+        if swapped:
+            return
+        swapped = True
+        perf_path.rename(displaced_path)
+        foreign_path.rename(perf_path)
+
+    def racing_open(file, mode="r", *args, **kwargs):
+        if os.fspath(file) == str(perf_path) and mode == "a+":
+            swap_before_writer_open()
+        return real_open(file, mode, *args, **kwargs)
+
+    def racing_fdopen(fd, mode="r", *args, **kwargs):
+        if mode == "r+":
+            swap_before_writer_open()
+        return real_fdopen(fd, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", racing_open)
+    monkeypatch.setattr(helper.os, "fdopen", racing_fdopen)
+
+    with pytest.raises(helper.PerfLogError, match="Retained performance file changed"):
+        _log_perf(str(perf_path))
+
+    assert swapped
+    assert perf_path.read_bytes() == foreign_bytes
+    assert displaced_path.is_file()
 
 
 def _make_stale_lock(lock_path):

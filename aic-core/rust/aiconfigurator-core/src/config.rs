@@ -59,7 +59,17 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `enable_shared_layer` / `strict_provenance` policy flags; the engine
 //   re-derives every table's source list from the perf-data tree
 //   (`perf_database/source_resolution.rs`).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 13;
+// - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
+//   op-layout change (the serde default covers JSON only).
+// - 15 (AIC-1715/1716): `Context/GenerationAttentionOp` gained `lane_order`
+//   (appended at the struct tail; always serialized — bincode decodes
+//   positionally). Concurrently claimed v8, v9, v10, and v12 on its own
+//   branch (v8 alongside #1503's v7/v8, v9 alongside #1461's
+//   `Op::FpmForward` v9, v10 alongside issue #1498's Mhc `seq_split` v10,
+//   v12 alongside PR-6's `DsaModuleOp` `attn_projection_quant_modes` v12,
+//   and v14 alongside #1533's `GdnOp::mamba_ssm_dtype` v14); each landed
+//   first, so this renumbers to 15 at merge (same v3/v4, v5/v6 precedent).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 15;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -127,6 +137,16 @@ pub struct EngineConfig {
     /// answers `SOL/util`. Absent on old specs -> Silicon (back-compat).
     #[serde(default)]
     pub database_mode: crate::common::enums::DatabaseMode,
+
+    /// Directory-less `next` load (design §14). Set by the Python spec
+    /// builder ONLY after it resolved the requested version to the
+    /// fleet-advertised `next` slot and loaded it without a local version
+    /// directory (every op rides channel-1 backward fill). Tells the engine
+    /// reload to skip the missing-directory gate for THIS spec; raw-version
+    /// and provenance gates are untouched, and native builders never set it
+    /// (additive-optional: absent in older payloads -> false).
+    #[serde(default)]
+    pub tolerate_dirless_version: bool,
 
     /// Enabled empirical transfer kinds as explicit tokens (`xshape` /
     /// `xquant` / `xprofile` / `xop`). Python resolves preset names before

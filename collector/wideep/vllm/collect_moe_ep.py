@@ -10,17 +10,14 @@ shard, and emits the same unified ``moe_expert_compute_perf`` rows (one table,
 ``inference_phase`` column) consumed by
 ``aiconfigurator_core.sdk.operations.moe_comm.load_moe_expert_compute_data``.
 
-DORMANT per plan decision D3: there is no pinned vLLM-DeepEP runtime yet, so
-this module has NO ``OpEntry`` (no ``collector/wideep/vllm/registry.py``), no
-``wideep_vllm`` manifest family and no ``hash_closures.yaml`` entry — a
-closures entry may not precede registration (Task-1 sequencing rule).
-Activation is a documented procedure (collector docs): pin a ``wideep_vllm``
-manifest entry, add the registry with ``OpEntry(op="moe_ep", ...)``, add the
-closures entry in the same commit, and set ``__compat__`` to the pinned
-version. Enrollment MUST also verify on the pinned image that the kernel this
-module invokes is the one vLLM's own serving dispatch selects for the
-large-EP DeepEP path (layer_permissions.md: kernel_source records ground
-truth, manual pins need source proof).
+DORMANT per plan decision D3: the pinned ``wideep_vllm`` runtime and empty
+registry serve standalone ``moe_a2a`` collection only. This module has no
+``OpEntry`` and no ``hash_closures.yaml`` entry; a closure may not precede
+registration. Activation is documented in ``collector/wideep/README.md``.
+Enrollment MUST verify on the pinned image that the kernel invoked here is
+the one vLLM serving dispatch selects for the large-EP DeepEP compute path
+(layer_permissions.md: kernel_source records ground truth, manual pins need
+source proof).
 
 Shapes are DECLARED: every benchmarked geometry comes from the
 ``model_case_values.moe`` rows marked ``wideep: true`` crossed with the

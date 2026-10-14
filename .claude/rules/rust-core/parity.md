@@ -15,14 +15,22 @@ paths:
   - "tests/cross_package/test_query_shim_baseline.py"
 ---
 
-# Rust-Core Regression Discipline (single-oracle era)
+# Rust-Core Golden Regression Discipline (single-oracle era)
 
 The compiled engine (`aic-core/rust/aiconfigurator-core`) is the ONLY
 engine-step executor AND the only per-op performance oracle — op-level and
 FPM models alike. The Python engine-step path and the Python per-call query
 math are gone; final answers are frozen in `parity_tests/goldens/` (and,
 for the per-run synthetic FPM fixture, inline `_FPM_*_FROZEN` tables) and
-the parity suites assert live-Rust-vs-frozen.
+the golden suites assert live-Rust-vs-frozen.
+
+Naming note: the `parity_tests/` directory and file names are historical —
+"parity" meant live-Rust-vs-live-Python during the port. The port is
+complete; what remains is the engine's END-TO-END GOLDEN REGRESSION NET
+plus the answer-change review mechanism (Rule 1). The case matrix is
+slot-anchored (`backend_version="current"` by default, ids version-free),
+so a queryable-slot bump requires NO test edits — only a golden refresh
+whose diff carries the review.
 
 ## Rule 1 — engine-step changes carry their golden diff
 
@@ -30,7 +38,8 @@ Any PR that changes what the compiled engine computes (operators, loaders,
 interpolation, selection rules, engine composition) MUST in the same PR:
 
 1. Keep `test_engine_step_parity.py` / `test_compile_engine_parity.py`
-   green — either the change is answer-preserving (goldens untouched), or it
+   (the golden suites) green — either the change is answer-preserving
+   (goldens untouched), or it
    is a deliberate modeling change and the PR refreshes the affected records
    with `parity_tests/pin_goldens.py --refresh <keys>` (or `--refresh-all`)
    and lets the GOLDEN DIFF carry the review: reviewers see exactly which
@@ -43,6 +52,11 @@ interpolation, selection rules, engine composition) MUST in the same PR:
    reachable.
 3. Keep the `rust-engine-step-parity` CI job green — it is the enforcement
    mechanism, not this document.
+4. Unit-level VALUE pins on production data are retired policy (2026-08):
+   estimator math is pinned on synthetic hand-derivable grids
+   (`perf_interp` / `util_empirical`), op wiring by routing/relative
+   assertions, and end-to-end values ONLY by these goldens. Do not
+   reintroduce recorded-value constants tied to shipped parquets.
 
 ## Rule 2 — the single-oracle invariant (per-op values live in Rust ONLY)
 

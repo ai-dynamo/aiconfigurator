@@ -664,7 +664,7 @@ class TestHFModelSupport:
         )
 
         with pytest.raises(ValueError, match="Blackwell"):
-            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
+            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(

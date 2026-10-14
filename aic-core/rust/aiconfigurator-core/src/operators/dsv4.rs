@@ -1047,13 +1047,13 @@ mod tests {
         );
     }
 
-    /// Real-DB fail-loud: b200_sxm/sglang/0.5.10 ships the DSV4 module +
-    /// paged_mqa_logits parquets but NO `dsv4_csa_topk_calib` (no system
-    /// ships it), so a CSA CP context query resolves the base + mqa and then
-    /// fails loud on the missing top_last rows — exactly Python's end-to-end
-    /// behaviour today.
+    /// Real-DB fail-loud: b200_sxm/sglang/0.5.10 now retains only the
+    /// hca_attn table, so a CSA CP context query must fail LOUD with the
+    /// actionable no-module-rows message (names the missing parquet) (never a fabricated value).
+    /// The calib-specific missing-top_last branch is pinned synthetically in
+    /// `perf_database::dsv4` (absent calib -> None -> operator fail-loud).
     #[test]
-    fn cp_missing_calib_fails_loud_on_real_db() {
+    fn cp_missing_sparse_tables_fail_loud_on_real_db() {
         let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
@@ -1063,41 +1063,37 @@ mod tests {
         let err = op.query_context(&db, 1, 16384, 0).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("DeepSeek-V4 CSA CP modeling needs sparse tables")
-                && msg.contains("csa_topk_calib top_last"),
+            msg.contains("no DSV4 module rows loaded"),
             "unexpected message: {msg}"
         );
     }
 
-    /// Real-data parity anchor for the chunk-decomposed mqa lookup on the
-    /// SHIPPED gb200 sparse table (in-grid: isl=16384 walks two chunks,
-    /// (8192, past=0) + (8192, past=8192), both exact grid hits). Python
-    /// oracle generated with:
-    ///
-    /// ```text
-    /// PYTHONPATH=src python3 -c "
-    /// from aiconfigurator.sdk.perf_database import get_database
-    /// from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule as M
-    /// db = get_database('gb200', 'sglang', '0.5.10')
-    /// M.load_data(db)
-    /// print(M._mqa_chunked(db, 1, 16384, 0, 1, 64))"
-    /// # -> 0.45932399999999995  (= 0.194236 + 0.265088)
-    /// ```
+    /// Chunk decomposition on the shipped gb200/0.5.14 sparse table:
+    /// isl=16384 walks two chunks, (8192, past=0) + (8192, past=8192).
+    /// Pinned RELATIVELY — the chunked walk must equal the sum of its two
+    /// chunk lookups — so no recorded-value constant (2026-08 test policy).
     #[test]
     fn mqa_chunked_matches_python_on_gb200_data() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/gb200/sparse_attention/sglang/0.5.10");
+            .join("src/aiconfigurator_core/systems/data/gb200/sparse_attention/sglang/0.5.14");
         let table = Dsv4Table::new(root);
         let mut lookup =
             |chunk_isl: u32, past: u32| table.query_paged_mqa_logits(1, chunk_isl, past, 1, 64);
         let got = mqa_chunked(16384, 0, &mut lookup)
             .expect("lookup must not error")
             .expect("in-grid chunks must resolve");
-        let want = 0.45932399999999995;
+        let want = table
+            .query_paged_mqa_logits(1, 8192, 0, 1, 64)
+            .unwrap()
+            .unwrap()
+            + table
+                .query_paged_mqa_logits(1, 8192, 8192, 1, 64)
+                .unwrap()
+                .unwrap();
         assert!(
-            ((got - want) / want).abs() < 1e-9,
-            "rust {got} vs python {want}"
+            ((got - want) / want).abs() < 1e-12,
+            "chunk walk must sum its chunk lookups: {got} vs {want}"
         );
     }
 

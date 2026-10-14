@@ -2,10 +2,87 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
 runtime:
-  framework: vllm
+  framework: wideep_vllm
   version: 0.24.0
+  image: vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
+  image_variant: linux/arm64
+  image_digest: sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b
+  source_commit: ee0da84ab9e04ac7610e28580af62c365e898389
+  abi:
+    build_mode: official-v0.24.0-image
+    torch: 2.11.0
+    cuda: 13.0.2
+    deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+    nvshmem: 3.3.24
+    deep_ep_api: Buffer
+    system: gb200
+    fabric_identity: single-node:nvl72045-T14
+    gpu_name: NVIDIA GB200
+    driver: 580.126.20
+    compute_capability: '10.0'
+    rdma_device_count_min: '6'
+    cross_node_nvlink_capable: runtime_probe_required
+    nvlink_topology_sha256: cf0a9692504401c43e4358820165938c1475f5853bba796609c8581586681148
+    gloo_socket_ifname: eth0
+    slurm_topology_verified: 'true'
+    image_metadata_migration: '{"destination_declared_system":"gb200","destination_metadata_sha256":"ad037ecd1a59e285b6200529a589cccf913a34d3a5a67a7a3ac9d88fb0c6bd38","destination_schema_version":1,"destination_source_image_digest":"sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b","destination_sqsh_sha256":"f4ea516971f19498805b793fbfb2f3b9353ed0d6ba8c13e5e066a63868c2dd42","migration_type":"vllm-image-metadata-schema1-to-schema2","source_configured_image_digest":"sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f","source_metadata_sha256":"61f7db9724ec4eefc1cefb9eec8849a9c8dcf50c7dc6d6868a4e03ae5e5dd73d","source_observed_image_digest":"sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b","source_schema_version":2,"source_sqsh_sha256":"6f4a393fd2fb7aa6525b37a5805bcd77f1a81c8c76bbdaebfbbeb7d775fbcd5d","source_system":"gb300"}'
+    deep_ep_overlay_wheel_sha256: f9d68bb4d59f54651f83fd318441fd69ec95cd44698ad97bc1a464fffa923bb4
+    deep_ep_setup_sha256: 6c24ea967faaf5dc1c8024bf5734313a9baf2eb70ce8e154e5909337af19f671
+    deep_ep_cuda_arches: 10.0a 10.3a
+    deep_ep_scaleup_ranks: '4'
+    deep_ep_patch_sha256: 660b0281a932d56698e00495004bfe285841e48d73d473e180f2ba60fbbcb010
+    pyarrow: 24.0.0
+    pyarrow_wheel_sha256: 1617043b99bd33e5318ae18eb2919af09c71322ef1ca46566cdafc6e6712fb66
+    campaign_system: gb200
+    campaign_node_counts: '1'
+    campaign_ep_sizes: '4'
+    campaign_backends: deepep_ht,deepep_ll
+    fabric_identities: single-node:nvl72045-T14
+  backend_abis:
+    deepep_ht:
+      build_mode: official-v0.24.0-image
+      cuda: 13.0.2
+      deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+      deep_ep_api: Buffer
+      deep_ep_cuda_arches: 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: f9d68bb4d59f54651f83fd318441fd69ec95cd44698ad97bc1a464fffa923bb4
+      deep_ep_patch_sha256: 660b0281a932d56698e00495004bfe285841e48d73d473e180f2ba60fbbcb010
+      deep_ep_scaleup_ranks: '4'
+      nvshmem: 3.3.24
+      torch: 2.11.0
+    deepep_ll:
+      build_mode: official-v0.24.0-image
+      cuda: 13.0.2
+      deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+      deep_ep_api: Buffer
+      deep_ep_cuda_arches: 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: f9d68bb4d59f54651f83fd318441fd69ec95cd44698ad97bc1a464fffa923bb4
+      deep_ep_patch_sha256: 660b0281a932d56698e00495004bfe285841e48d73d473e180f2ba60fbbcb010
+      deep_ep_scaleup_ranks: '4'
+      nvshmem: 3.3.24
+      torch: 2.11.0
+  backend_capabilities:
+    deepep_ht:
+      1n_ep4:
+        backend: deepep_ht
+        topology_source: legacy_compile_time
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '4'
+    deepep_ll:
+      1n_ep4:
+        backend: deepep_ll
+        topology_source: legacy_compile_time
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '4'
 tables:
   custom_allreduce_perf:
+    status: complete
+  moe_a2a_perf:
+    collector_ref: 65aab00d1a52a2924755ef2c389442c645571409
+    collector_hash: sha256:a0f6bea7b745dc4baa05d4c9a953c43dba3548f8c244497645ec9f784fda0b81
+    case_plan_hash: sha256:cd028155a0245b762f5d7dc0b21b86f15dd1ee578c4905eda219ce9b9c252544
+    collected_at: '2026-08-31'
+    rows: 324
+    classified_failures: 0
     status: complete

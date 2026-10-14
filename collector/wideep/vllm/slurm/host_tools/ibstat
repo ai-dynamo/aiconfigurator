@@ -1,0 +1,18 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Run the allocation's own ibstat userspace with its matching loader/libc.
+# This avoids modifying the pinned vLLM image while allowing DeepEP V2 to
+# observe the real RDMA link speed used by its SM-count heuristic.
+
+set -euo pipefail
+
+: "${AIC_IBSTAT_TOOL_ROOT:?AIC_IBSTAT_TOOL_ROOT is required}"
+: "${AIC_IBSTAT_LOADER_BASENAME:?AIC_IBSTAT_LOADER_BASENAME is required}"
+
+exec \
+    "${AIC_IBSTAT_TOOL_ROOT}/lib/${AIC_IBSTAT_LOADER_BASENAME}" \
+    --library-path "${AIC_IBSTAT_TOOL_ROOT}/lib" \
+    "${AIC_IBSTAT_TOOL_ROOT}/bin/ibstat.real" \
+    "$@"

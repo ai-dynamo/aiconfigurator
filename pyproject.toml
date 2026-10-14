@@ -3,11 +3,11 @@
 
 [project]
 name = "aiconfigurator"
-version = "0.11.0"
+version = "0.12.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
-description = "aiconfigurator: automatic disaggregated serving offline configuration"
+description = "AIConfigurator compatibility distribution; active development has moved to AISimulate"
 
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -40,7 +40,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.14"
 
 dependencies = [
-    "aiconfigurator-core==0.11.0",
+    "aiconfigurator-core==0.12.0",
     "jinja2>=3.1.0",
     "packaging>=20.0",
     "matplotlib>=3.9.4",
@@ -84,6 +84,8 @@ service = [
 [project.urls]
 GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
+AISimulate = "https://github.com/ai-dynamo/aisimulate"
+Migration = "https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

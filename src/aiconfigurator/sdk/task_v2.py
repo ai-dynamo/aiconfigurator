@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import (
     _get_model_info,
@@ -47,10 +48,12 @@ from aiconfigurator.sdk.models import (
     get_model_family,
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
+    resolve_vllm_moe_execution_mode,
 )
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
 from aiconfigurator.sdk.moe_comm_resolver import (
     a2a_covers_parallel,
+    moe_compute_coverage,
     resolve_model_config_moe_comm,
     select_moe_comm_backend,
 )
@@ -492,6 +495,51 @@ def _lookup_num_gpus_per_node(system_name: str) -> int | None:
 # Task
 # ---------------------------------------------------------------------------
 
+# Fields that _build_recommend_tasks (cli/api.py) must reset to None when
+# rebuilding a Task at a different GPU budget, so Task.__post_init__ re-derives
+# them at the new budget rather than carrying forward stale single-node values.
+#
+# Encoder and AFD candidates are intentionally excluded: encoder_tp can be
+# pinned by the caller and AFD dimensions do not participate in recommend
+# escalation.  Keep this set in sync with _resolve_agg_search /
+# _resolve_disagg_search whenever new budget-sensitive fields are added.
+TASK_REBUILD_FIELDS: frozenset[str] = frozenset(
+    {
+        # Agg search space
+        "agg_num_gpu_candidates",
+        "agg_tp_candidates",
+        "agg_pp_candidates",
+        "agg_dp_candidates",
+        "agg_moe_tp_candidates",
+        "agg_moe_ep_candidates",
+        "agg_cp_candidates",
+        # Disagg prefill search space
+        "prefill_num_gpu_candidates",
+        "prefill_tp_candidates",
+        "prefill_pp_candidates",
+        "prefill_dp_candidates",
+        "prefill_moe_tp_candidates",
+        "prefill_moe_ep_candidates",
+        "prefill_cp_candidates",
+        # Disagg decode search space
+        "decode_num_gpu_candidates",
+        "decode_tp_candidates",
+        "decode_pp_candidates",
+        "decode_dp_candidates",
+        "decode_moe_tp_candidates",
+        "decode_moe_ep_candidates",
+        "decode_cp_candidates",
+        # Non-candidate fields also resolved by __post_init__ from total_gpus.
+        # Without resetting these, _apply_total_gpus_budget carries forward the
+        # old node-sized ceiling (e.g. max_gpu_per_replica=8) and disagg
+        # escalation is silently defeated at every larger budget.
+        "max_gpu_per_replica",
+        "num_gpu_per_replica",
+        "max_prefill_workers",
+        "max_decode_workers",
+    }
+)
+
 
 @dataclass
 class Task:
@@ -561,7 +609,11 @@ class Task:
     nextn: int | str = 0
     nextn_accepted: float | None = None
     moe_backend: str | None = None
-    attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
+    # Applies to every graph with standard dense ContextAttention/GenerationAttention ops and to
+    # supported DeepSeek MLA/WideEP paths. Named support is backend/table/version-specific and fails
+    # closed; None/default uses the mapped framework default or safe default fallback. SGLang WideEP
+    # maps None/default to flashinfer and also supports fa3.
+    attention_backend: str | None = None
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
@@ -1125,6 +1177,18 @@ class Task:
                         )
                     if arch_mode is not None:
                         from_hf = arch_mode
+                    # HF-base-layer remap: vLLM executes W4A16_NVFP4-labeled
+                    # experts on the w4a4 nvfp4 lane (see the helper). Applied
+                    # to the HF-derived value only, so an explicit field still
+                    # overrides it — and validate fails fast on an explicit
+                    # w4a16_nvfp4, which vLLM has no data lane for.
+                    from_hf = resolve_vllm_moe_execution_mode(
+                        from_hf,
+                        self._role_attr(role, "backend_name"),
+                        self._raw_config.get("architectures", [None])[0]
+                        if isinstance(self._raw_config.get("architectures"), list)
+                        else self._raw_config.get("architecture"),
+                    )
                 fallback = _QUANT_FALLBACKS[key]
 
                 if explicit is not None:
@@ -1275,8 +1339,9 @@ class Task:
 
         Per spec section 4.5, an EP size is explorable for a phase when its
         comm backend carries dispatch+combine rows for the model shape at the
-        requested EP/node scale, or SGLang DeepEP carries the marked node-1
-        substitute retained from PR #1314. The backend's registry feasibility
+        requested EP/node scale, or DeepEP HT/LL carries its marked node-1
+        substitute (legacy EP8 for SGLang, physical full-node EP otherwise).
+        The backend's registry feasibility
         rules must admit the config, and the EP expert-compute table must cover
         the shape under the role's MoE quant mode for that phase. BOTH phases
         are probed for every role: a
@@ -1327,10 +1392,8 @@ class Task:
         # (a lightweight double injected by a caller) carries no coverage
         # information, which is the same answer as an absent table.
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
-        if gpus_per_node and a2a_probe is not None and compute_probe is not None:
-            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
+        if gpus_per_node and a2a_probe is not None:
             quant_mode = self._role_attr(role, "moe_quant_mode")
             if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
                 # The compute table is keyed by MoEQuantMode members; any
@@ -1342,8 +1405,16 @@ class Task:
                     f"{type(quant_mode).__name__} {quant_mode!r} "
                 )
             for phase in ("context", "generation"):
-                compute = compute_probe(
-                    shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
+                a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts, quant_mode, phase)
+                compute = moe_compute_coverage(
+                    database,
+                    backend_name=backend_name,
+                    hidden_size=shape.hidden_size,
+                    inter_size=shape.moe_inter_size,
+                    topk=shape.topk,
+                    num_experts=shape.num_experts,
+                    quant_mode=quant_mode,
+                    phase=phase,
                 )
                 per_backend: dict[str, set[int]] = {}
                 for name, backend_spec in MOE_A2A_BACKENDS.items():
@@ -1358,6 +1429,7 @@ class Task:
                             comm_backend=name,
                             moe_ep_size=ep,
                             expected_nodes=nodes_for(ep, gpus_per_node),
+                            gpus_per_node=gpus_per_node,
                         )
                         and backend_spec.feasible(
                             topk=shape.topk,
@@ -1463,16 +1535,23 @@ class Task:
         )
 
     def _large_ep_eps(self, role: str) -> set[int]:
-        """EP sizes this role could run large-EP: covered in every phase it runs
-        AND in the context phase that sizes its weights (see
-        ``_required_large_ep_phases``)."""
+        """Covered EP sizes that actually span more than one physical node.
+
+        Single-node A2A data may resolve the communication backend for an
+        intra-node tuple, but it must not unlock the multi-node search ladder
+        or its larger replica budget.  Only coverage present in every required
+        phase *and* wider than the system's node width enables that expansion.
+        """
         coverage = self._large_ep_coverage(role)
         eps: set[int] | None = None
         for phase in set(self._role_phases(role)) | set(self._required_large_ep_phases(role)):
             per_backend = coverage.get(phase, {})
             phase_eps = set().union(*per_backend.values()) if per_backend else set()
             eps = phase_eps if eps is None else eps & phase_eps
-        return eps or set()
+        gpus_per_node = self._num_gpus_per_node(role)
+        if not gpus_per_node:
+            return set()
+        return {ep for ep in (eps or set()) if ep > gpus_per_node}
 
     def _role_has_large_ep_tuple(self, role: str) -> bool:
         """Whether any enumerated tuple for this role resolves a comm backend."""
@@ -1570,7 +1649,7 @@ class Task:
         if self.serving_mode == "agg":
             self._resolve_agg_search()
         else:
-            self._resolve_disagg_search()
+            self._resolve_disagg_search(defaulted)
         self._apply_large_pipeline_parallel(defaulted)
         self._apply_total_gpus_budget()
 
@@ -1655,7 +1734,13 @@ class Task:
 
         if not self._is_moe:
             blackwell = self.system_name in ("gb200", "gb300")
-            wide = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
+            base = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
+            # Extend to the full GPU budget so _build_recommend_tasks escalation
+            # actually explores new configs (e.g. tp=32 at budget=32).
+            # _apply_total_gpus_budget trims agg_num_gpu_candidates afterward;
+            # tp_candidates must also include budget values since num_gpu == tp
+            # for dense (dp=1, moe_ep=1).
+            wide = sorted(set(base) | {n for n in [16, 32, 64] if self.total_gpus and n <= self.total_gpus})
             _set("agg_num_gpu_candidates", wide)
             _set("agg_tp_candidates", wide)
             _set("agg_pp_candidates", [1])
@@ -1692,6 +1777,14 @@ class Task:
         else:
             x = [1, 2, 4, 8, 16] if self._is_moe else [1, 2, 4, 8]
             fused = {"num_gpu": x, "tp": x, "pp": [1], "dp": x, "moe_tp": x, "moe_ep": x}
+
+        # Extend num_gpu to cover the full escalation budget on fused paths so
+        # _build_recommend_tasks escalation at budget 32/64 actually reaches new
+        # configs.  tp/dp/ep stay at fused defaults — they bound per-dimension
+        # parallelism and combining them (e.g. tp=8, dp=4) already reaches 32 GPUs.
+        # _apply_total_gpus_budget trims the list to <= total_gpus afterward.
+        if self.total_gpus is not None:
+            fused["num_gpu"] = sorted(set(fused["num_gpu"]) | {n for n in [32, 64] if n <= self.total_gpus})
 
         # Large-EP ladder, offered when the perf data covers this model shape on
         # this system (no flag): the single task explores BOTH regimes, so the
@@ -1737,7 +1830,7 @@ class Task:
         for dim, values in fused.items():
             _set(f"agg_{dim}_candidates", values)
 
-    def _resolve_disagg_search(self) -> None:
+    def _resolve_disagg_search(self, defaulted: set[str]) -> None:
         def _lists(wide: bool) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
             return build_disagg_parallel_lists(
                 backend_name=self.prefill_backend_name,
@@ -1773,6 +1866,21 @@ class Task:
                     }
                     src = {dim: sorted(set(values) | set(ladder.get(dim, []))) for dim, values in src.items()}
             self._fill_role_search(role, src)
+
+        # Extend per-worker num_gpu candidates to the full escalation budget on
+        # fused (non-large-EP) paths — same rationale as the agg fix above.
+        # Only extend fields the user did not supply (same contract as _set in
+        # _resolve_agg_search): a user-pinned candidate list wins unchanged.
+        # _apply_total_gpus_budget trims both fields to <= total_gpus afterward.
+        if self.total_gpus is not None:
+            for _field in ("prefill_num_gpu_candidates", "decode_num_gpu_candidates"):
+                if _field not in defaulted:
+                    continue
+                _current = getattr(self, _field)
+                if _current is not None:
+                    _extras = {n for n in [32, 64] if n <= self.total_gpus}
+                    if _extras:
+                        setattr(self, _field, sorted(set(_current) | _extras))
 
         # Replica defaults. Keyed on the resolved CANDIDATES, not on coverage:
         # a user list that pins the search to fused tuples (e.g. moe_ep=[1])
@@ -2029,11 +2137,11 @@ class Task:
             nextn=self.nextn,
             enable_encoder_dp=self.enable_encoder_dp,
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # attention_backend / wideep_num_slots are shared across roles (Task has no
-            # per-role variant) and fed to ModelConfig so get_model selects the MLA
-            # attention perf tables (fa3 vs flashinfer) and the EPLB slot count.
-            # workload_distribution remains non-configurable in v2 and ModelConfig's
-            # default matches v1's.
+            # moe_backend / attention_backend / wideep_num_slots are shared across roles
+            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
+            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
+            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
+            # in v2 and ModelConfig's default matches v1's.
             #
             # moe_backend="deepep_moe" is NOT forwarded: it used to select both the
             # sglang wideEP model classes and the wideep MoE compute tables for the
@@ -2041,8 +2149,11 @@ class Task:
             # would make a fused tuple price itself off the large-EP tables. MegaMoE
             # is a real DeepSeek-V4 kernel selection and passes through.
             moe_backend=self.moe_backend if self.moe_backend != "deepep_moe" else None,
-            # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
-            attention_backend=self.attention_backend or "flashinfer",
+            # None means "unspecified" and MUST stay None: the WideEP MLA ops apply
+            # their own "flashinfer" default, while dense attention (AIC-1715) reads
+            # this field as the kernel-LANE override — materializing a lane name here
+            # would silently pin every model to the flashinfer lane.
+            attention_backend=self.attention_backend,
             wideep_num_slots=self.wideep_num_slots,
             forward_model=self.forward_model or "op_level",
             moe_comm_backend=None,
@@ -2050,6 +2161,7 @@ class Task:
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
             num_gpus_per_node=num_gpus_per_node,
+            system=self._role_attr(role, "system_name"),
         )
         model_config._gemm_quant_mode_is_explicit = self._gemm_quant_mode_explicit_by_role.get(role, False)
         if parallel is not None:
@@ -2142,8 +2254,11 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
-            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
+        if self.attention_backend is not None and self.attention_backend not in ATTENTION_BACKEND_CHOICES:
+            raise ValueError(
+                f"attention_backend must be one of {', '.join(repr(b) for b in ATTENTION_BACKEND_CHOICES)}, "
+                f"got {self.attention_backend!r}."
+            )
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         self._check_encoder_knobs_require_epd()
@@ -2172,7 +2287,32 @@ class Task:
             self._validate_afd()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+        self._validate_sglang_wideep_attention_backend()
         self._validate_database_quant_modes()
+
+    def _validate_sglang_wideep_attention_backend(self) -> None:
+        """Reject dense-only attention backends when a role can reach WideEP.
+
+        SGLang's WideEP MLA operators accept only ``flashinfer`` and ``fa3``;
+        ``default`` means their established framework default (``flashinfer``).
+        The wider attention-lane vocabulary remains valid for tasks whose
+        enumerated tuples are all dense/fused.
+        """
+        if self.attention_backend in (None, "default", "flashinfer", "fa3"):
+            return
+        roles = ("agg",) if self.serving_mode in ("agg", "afd") else ("prefill", "decode")
+        for role in roles:
+            if self._role_attr(role, "backend_name") != "sglang":
+                continue
+            if ("wideep_context_mla", "wideep_generation_mla") not in self._reachable_attention_op_keys(role):
+                continue
+            from aiconfigurator.sdk.errors import UnsupportedAttentionBackendError
+
+            raise UnsupportedAttentionBackendError(
+                f"SGLang WideEP MLA does not support attention_backend={self.attention_backend!r}; "
+                "supported values: ['fa3', 'flashinfer', 'default']. "
+                "Dense-only SGLang tasks may use the wider attention-backend vocabulary."
+            )
 
     def _validate_agg(self) -> None:
         if not self.model_path:

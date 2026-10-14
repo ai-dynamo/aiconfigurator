@@ -188,7 +188,10 @@ impl MsaTable {
     /// deps). Panics if the lazily-loaded cells were already initialised.
     #[cfg(test)]
     pub(crate) fn inject_for_test(&self, context: DsaGrids, generation: DsaGrids) {
-        assert!(self.context.set(Ok(context)).is_ok(), "context grids already loaded");
+        assert!(
+            self.context.set(Ok(context)).is_ok(),
+            "context grids already loaded"
+        );
         assert!(
             self.generation.set(Ok(generation)).is_ok(),
             "generation grids already loaded"

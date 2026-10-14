@@ -1,5 +1,11 @@
 # AIConfigurator Rust Core
 
+> **Maintenance-only transition:** active development has moved to
+> [AISimulate](https://github.com/ai-dynamo/aisimulate). This crate remains
+> available as an AIConfigurator compatibility surface while the documented
+> migration and removal gates are completed. See the
+> [migration guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/aisimulate_migration.md).
+
 Rust-native core that estimates prefill, decode, and forward-pass latency from
 AIC model metadata and perf files, without re-entering Python on the hot path.
 
@@ -21,9 +27,9 @@ bytes as the Python → Rust wire format, and the Rust `Engine` deserializes and
 interprets it — closer to a compiled query plan than a compiled executable. The
 one-time compile just resolves the model into a fixed, serializable op list so
 the hot path never re-walks the model or re-enters Python. The wire format is
-versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 11, bumped
-from 10 when the wideEP MoE variants were removed and the native large-EP
-variants were appended), the wheel and crate move in
+versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 15, most
+recently bumped when `GdnOp` gained its serialized `mamba_ssm_dtype` field),
+the wheel and crate move in
 lockstep, and the Rust `Engine` rejects a spec with any other version.
 
 - `AicEngineBuilder` is the Rust → Python (`compile_engine`) → Rust entry point
@@ -43,7 +49,7 @@ crate's `embed-python` feature, which enables PyO3's `auto-initialize` support:
 
 ```toml
 [dependencies]
-aiconfigurator-core = { version = "0.11.0", features = ["embed-python"] }
+aiconfigurator-core = { version = "0.12.0", features = ["embed-python"] }
 ```
 
 Applications that embed Python in an existing host may initialize the

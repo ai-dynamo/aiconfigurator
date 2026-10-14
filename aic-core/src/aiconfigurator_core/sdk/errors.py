@@ -47,6 +47,18 @@ class UnsupportedWideepConfigError(ValueError):
     """
 
 
+class UnsupportedAttentionBackendError(ValueError):
+    """Raised when an explicit ``attention_backend`` override names a kernel
+    lane the target backend's collected attention tables do not carry.
+
+    An explicit override is a statement of intent; silently serving it from a
+    donor lane would misattribute another kernel's performance (AIC-1715/1716).
+
+    Subclasses ``ValueError`` so it is reported as an expected CLI error
+    (concise ``Error: <message>`` line, no traceback).
+    """
+
+
 class MissingSystemFlopsError(ValueError):
     """Raised when a quant mode's compute dtype has no ``*_tc_flops`` entry in the system YAML.
 

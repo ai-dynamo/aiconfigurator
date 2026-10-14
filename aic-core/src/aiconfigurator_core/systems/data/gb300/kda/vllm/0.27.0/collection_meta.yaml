@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.27.0
+  image: vllm/vllm-openai:v0.27.0
+  image_digest: sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7
+tables:
+  # SM103 (GB300) vllm kda at upstream v0.27.0 (Kimi-K3 landed upstream; the
+  # manifest kda family pin stays on the preview until the consumer routes
+  # 0.27.0's split decode — see collector/framework_manifest.yaml). Collected
+  # 2026-08-17 on GB300 NVL72 pods with fix/vllm-kda-context-conv-metadata;
+  # the three num_v_heads=96 cases (context / generation / verify) were
+  # re-run 2026-08-19 at c623be7 with the packed_decode grid closure,
+  # refreshing 298 rows — 296 latency values shifted (mean ratio 0.993 vs
+  # the 08-17 table; the only >10% moves are microsecond-scale small-bs
+  # cells, i.e. rerun noise) and 2 are bit-identical. Context conv now
+  # passes serving-parity GDNAttentionMetadata to causal_conv1d_fn
+  # (previously the metadata=None numpy+D2H branch added a ~0.8ms/iter
+  # floor that polluted-shape-flattened the whole 0.1.dev19262 context
+  # series; the same floor is present in every other system's 0.1.dev19262
+  # kda context rows) and times via repeat_n=10 CUDA-graph replay. The
+  # former unverified nt*proj>=2**31 int32 guard is deleted (0.27.0
+  # causal_conv1d is int64 end-to-end; formerly-vetoed cells pass with
+  # SOL-sane timings). The KDA plan is 1200 rows; the parquet has 1142,
+  # so this table is partial. On 2026-08-21, review found that vLLM routes
+  # one-token non-spec batches through decode, while the collector had
+  # forced the shared context-grid seq_len=1 cells through prefill metadata.
+  # The 56 affected rows (4 head counts x 7 batch sizes x 2 prefill kernels)
+  # were removed rather than retained as serving data. The corrected collector
+  # dispatches those cells through causal_conv1d_update plus packed recurrence;
+  # they must be recollected against one complete closure before being added.
+  # The other two missing rows were confirmed by the 08-19 rerun as genuine
+  # kernel/capacity failures recorded in the run checkpoint: (1) generation
+  # fused_recurrent_kda_packed_decode at
+  # (num_v_heads=96, batch_size=1024) still fails launch with "Triton
+  # Error [CUDA]: invalid argument" on 0.27.0 with the grid closure
+  # applied (strict completeness gate: ok=10 error=1) — kernel-side
+  # limit; the same cell is covered by causal_conv1d_update (and by
+  # fused_kda_decode on the preview); (2) context (num_v_heads=96,
+  # batch_size=64, seq_len=32768) still OOMs at input allocation:
+  # "Tried to allocate 48.00 GiB" with 240.87 GiB already in use by the
+  # benchmark process itself on a 276.62 GiB card (ok=111 error=1), so
+  # the failure is capacity, not concurrent-worker contention — misses
+  # only the flashkda_fwd row for that cell (the causal_conv1d_fn_qkv3
+  # row collected fine); SDK interpolation covers the gap.
+  # fused_kda_decode rows are intentionally absent everywhere at 0.27.0:
+  # the is_fused_kda_decode_supported predicate rejects DS conv-state
+  # layout (VLLM_SSM_CONV_STATE_LAYOUT=DS, matching serving on this
+  # image), so generation runs packed_decode + conv update.
+  kda_perf:
+    collector_ref: c623be7c82d3b106a0a94258250e8669a77b26d4
+    collector_hash: sha256:20bc4a950d53065a484c6d6cb03b6200b293fd6a53124a5c5d2c845216696651
+    case_plan_hash: sha256:87acc3a26a0548865cedbf5dc7a2ff6574d94f677d6bc4b7faf66ab5b37328b1
+    collected_at: '2026-08-19'
+    rows: 1142
+    status: partial

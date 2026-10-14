@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "aiconfigurator"
-version = "0.11.0"
+version = "0.12.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiconfigurator-core" },
@@ -97,7 +97,7 @@ provides-extras = ["dev", "service"]
 
 [[package]]
 name = "aiconfigurator-core"
-version = "0.11.0"
+version = "0.12.0"
 source = { editable = "aic-core" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },

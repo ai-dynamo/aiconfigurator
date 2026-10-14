@@ -63,6 +63,34 @@ def test_nvfp4_variant_loads_offline_with_quant_metadata(hf_id, monkeypatch):
     sdk_utils._load_model_config_from_model_path.cache_clear()
 
 
+def test_lightning_nvfp4_loads_bundled_quant_config_offline(monkeypatch):
+    import aiconfigurator.sdk.utils as sdk_utils
+    from aiconfigurator_core.sdk.models.helpers import _get_model_info
+
+    hf_id = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("network path reached")
+
+    monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network)
+    monkeypatch.setattr(sdk_utils, "_download_hf_json", _no_network)
+    sdk_utils.get_model_config_from_model_path.cache_clear()
+    sdk_utils._load_model_config_from_model_path.cache_clear()
+    _get_model_info.cache_clear()
+    try:
+        model_config = _model_config()
+        model = get_model(hf_id, model_config, backend_name="vllm")
+
+        assert model.model_family == "NEMOTRONH"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_static
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    finally:
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        _get_model_info.cache_clear()
+
+
 @pytest.mark.parametrize(
     "hf_id,gemm_mode,moe_mode,kv_mode,fmha_mode",
     [
@@ -164,7 +192,7 @@ def test_qwen36_task_preserves_inferred_provenance_for_mixed_precision_split():
         model_path="nvidia/Qwen3.6-27B-NVFP4",
         system_name="gb300",
         backend_name="sglang",
-        backend_version="0.5.12",
+        backend_version="0.5.16",  # next slot; 0.5.12-era rows reach it via backward fill
         total_gpus=32,
     )
     model_config = task.build_model_config(role="agg")
@@ -199,7 +227,7 @@ def test_qwen36_task_preserves_explicit_gemm_override():
         model_path="nvidia/Qwen3.6-27B-NVFP4",
         system_name="gb300",
         backend_name="sglang",
-        backend_version="0.5.12",
+        backend_version="0.5.16",  # next slot; 0.5.12-era rows reach it via backward fill
         total_gpus=32,
         gemm_quant_mode=common.GEMMQuantMode.fp8_static,
     )
@@ -247,6 +275,39 @@ def test_qwen36_preserves_explicit_global_gemm_override(hf_id, ffn_name, gemm_mo
 
     for name in ("context_gdn_in_proj_gemm", "context_qkv_gemm", ffn_name):
         assert by_name[name]._quant_mode == gemm_mode
+
+
+@pytest.mark.parametrize(
+    ("hf_id", "backend", "moe_mode"),
+    [
+        # vLLM has no weight-only NVFP4 MoE lane: the compressed-tensors
+        # dispatch quantizes activations at run time and serves the w4a4
+        # FP4-tensor-core kernels (collected kernel_source
+        # vllm_compressedtensorsw4a4nvfp4moe_*), so the W4A16_NVFP4 storage
+        # label resolves to the nvfp4 execution mode there (AIC-1748).
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "vllm", common.MoEQuantMode.nvfp4),
+        # Qwen3.6 stays on the weight-only profile even on vLLM: it is served
+        # through HYBRID's calibrated XPROFILE relation by design (the remap
+        # is scoped to architectures with PROVEN w4a4 vLLM dispatch).
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "vllm", common.MoEQuantMode.w4a16_nvfp4),
+        # trtllm/sglang keep the label mode: their dequant-to-BF16 weight-only
+        # MoE path is the real dispatch (the Qwen3.6 profile above).
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "trtllm", common.MoEQuantMode.w4a16_nvfp4),
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "sglang", common.MoEQuantMode.w4a16_nvfp4),
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "trtllm", common.MoEQuantMode.w4a16_nvfp4),
+    ],
+)
+def test_w4a16_nvfp4_label_resolves_to_the_backend_execution_lane(hf_id, backend, moe_mode):
+    model_config = _model_config()
+    get_model(hf_id, model_config, backend_name=backend)
+    assert model_config.moe_quant_mode == moe_mode
+
+
+def test_explicit_w4a16_nvfp4_moe_mode_wins_over_the_vllm_remap():
+    model_config = _model_config()
+    model_config.moe_quant_mode = common.MoEQuantMode.w4a16_nvfp4
+    get_model("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", model_config, backend_name="vllm")
+    assert model_config.moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4
 
 
 def test_w4a16_nvfp4_uses_scale_aware_weight_only_profile():

@@ -1,90 +1,103 @@
-# WideEP Collectors
+# WideEP collectors
 
-WideEP collectors live under this namespace so tooling can choose the right
-runtime image separately from the normal framework collectors.
-
-Each supported framework owns a WideEP-only `registry.py`. Normal framework
-registries stay free of WideEP ops; `collect.py` appends a WideEP registry only
-when the collector-v2 plan or explicit `--ops` requests those ops.
-
-The authoritative framework versions and collector images are in
-`collector/framework_manifest.yaml`. WideEP entries describe their special
-runtime independently from the non-WideEP framework entry.
+WideEP collectors use runtime images independently from the normal framework
+collectors. The authoritative versions, source commits, ABI pins, and images
+are in `collector/framework_manifest.yaml`.
 
 Layout:
 
-- `sglang/collect_deepep_moe.py`: SGLang DeepEP MoE entrypoint (op `moe_ep`).
-- `sglang/collect_moe_a2a.py`: standalone multi-node DeepEP all-to-all
-  collector (unified `moe_a2a_perf` table); launched by
-  `collector/network/slurm/submit_moe_a2a.sh`.
-- `sglang/deepep/`: DEPRECATED multi-node DeepEP log collection and
-  extraction scripts (see below).
-- `trtllm/collect_moe_compute.py`: TensorRT-LLM WideEP MoE compute entrypoint
-  (op `moe_ep`; pins the same image as stock trtllm, so model plans activate
-  it by default for wideep-declared models).
-- `vllm/collect_moe_ep.py`: vLLM fused-experts moe_ep bench path, DORMANT —
-  no registry, no manifest entry, no hash-closures entry until a vLLM-DeepEP
-  image is pinned (plan decision D3; activation procedure below).
+- `sglang/collect_deepep_moe.py`: SGLang DeepEP expert compute (`moe_ep`).
+- `sglang/collect_moe_a2a.py`: standalone multi-node SGLang DeepEP
+  communication (`moe_a2a`).
+- `trtllm/collect_moe_compute.py`: TensorRT-LLM expert compute (`moe_ep`).
+- `trtllm/collect_moe_a2a.py`: TensorRT-LLM serving-path communication.
+- `vllm/collect_moe_a2a.py`: vLLM 0.24.0 serving-path communication for
+  `deepep_ht`, `deepep_ll`, and `deepep_v2`.
+- `vllm/collect_moe_ep.py`: dormant vLLM expert-compute implementation; it is
+  not registered until its serving dispatch identity is hardware-verified.
+- `vllm/slurm/`: the fail-closed six-system canary/full campaign launcher.
+- `vllm/finalize_campaign.py`: validates three independent backend
+  jobs for one system and atomically merges the publishable parquet/sidecar.
+- `trtllm/slurm/`: the fail-closed TensorRT-LLM source-wheel stage and
+  single-node canary/full campaign launcher.
+- `trtllm/finalize_campaign.py`: validates independent HT and LL jobs and
+  merges them without relabeling the pinned TensorRT-LLM runtime.
+- `sglang/deepep/`: deprecated manual log collection and extraction scripts.
 
-## The `sglang/deepep/` pipeline is deprecated
+## vLLM 0.24.0 single-node campaign
 
-The manual pipeline — run the modified DeepEP test scripts on each node,
-tee the stdout to log files, then scrape them with `extract_data.py` —
-derived every identity column (framework, version, device) from module-level
-constants and parsed `node_num` out of a log *filename*. Its replacement,
-`sglang/collect_moe_a2a.py`, runs the same DeepEP HT and low-latency
-benchmarks as a Collector-V3 citizen: identity columns are live (the
-distributed world supplies `ep_size`/`node_num`, torch supplies the device,
-the installed sglang version is cross-checked against the `wideep_sglang`
-manifest pin), rows are emitted into the unified `moe_a2a_perf` table at
-measurement time, and each run finalizes parquet plus a real
-`collection_meta.yaml` sidecar. The old scripts remain in-tree only until
-the new collector is hardware-validated; do not add new data to the shipped
-tables via `extract_data.py`. The legacy `wideep_deepep_{normal,ll}_perf`
-tables already shipped keep loading through the SDK's legacy adapters
-indefinitely — deprecation retires the *pipeline*, not the data.
+The formal matrix is:
 
-## Activating the vLLM `moe_ep` collector (plan decision D3)
+| System | Nodes | GPUs/node | Formal identity |
+| --- | ---: | ---: | --- |
+| `gb200` | 1 | 4 | EP4 |
+| `gb300` | 1 | 4 | EP4 |
+| `b200_sxm` | 1 | 8 | EP8 |
+| `b300_sxm` | 1 | 8 | EP8 |
+| `h100_sxm` | 1 | 8 | EP8 |
+| `h200_sxm` | 1 | 8 | EP8 |
 
-`vllm/collect_moe_ep.py` is complete but dormant because no vLLM-DeepEP
-runtime is pinned. Its dormancy is itself under test
-(`tests/unit/collector/test_vllm_collect_moe_ep.py`): no registry module, no
-manifest family, no hash-closures entry may exist before enrollment.
-Enrollment is one coordinated change:
+Each system runs three independent jobs, one per backend. A short single-node
+canary must succeed for every backend before its full job may be submitted.
+Non-default LL transport flags are diagnostic: the collectors keep staging
+rows but do not finalize parquet or a sidecar under the default identity.
 
-1. Pin a vLLM-DeepEP image: add a `wideep_vllm` entry to
-   `collector/framework_manifest.yaml` (`base_framework: vllm`,
-   `collector_dir: "collector/wideep/vllm"`, `data_backend: vllm`, a
-   `default.version` and digest-pinned `images`).
-2. Create `collector/wideep/vllm/registry.py` with
-   `OpEntry(op="moe_ep", module="collector.wideep.vllm.collect_moe_ep",
-   get_func="get_moe_ep_test_cases", run_func="run_moe_ep",
-   perf_filename=PerfFile.MOE_EXPERT_COMPUTE)`, and enroll the framework key in
-   `collector/framework_manifest.py` `_REGISTRY_MODULES`
-   (`"wideep_vllm": "collector.wideep.vllm.registry"`) — registry/runtime
-   resolution raises for a manifest entry with no registered module.
-3. In the SAME commit (Task-1 sequencing rule: closures may not precede
-   registration), add the `collector.wideep.vllm.collect_moe_ep` entry to
-   `collector/hash_closures.yaml` (base-op yaml extras + `__model_cases__`,
-   like its sglang/trtllm siblings).
-4. Set `__compat__` in `collector/wideep/vllm/collect_moe_ep.py` to the
-   pinned vllm version, and add the kernel-source fact to
-   `collector/kernel_source_backends.yaml`: the module writes
-   `kernel_source: deepep_moe`, which that table currently maps only for
-   `framework: sglang` — the new `{framework: vllm, kernel_source:
-   deepep_moe, backend: ...}` entry needs a citation into the verified vLLM
-   dispatch (the same verification as item 6).
-5. Flip the dormancy pins in
-   `tests/unit/collector/test_vllm_collect_moe_ep.py`
-   (`test_no_vllm_wideep_registry_exists`,
-   `test_manifest_has_no_wideep_vllm_pin`,
-   `test_registry_modules_have_no_wideep_vllm_entry`,
-   `test_kernel_source_backends_have_no_vllm_deepep_moe_mapping`,
-   `test_hash_closures_has_no_entry_for_the_unregistered_module`) into their
-   positive counterparts.
-6. On the pinned image, resolve the module's marked VERIFICATION ITEMs
-   before trusting collected rows: prove that the benchmarked
-   `fused_experts` call is the kernel vLLM's own serving dispatch selects on
-   the large-EP DeepEP path (layer_permissions.md: `kernel_source` records
-   ground truth, manual pins need source proof), and confirm the
-   global-token accounting against a live run.
+`run_vllm_moe_a2a_job.sh` resolves and checks every repository, source,
+image, cache, log, staging, and output path. `/mnt/cifs` and `/mnt/nvdl` are
+always rejected. Artifacts finalize in job-unique `/tmp`, receive parquet and
+sidecar checksums, and are copied to the campaign root only after validation.
+
+The formal launcher rejects every node count other than one. ComputeLab exposes
+B200/B300 through `topology/flat`; consequently B200/B300 submission also
+requires an infrastructure-approved exact nodelist and approval ID. Without
+both, the launcher exits before `sbatch`.
+
+## TensorRT-LLM 1.3.0rc11 single-node campaign
+
+TensorRT-LLM uses the same six-system one-node layout as vLLM: GB200/GB300
+run EP4 on four GPUs, while B200/B300/H100/H200 run EP8 on eight GPUs. Each
+system has two independent chains: `trtllm_deepep_ht` and
+`trtllm_deepep_ll`, with every full job gated by its own successful canary.
+
+The configured runtime identity is the multi-architecture TensorRT-LLM rc20
+container index, used only as the immutable build base. Image staging resolves
+and records the platform child, checks out source commit `14efb6ac`, verifies
+the vendored DeepEP and NVSHMEM pins, builds package version `1.3.0rc11`, and
+records the source-wheel SHA256. The runner installs that wheel in a job-local
+overlay before entering the MPI collector.
+
+Image staging may reuse an already attested same-CPU-architecture squashfs.
+Supplying its wheel directory additionally reuses the complete runtime only
+when the source and target CUDA architecture sets are identical. Seed image,
+wheel, dependencies, pins, and metadata are checksum-validated, and the seed
+provenance is carried through job evidence and the final sidecar. Cross-SM
+wheel reuse fails closed.
+
+Case failures are never allowlisted. A failed full job preserves its partial
+parquet, sidecar, and rank failure records in campaign failure evidence. The
+finalizer rejects those inputs by default; `--allow-partial-evidence` may be
+used only to assemble an explicitly `partial` evidence table, never a complete
+formal publication.
+
+## Deprecated SGLang manual pipeline
+
+The old `sglang/deepep/` scripts derived identity columns from constants and
+parsed `node_num` from log filenames. Do not use them to add shipped data.
+The legacy `wideep_deepep_{normal,ll}_perf` tables remain readable through SDK
+adapters; deprecation retires the producer pipeline, not existing data.
+
+## Activating vLLM `moe_ep`
+
+The vLLM WideEP runtime and empty registry now exist for standalone
+`moe_a2a`, but `collect_moe_ep.py` remains deliberately dormant. Enrollment
+is one coordinated change:
+
+1. Prove on the pinned vLLM 0.24.0 runtime that the benchmarked
+   `fused_experts` call is the serving kernel selected for the large-EP DeepEP
+   path and confirm its global-token accounting.
+2. Add only the verified `moe_ep` `OpEntry` to
+   `collector/wideep/vllm/registry.py` and set the module's `__compat__` pin.
+3. In the same commit, add its collector hash closure and the cited vLLM
+   `deepep_moe` kernel-source mapping.
+4. Replace the dormant contract tests with positive registry, runtime,
+   kernel-identity, and hardware validation tests.

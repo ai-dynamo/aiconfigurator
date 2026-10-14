@@ -37,15 +37,15 @@ Model classes register themselves using the `@register_model` decorator. The dec
 ```python
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 
+
 @register_model("LLAMA")
-class LLAMAModel(BaseModel):
-    ...
+class LLAMAModel(BaseModel): ...
+
 
 @register_model("DEEPSEEK", "KIMIK25")  # one class, two families
 class DeepSeekModel(BaseModel):
     @classmethod
-    def create(cls, model_info, model_config, backend_name):
-        ...  # DeepSeek V3 / R1 + Kimi K2.5 construction
+    def create(cls, model_info, model_config, backend_name): ...  # DeepSeek V3 / R1 + Kimi K2.5 construction
 ```
 
 When the package is imported, all model modules are auto-discovered via `pkgutil.iter_modules`, which triggers the decorators and populates `_MODEL_REGISTRY`.

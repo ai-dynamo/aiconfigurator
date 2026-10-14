@@ -167,6 +167,25 @@ def test_a2a_pair_covered_across_different_dtype_and_sms(a2a_cov_db):
     assert (16, 2) in a2a_cov_db.moe_a2a_coverage(*_SHAPE)["deepep_ht"]
 
 
+def test_a2a_quantized_probe_requires_exact_serving_phase_dtypes(stub_perf_db):
+    stub_perf_db.system = "h100_sxm"
+    stub_perf_db._moe_a2a_data = _store(
+        [
+            (("trtllm_deepep_ht", "dispatch", "bfloat16", 8, 1, *_SHAPE, 0), {32: _leaf(0.1)}),
+            (("trtllm_deepep_ht", "combine", "bfloat16", 8, 1, *_SHAPE, 0), {32: _leaf(0.2)}),
+            (("trtllm_deepep_ll", "dispatch", "fp8", 8, 1, *_SHAPE, 0), {32: _leaf(0.3)}),
+            (("trtllm_deepep_ll", "combine", "fp8", 8, 1, *_SHAPE, 0), {32: _leaf(0.4)}),
+        ]
+    )
+
+    assert stub_perf_db.moe_a2a_coverage(*_SHAPE, common.MoEQuantMode.fp8_block, "context") == {
+        "trtllm_deepep_ht": {(8, 1)}
+    }
+    assert stub_perf_db.moe_a2a_coverage(*_SHAPE, common.MoEQuantMode.fp8_block, "generation") == {
+        "trtllm_deepep_ll": {(8, 1)}
+    }
+
+
 def test_a2a_prepare_neither_required_nor_sufficient(a2a_cov_db):
     coverage = a2a_cov_db.moe_a2a_coverage(*_SHAPE)
     assert (8, 2) in coverage["nvlink_two_sided"]  # covered without any prepare row
@@ -323,6 +342,25 @@ def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
 
 
 # ---------------------------------------------------------------------------
+# legacy_moe_compute_coverage on a synthetic store
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_moe_compute_coverage_uses_regular_expert_kernel_table(stub_perf_db):
+    fp8_block = common.MoEQuantMode.fp8_block
+    stub_perf_db._moe_data = _store(
+        [
+            ((fp8_block, "balanced", 8, 256, 7168, 2048, 1, 64), {32: _leaf(0.1)}),
+            ((fp8_block, "power_law_1.2", 8, 256, 7168, 2048, 1, 128), {32: _leaf(0.2)}),
+            ((fp8_block, "balanced", 8, 256, 7168, 2048, 2, 256), {32: _leaf(0.3)}),
+        ]
+    )
+
+    assert stub_perf_db.legacy_moe_compute_coverage(7168, 2048, 8, 256, fp8_block) == {64, 128}
+    assert stub_perf_db.legacy_moe_compute_coverage(4096, 2048, 8, 256, fp8_block) == set()
+
+
+# ---------------------------------------------------------------------------
 # Shipped-data smoke: real databases, legacy-adapted tables
 # ---------------------------------------------------------------------------
 
@@ -332,7 +370,7 @@ def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
     reason="shipped h200_sxm sglang 0.5.6.post2 DeepEP parquets not present",
 )
 def test_shipped_h200_sglang_a2a_coverage():
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     coverage = db.moe_a2a_coverage(*_SHAPE)
@@ -350,7 +388,7 @@ def test_shipped_h200_sglang_a2a_coverage():
     reason="shipped gb200 trtllm 1.3.0rc10 alltoall parquet not present",
 )
 def test_shipped_gb200_trtllm_a2a_coverage():
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     coverage = db.moe_a2a_coverage(*_SHAPE)
@@ -368,7 +406,7 @@ def test_shipped_gb200_trtllm_a2a_coverage():
     reason="shipped h200_sxm sglang 0.5.6.post2 wideep context moe parquet not present",
 )
 def test_shipped_h200_sglang_ep_compute_coverage():
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     # deepep_moe fp8_block context data covers ep {2..256} at this shape.
@@ -381,7 +419,7 @@ def test_shipped_h200_sglang_ep_compute_coverage():
     reason="shipped gb200 trtllm 1.3.0rc10 wideep moe parquet not present",
 )
 def test_shipped_gb200_trtllm_ep_compute_coverage():
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     # The legacy trtllm wideep table has no phase split; the adapter registers

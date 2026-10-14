@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import weakref
 from pathlib import Path
 
 import pyarrow as pa
@@ -375,8 +376,161 @@ def test_incomplete_comm_dir_vetoes_nccl_view(systems_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Probe-spec memo: governed by the documented eviction levers (round 2)
+# Probe-spec and attention-density memos: governed by the eviction generation
 # ---------------------------------------------------------------------------
+
+
+class _LaneDensityEngine:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def attention_lane_density(self, attribute):
+        self.calls.append(attribute)
+        return self.response(attribute, len(self.calls))
+
+
+class _LaneDensityHandle:
+    def __init__(self, engine):
+        self._engine = engine
+
+
+class _LaneDensityDatabase:
+    def __init__(self, shared_layer=True):
+        self._shared_layer_mode = shared_layer
+        self._source_reports_materialized = False
+
+    @property
+    def enable_shared_layer(self):
+        return self._shared_layer_mode
+
+
+def test_repeated_attention_density_fetches_reuse_engine_result_and_isolate_callers(monkeypatch) -> None:
+    from aiconfigurator_core.sdk import engine, engine_table_view
+
+    def response(attribute, _call_count):
+        assert attribute == "_context_attention_data"
+        return [("fa3", 4, 20), ("triton", 2, 8)]
+
+    handle = _LaneDensityHandle(_LaneDensityEngine(response))
+    database = _LaneDensityDatabase()
+    monkeypatch.setattr(engine, "_PROBE_CACHE_GENERATION", 17)
+    monkeypatch.setattr(engine_table_view, "_probe_engine_handle", lambda _database: handle)
+
+    first = engine_table_view.fetch_attention_lane_density(database, "_context_attention_data")
+    first["fa3"] = (0, 0)
+
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data") == {
+        "fa3": (4, 20),
+        "triton": (2, 8),
+    }
+    assert handle._engine.calls == ["_context_attention_data"]
+
+
+def test_attention_density_cache_separates_effective_shared_layer_views(monkeypatch) -> None:
+    from aiconfigurator_core.sdk import engine, engine_table_view
+
+    database = _LaneDensityDatabase()
+    probed_views = []
+
+    def probe(view):
+        probed_views.append(view)
+        lane = "shared" if view.enable_shared_layer else "primary"
+        return _LaneDensityHandle(_LaneDensityEngine(lambda _attribute, _call_count: [(lane, 1, 1)]))
+
+    monkeypatch.setattr(engine, "_PROBE_CACHE_GENERATION", 23)
+    monkeypatch.setattr(engine_table_view, "_probe_engine_handle", probe)
+
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data") == {"shared": (1, 1)}
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data", shared_layer=False) == {
+        "primary": (1, 1)
+    }
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data", shared_layer=True) == {
+        "shared": (1, 1)
+    }
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data", shared_layer=False) == {
+        "primary": (1, 1)
+    }
+
+    assert len(probed_views) == 2
+    assert probed_views[0] is database
+    assert probed_views[1] is not database
+    assert probed_views[1].enable_shared_layer is False
+    assert probed_views[1]._source_reports_materialized is True
+    assert database._source_reports_materialized is False
+
+
+def test_attention_density_cache_separates_attributes_and_refetches_after_generation_advance(monkeypatch) -> None:
+    from aiconfigurator_core.sdk import engine, engine_table_view
+
+    def response(attribute, call_count):
+        return [(f"{attribute}:{call_count}", call_count, call_count)]
+
+    handle = _LaneDensityHandle(_LaneDensityEngine(response))
+    database = _LaneDensityDatabase()
+    monkeypatch.setattr(engine, "_PROBE_CACHE_GENERATION", 31)
+    monkeypatch.setattr(engine_table_view, "_probe_engine_handle", lambda _database: handle)
+
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data") == {
+        "_context_attention_data:1": (1, 1)
+    }
+    assert engine_table_view.fetch_attention_lane_density(database, "_generation_attention_data") == {
+        "_generation_attention_data:2": (2, 2)
+    }
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data") == {
+        "_context_attention_data:1": (1, 1)
+    }
+
+    monkeypatch.setattr(engine, "_PROBE_CACHE_GENERATION", 32)
+
+    assert engine_table_view.fetch_attention_lane_density(database, "_context_attention_data") == {
+        "_context_attention_data:3": (3, 3)
+    }
+    assert handle._engine.calls == [
+        "_context_attention_data",
+        "_generation_attention_data",
+        "_context_attention_data",
+    ]
+
+
+def test_store_loaded_database_refreshes_same_path_attention_probes(systems_root: Path) -> None:
+    """Publishing a freshly loaded database after an in-place parquet update
+    must evict the Rust probe snapshot and every generation-tagged Python memo."""
+    from aiconfigurator_core.sdk import engine, engine_table_view, perf_database
+
+    rel = "data/h100_sxm/attention/trtllm/1.0.0/context_attention_perf.parquet"
+    old_columns = _attention_columns([0])
+    old_columns["kernel_source"] = ["fa3"]
+    _write_parquet(systems_root, rel, old_columns)
+
+    retained_database = _build_db(systems_root)
+    assert engine_table_view.fetch_attention_lane_density(retained_database, "_context_attention_data") == {
+        "fa3": (1, 1)
+    }
+    old_handle = weakref.ref(engine_table_view._probe_engine_handle(retained_database))
+    assert old_handle() is not None
+    old_generation = engine._PROBE_CACHE_GENERATION
+
+    new_columns = _attention_columns([0])
+    new_columns["kernel_source"] = ["triton"]
+    _write_parquet(systems_root, rel, new_columns)
+    replacement = _build_db(systems_root)
+    loaded_databases = perf_database._new_database_dict()
+    ref = ("h100_sxm", "trtllm", "1.0.0", str(systems_root))
+
+    perf_database._store_loaded_database(loaded_databases, ref, replacement)
+
+    assert old_generation + 1 == engine._PROBE_CACHE_GENERATION
+    assert engine._PROBE_HANDLE_CACHE == {}
+    assert old_handle() is None
+    installed = loaded_databases["h100_sxm"]["trtllm"]["1.0.0"]
+    assert installed is replacement
+    assert engine_table_view.fetch_attention_lane_density(installed, "_context_attention_data") == {"triton": (1, 1)}
+    replacement_handle = engine_table_view._probe_engine_handle(installed)
+    assert engine_table_view.fetch_attention_lane_density(retained_database, "_context_attention_data") == {
+        "triton": (1, 1)
+    }
+    assert engine_table_view._probe_engine_handle(retained_database) is replacement_handle
 
 
 def _gemm_columns(latency: float) -> dict[str, list]:

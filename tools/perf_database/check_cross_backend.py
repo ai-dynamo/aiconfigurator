@@ -1365,7 +1365,8 @@ def render_markdown(
         "Below speed-of-light (physically impossible measurements)",
         "system | op_file | backend | dtype | points | worst x of SOL | worst example",
         [
-            f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['gemm_dtype']} | "
+            f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | "
+            f"{a.get('gemm_dtype') or a.get('moe_dtype', '')} | "
             f"{a['points']} | {a['worst_fraction_of_sol']:.2f} | "
             f"{_fmt_shape(a['example_shape'])}: {a['example_latency']:.4g} vs SOL {a['example_sol']:.4g}"
             for a in sorted(v["below_sol"], key=lambda x: x["worst_fraction_of_sol"])

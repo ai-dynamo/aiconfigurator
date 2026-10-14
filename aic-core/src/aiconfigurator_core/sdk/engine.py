@@ -107,6 +107,16 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `strict_provenance` policy flags; the engine re-derives every table's
 #   source list from the perf-data tree
 #   (`perf_database/source_resolution.rs`).
+# - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
+#   op-layout change (the serde default covers JSON only).
+# - 15 (AIC-1715/1716): Context/Generation attention ops gained `lane_order`
+#   (always serialized — bincode decodes positionally). Concurrently claimed
+#   v8, v9, v10, and v12 on its own branch (v8 alongside #1503's v7/v8, v9
+#   alongside #1461's `Op::FpmForward` v9, v10 alongside issue #1498's Mhc
+#   `seq_split` v10, v12 alongside PR-6's `DsaModuleOp`
+#   `attn_projection_quant_modes` v12, and v14 alongside #1533's
+#   `GdnOp::mamba_ssm_dtype` v14); each landed first, so this renumbers to 15
+#   at merge (same v3/v4, v5/v6 precedent).
 # Single owner: the Rust crate constant. Python re-exports it for
 # diagnostics/tests instead of declaring a twin to keep in sync.
 ENGINE_SPEC_SCHEMA_VERSION = aiconfigurator_core.engine_spec_schema_version()
@@ -198,6 +208,39 @@ def _strict_provenance_flag(database: Any) -> bool:
     return bool(getattr(database, "strict_provenance", False)) if database is not None else False
 
 
+def _literal_backend_version(
+    system: str,
+    backend: str,
+    backend_version: str | None,
+    systems_path: str | None,
+    database: Any,
+) -> str | None:
+    """Resolve the version the ``EngineSpec`` carries to a LITERAL directory name.
+
+    The Rust side reloads the perf database from this string
+    (``AicEngine.from_spec`` and the native ``AicEngineBuilder`` path used by
+    the Dynamo Mocker) and resolves no slot aliases — slot semantics
+    (``current`` / ``previous`` / ``next``) live in the python layer only.
+    Preference order: the loaded database's own version (the ground truth for
+    what the spec was compiled against), then slot resolution of the request
+    (an omitted version means the ``current`` slot). Slot-policy errors
+    (unlisted versions, unpopulated aliases) PROPAGATE — the spec builder is
+    a user-level surface and must not smuggle ungated coordinates onto the
+    wire. Trees without a slots file (synthetic/external) keep the ungated
+    passthrough.
+    """
+    resolved = getattr(database, "version", None) if database is not None else None
+    if resolved:
+        return str(resolved)
+    from aiconfigurator_core.sdk import perf_database
+
+    slots = perf_database.get_version_slots(system, backend, systems_paths=systems_path)
+    if slots is None:
+        return backend_version
+    requested = "current" if backend_version is None else backend_version
+    return perf_database.resolve_query_version(system, backend, requested, systems_paths=systems_path)
+
+
 def _engine_config_dict(
     *,
     model: Any,
@@ -233,7 +276,9 @@ def _engine_config_dict(
         "system_name": system,
         "systems_path": systems_path,
         "backend": backend,
-        "backend_version": backend_version,
+        # Always a literal version directory name, never a slot alias — the
+        # Rust side reloads the perf database from this string verbatim.
+        "backend_version": _literal_backend_version(system, backend, backend_version, systems_path, database),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
@@ -259,6 +304,11 @@ def _engine_config_dict(
         # is always explicit kind tokens, ``None`` = the default ALL policy.
         "database_mode": _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Directory-less fleet-`next` marker (design §14): set only when the
+        # loaded database rode backward fill without a local version
+        # directory, so the Rust reload skips its missing-directory gate for
+        # exactly this identity.
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn at the top level
@@ -321,6 +371,7 @@ def compile_engine(
     kvcache_quant_mode: str | None = None,
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
+    attention_backend: str | None = None,
     nextn: int = 0,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
@@ -350,23 +401,26 @@ def compile_engine(
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
         forward_model=forward_model,
+        attention_backend=attention_backend,
     )
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.
     apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
-    # The database supplies the shared-layer perf sources, the query mode and
-    # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
-    # and tolerate failure; the Rust core falls back to its own defaults.
-    database = _maybe_load_database(system, backend, backend_version, systems_path)
+    # Slot policy FIRST, tolerance second: resolve the requested version to a
+    # literal (raising on unlisted versions / unpopulated aliases) before the
+    # tolerant database load — `_maybe_load_database` forgives LOAD failures
+    # (the Rust core falls back to its own defaults), never policy violations.
+    literal_version = _literal_backend_version(system, backend, backend_version, systems_path, None)
+    database = _maybe_load_database(system, backend, literal_version, systems_path)
 
     spec_json = build_engine_spec_json(
         model,
         model_path=model_path,
         system=system,
         backend=backend,
-        backend_version=backend_version,
+        backend_version=literal_version,
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=model_config.nextn,
@@ -387,6 +441,33 @@ def build_ops_json(ops: Any) -> str:
     return _ops_json(ops)
 
 
+def _resolve_attention_lane_orders(ops: Any, database: Any, override: str | None) -> None:
+    """Set ``_lane_order`` on every ``ContextAttention``/``GenerationAttention``
+    in *ops*, mutating in place.
+
+    AIC-1715/1716: attention ops are constructed by the model layer without a
+    database handle (models are pure shape graphs), so the kernel-lane
+    precedence (resolver YAML + the loaded table's own leftover lanes) can
+    only be resolved here, at spec build, where *database* is available —
+    same place ``_wideep_moe`` pre-bakes its kernel_source. Every op not
+    explicitly re-resolved keeps the always-valid ``["default"]`` its pyo3
+    constructor already carries.
+    """
+    from aiconfigurator_core.sdk.operations.attention import (
+        ContextAttention,
+        GenerationAttention,
+        resolved_lane_order_for_op,
+    )
+
+    for op in ops:
+        if isinstance(op, ContextAttention):
+            op._lane_order = resolved_lane_order_for_op(database, "_context_attention_data", override)
+        elif isinstance(op, GenerationAttention):
+            op._lane_order = resolved_lane_order_for_op(database, "_generation_attention_data", override)
+        elif isinstance(op, FPMForwardOp):
+            _resolve_attention_lane_orders(op._sol_ops, database, override)
+
+
 def build_engine_spec_json(
     model: Any,
     *,
@@ -404,6 +485,15 @@ def build_engine_spec_json(
     Separated from ``compile_engine`` so the op-transfer round-trip test can
     inspect the JSON (and the decoded ops) without going through bincode.
     """
+    # AIC-1715/1716: resolve each attention op's kernel-lane walk now that a
+    # database is in hand (see `_resolve_attention_lane_orders`). The
+    # `attention_backend` override is a model-level knob (`ModelConfig`, not
+    # per-op) — every model family gets a valid, table-aware lane order this
+    # way, whether or not it exposes the override.
+    override = getattr(getattr(model, "config", None), "attention_backend", None)
+    _resolve_attention_lane_orders(model.context_ops, database, override)
+    _resolve_attention_lane_orders(model.generation_ops, database, override)
+
     # Vision encoder ops are intentionally NOT emitted into the spec.
     #
     # The compile path threads no image configuration (num_images_per_request,
@@ -474,6 +564,10 @@ def build_database_probe_spec_json(
         "strict_provenance": _strict_provenance_flag(database),
         "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Same dir-less-next tolerance as the model spec builder: a database
+        # get_database returned as valid must stay valid through the probe
+        # handle (table views, ad-hoc op-list evaluation).
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     spec = {
@@ -594,20 +688,32 @@ def _evaluate_single_op(
     ``SOL_FULL`` decomposition triple) — that dimension left with the shims;
     per-call SOL decomposition is served by
     ``EngineHandle.evaluate_ops_sol_json`` directly."""
+    from aiconfigurator_core.sdk.operations.attention import ContextAttention, GenerationAttention
     from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
-    ops_json = build_ops_json([op])
-    eval_kwargs = dict(
-        is_context=bool(is_context),
-        batch_size=int(batch_size),
-        s=int(s),
-        prefix=int(prefix),
-        imbalance_correction_scale=float(imbalance_correction_scale),
-        x=None if x is None else int(x),
-    )
-    handle = _probe_handle_for(database, None)
-    (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
-    return PerformanceResult(latency, energy=energy, source=source)
+    # AIC-1715/1716: a fresh attention op needs a table-aware lane order, but
+    # callers may already have pinned one. Resolve only the default sentinel
+    # and restore it after this evaluation so shared model ops are immutable.
+    restore_lane_order = isinstance(op, (ContextAttention, GenerationAttention)) and op._lane_order == ["default"]
+    original_lane_order = op._lane_order if restore_lane_order else None
+    try:
+        if restore_lane_order:
+            _resolve_attention_lane_orders([op], database, None)
+        ops_json = build_ops_json([op])
+        eval_kwargs = dict(
+            is_context=bool(is_context),
+            batch_size=int(batch_size),
+            s=int(s),
+            prefix=int(prefix),
+            imbalance_correction_scale=float(imbalance_correction_scale),
+            x=None if x is None else int(x),
+        )
+        handle = _probe_handle_for(database, None)
+        (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
+        return PerformanceResult(latency, energy=energy, source=source)
+    finally:
+        if restore_lane_order:
+            op._lane_order = original_lane_order
 
 
 def _maybe_load_database(system: str, backend: str, backend_version: str | None, systems_path: str | None) -> Any:

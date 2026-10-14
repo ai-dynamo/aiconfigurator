@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AIC Maintenance Report
+description: Report a regression in supported AIC behavior or a blocker to AISimulate migration
+title: "[AIC Maintenance] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > AIConfigurator is maintenance-only. New features and active product
+        > development belong in [AISimulate](https://github.com/ai-dynamo/aisimulate/issues/new/choose).
+        > Do not disclose security vulnerabilities here; use the repository's
+        > [private security policy](https://github.com/ai-dynamo/aiconfigurator/security/policy).
+
+  - type: dropdown
+    id: maintenance_scope
+    attributes:
+      label: Maintenance scope
+      description: Select the supported reason this report remains in AIC.
+      options:
+        - Regression in previously supported AIC behavior
+        - Blocker to migration from AIC to AISimulate
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: AIC version or commit
+      placeholder: "For example: 0.11.0 or a full commit SHA"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and impact
+      description: Describe the observed behavior, expected behavior, and user impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest safe commands, configuration, and logs that reproduce the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: migration_context
+    attributes:
+      label: Migration context
+      description: If this blocks migration, explain which AISimulate migration step is blocked.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirmed this is not a new feature or new coverage request for AISimulate.
+          required: true
+        - label: I removed secrets, credentials, and security-vulnerability details from this public report.
+          required: true

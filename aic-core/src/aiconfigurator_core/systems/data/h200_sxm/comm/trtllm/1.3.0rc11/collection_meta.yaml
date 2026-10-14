@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: trtllm_a2a
+  version: 1.3.0rc11
+  image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88
+  image_variant: linux/amd64
+  image_digest: sha256:9b3b4dfb811caa9420fa99a6f958155f6a1f727ffc2b5a5c2d9d2ce51fdc323d
+  source_commit: 14efb6ac673c0cbe828e1206cc5c7d5748d05ffa
+  abi:
+    build_mode: source-wheel-over-pinned-base
+    deep_ep: 5be51b228a7c82dbdb213ea58e77bffd12b38af8
+    nvshmem: 3.2.5-1
+    nvshmem_archive_sha256: eb2c8fb3b7084c2db86bd9fd905387909f1dfd483e7b45f7b3c3d5fcf5374b5a
+    campaign_system: h200_sxm
+    campaign_ep_size: '8'
+    campaign_backends: trtllm_deepep_ht,trtllm_deepep_ll
+    source_wheel_sha256: 0ffa94865576a25430cc586c4ae6ab6aaa62d455bcfb9b6377d0258acdee777b
+    configured_image_digest: sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88
+    slurm_topology_verified: 'true'
+    runtime_seed_provenance: '{"cuda_arches":"90-real","mode":"runtime","source_image_digest":"sha256:9b3b4dfb811caa9420fa99a6f958155f6a1f727ffc2b5a5c2d9d2ce51fdc323d","source_image_meta_sha256":"9d86f80d9ceec6adaa4655263f514441d12640c4c87ca8b71fe5566487f68568","source_image_sha256":"4fbe1c3778fb2b3a3fdaa38f7bd2fd7c9f48f3e6d787f12e132da7225f299454","source_system":"h100_sxm","source_wheel_meta_sha256":"9d86f80d9ceec6adaa4655263f514441d12640c4c87ca8b71fe5566487f68568","source_wheel_sha256":"0ffa94865576a25430cc586c4ae6ab6aaa62d455bcfb9b6377d0258acdee777b"}'
+tables:
+  moe_a2a_perf:
+    collector_ref: 65aab00d1a52a2924755ef2c389442c645571409
+    collector_hash: sha256:f071c60f13d7f6854358ac0b5d43a52101775e78b017f61900a6142ca7dc53ee
+    case_plan_hash: sha256:d29a87ece23d31e3a98343b63b5e58bbb5d40c7e68b4960247cd006534b4e9ff
+    collected_at: '2026-08-31'
+    rows: 564
+    classified_failures: 42
+    status: partial

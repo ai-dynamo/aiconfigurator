@@ -41,6 +41,7 @@ from sglang.srt.layers.deep_gemm_wrapper import (
     gemm_nt_f8f8bf16,
 )
 from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+from sglang.srt.layers.quantization.fp8_utils import requant_weight_ue8m0
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -124,6 +125,29 @@ def fp8_gemm_deepgemm(
 def scale_shape(shape, group_shape):
     assert len(shape) == len(group_shape)
     return tuple(cdiv(shape[i], group_shape[i]) for i in range(len(group_shape)))
+
+
+def _prepare_fp8_block_weights(N, K, device, ue8m0):  # noqa: N803
+    """Build the fp8_block GEMM weight and its block scale, once, at setup.
+
+    When ``ue8m0`` is true (the DeepGEMM UE8M0 scale path,
+    ``DEEPGEMM_SCALE_UE8M0``), the weight/scale pair is requantized here via
+    ``requant_weight_ue8m0`` -- the same one-time, load-time repacking
+    SGLang serving performs in
+    ``Fp8LinearMethod.process_weights_after_loading_block_quant``
+    (sglang/srt/layers/quantization/fp8.py:538-563, pinned v0.5.14 clone)
+    -- instead of leaving raw fp32 scales for ``deep_gemm::fp8_gemm_nt`` to
+    re-pack on every timed call. When ``ue8m0`` is falsy (Hopper), the
+    weight/scale are returned unpacked, matching serving's fp32-scale path.
+    """
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
+    b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
+    del b_fp32
+    scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
+    if ue8m0:
+        b_fp8, scale_b = requant_weight_ue8m0(b_fp8, scale_b, [128, 128])
+    return b_fp8, scale_b
 
 
 def per_token_quant_int8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -226,12 +250,8 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             return gemm_op
 
         elif gemm_type == "fp8_block":
-            fp8_info = torch.finfo(torch.float8_e4m3fn)
             a_bf16 = torch.randn(M, K, dtype=dtype, device=device)
-            b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
-            b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
-            del b_fp32
-            scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
+            b_fp8, scale_b = _prepare_fp8_block_weights(N, K, device, ue8m0=DEEPGEMM_SCALE_UE8M0)
             out = torch.empty((M, N), device=device, dtype=dtype)
 
             def gemm_op():

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.helpers import check_is_moe
-from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
+from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, communication_dtype_for, nodes_for
 
 #: Model families whose classes construct a large-EP graph when the enumerator
 #: sets ``ModelConfig.moe_comm_backend``. The enumerator must never assign a
@@ -422,7 +422,7 @@ def _default_moe_block_ops(
 # ---------------------------------------------------------------------------
 
 
-def _dispatch_dtype(comm_backend: str, quant_mode) -> str:
+def _dispatch_dtype(comm_backend: str, quant_mode, *, system: str | None, inference_phase: str) -> str:
     """Comm-table dtype key for the prepare/dispatch phases.
 
     DeepEP rows have no dtype axis — the adapted tables key everything under
@@ -433,12 +433,16 @@ def _dispatch_dtype(comm_backend: str, quant_mode) -> str:
     resolves to the ``fp8`` rows at query time — the same behavioral aliasing
     the legacy ``_normalize_quant_mode_for_table`` applied.
     """
-    if comm_backend.startswith("deepep"):
-        return "default"
-    return quant_mode.name
+    return communication_dtype_for(
+        system=system,
+        comm_backend=comm_backend,
+        model_quantization=quant_mode,
+        communication_phase="dispatch",
+        inference_phase=inference_phase,
+    )
 
 
-def _combine_dtype(comm_backend: str, quant_mode, inference_phase: str) -> str:
+def _combine_dtype(comm_backend: str, quant_mode, inference_phase: str, *, system: str | None) -> str:
     """Comm-table dtype key for the combine phase.
 
     DeepEP: ``"default"`` (no dtype axis). nvlink: the adapted tables pin the
@@ -448,11 +452,13 @@ def _combine_dtype(comm_backend: str, quant_mode, inference_phase: str) -> str:
     post_dispatch site (deepseek.py:798-812) never passes the flag — context
     combine stays on the standard rows keyed by the run dtype.
     """
-    if comm_backend.startswith("deepep"):
-        return "default"
-    if inference_phase == "generation" and quant_mode == common.MoEQuantMode.nvfp4:
-        return "fp4"
-    return quant_mode.name
+    return communication_dtype_for(
+        system=system,
+        comm_backend=comm_backend,
+        model_quantization=quant_mode,
+        communication_phase="combine",
+        inference_phase=inference_phase,
+    )
 
 
 def _large_ep_shared_expert_ops(
@@ -601,7 +607,12 @@ def _large_ep_block_ops(
                 f"{prefix}_moe_{comm_phase}",
                 scale_factor,
                 phase=comm_phase,
-                comm_dtype=_dispatch_dtype(comm_backend, quant_mode),
+                comm_dtype=_dispatch_dtype(
+                    comm_backend,
+                    quant_mode,
+                    system=getattr(cfg, "system", None),
+                    inference_phase=inference_phase,
+                ),
                 **a2a_kwargs,
             )
         )
@@ -628,7 +639,12 @@ def _large_ep_block_ops(
             f"{prefix}_moe_combine",
             scale_factor,
             phase="combine",
-            comm_dtype=_combine_dtype(comm_backend, quant_mode, inference_phase),
+            comm_dtype=_combine_dtype(
+                comm_backend,
+                quant_mode,
+                inference_phase,
+                system=getattr(cfg, "system", None),
+            ),
             **a2a_kwargs,
         )
     )

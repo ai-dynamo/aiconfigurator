@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.27.0
+  image: vllm/vllm-openai:v0.27.0
+  # arm64 entry of the v0.27.0 multi-arch index; same pin as the manifest's
+  # megamoe family override (grace_blackwell), verified in-container (vllm reports
+  # 0.27.0, torch 2.13.0+cu130).
+  image_digest: sha256:7441a0579b7974fe00eec2c41a5710bcd0dc3dafc03edcdc5663158dd68286cf
+tables:
+  # GB300 custom allreduce, full TP ladder for vllm 0.27.0: TP2/TP4 (intra-node)
+  # + TP8 (2 trays) + TP16 (4 trays), collected 2026-08-14 via torchrun on the
+  # 4-node x 4-GPU NVL fleet (ziyang-dev-027 LWS, node2 domain).
+  # This REVISED the earlier 0.26.1rc1.dev542 nightly rows: comm has no reuse
+  # channel (R3) and no shared-layer fallback, so once megamoe made 0.27.0 the
+  # latest gb300 vllm version the nightly dir would have been unreachable. The
+  # re-collection also validated "the data does not move with the vllm version":
+  # TP8/16 graph-mode latencies vs the dev542 nightly agree within 1.35% mean
+  # (eager small-message cells jitter ±10-17% run-to-run on both builds, same
+  # noise floor). TP2/TP4 rows are fresh 0.27.0 measurements (dev542 shipped
+  # none; 0.24.0's differ by construction only in collection date).
+  # kernel_source caveat: vLLM_custom_{eager,graph} records collector launch
+  # mode, not the per-call backend. vLLM v0.27.0 dispatches through
+  # vllm/distributed/device_communicators/cuda_communicator.py:275-341;
+  # cross-node custom AR is rejected by custom_all_reduce.py:348-361 before
+  # SYMM_MEM/PyNCCL fallback. This run did not instrument that size-dependent
+  # choice, so TP8/TP16 cannot be relabeled retrospectively without fabricating
+  # provenance; recollection must record it.
+  custom_allreduce_perf:
+    status: complete

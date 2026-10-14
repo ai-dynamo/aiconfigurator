@@ -1,11 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: 1
-provenance: legacy
+schema_version: 2
+provenance: collected
 runtime:
   framework: sglang
   version: 0.5.14
+  image: lmsysorg/sglang:v0.5.14
+  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gemm_perf:
+    # 2026-08-13: REPLACED all 29526 fp8_block rows (AIC-1744) — the prior
+    # rows billed load-time UE8M0 weight-scale packing inside every timed
+    # call (~9 us on a ~7 us gemm); the collector now pre-packs at setup
+    # exactly as serving's process_weights_after_loading does, and the
+    # timed op is act-quant + gemm only (so these rows now legitimately
+    # include the per-token-group quant serving pays each step).
+    # Example m32 @ n5120xk4096: 20.6 -> 11.6 us. Same key grid;
+    # values-only replacement, deliberate append-only exception.
+    # Auto-collector parent pipeline 62505363, child 62505550, job 395795387;
+    # ops gemm,gdn, exact model filter Qwen/Qwen3.5-397B-A17B.
+    rows: 130536
     status: complete
+    collections:
+      # Exact collector sidecar emitted for the full campaign; only its
+      # fp8_block slice was selected for the values-only replacement above.
+      - collector_ref: 24a0d97479d63062af49f3cb41981e4c55f421ab
+        collector_hash: sha256:f7221785c44f83fde369369f1240f74f66a626851c8f92ab19e08ff6557bfdca
+        case_plan_hash: sha256:5e12321dc5ba7b83638bcb17922ec0d3f6739a75b44f5a063cadbb89807642b2
+        collected_at: '2026-08-13'
+        rows: 29526
+        status: partial
+        source_campaign_rows: 130906
+        source_campaign_status: partial

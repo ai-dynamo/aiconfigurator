@@ -1,0 +1,1292 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Standalone TensorRT-LLM serving-parity DeepEP ``moe_a2a`` collector.
+
+The implementation is pinned to TensorRT-LLM source commit
+``14efb6ac673c0cbe828e1206cc5c7d5748d05ffa`` and mirrors
+``tests/microbenchmarks/bench_moe_comm.py`` at that commit.  In particular it
+constructs MPI ``Mapping``/``ModelConfig`` objects and calls
+``CommunicationFactory._create_forced_method`` directly.  Calling
+``create_strategy`` here would be incorrect: its serving selector tries the
+MNNVL NVLink methods before DeepEP, so an NVLink-capable machine could produce
+successfully measured but mislabeled rows.
+
+The two persisted identities come from ``wideep.backend_contracts``:
+``trtllm_deepep_ht`` forces ``DEEPEP`` and ``trtllm_deepep_ll`` forces
+``DEEPEPLOWLATENCY``.  Both execute only dispatch and combine (prepare is setup,
+never a row), record ``kernel_source=deepep`` and ``sms=0``, and share the
+unified row builder/finalizer with the other ``moe_a2a`` producers.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from aiconfigurator_core.sdk.operations.moe_comm import communication_dtype_for as _shared_communication_dtype_for
+from collector.framework_manifest import get_collector_runtime
+from collector.helper import finalize_perf_files, log_perf, stale_output_artifacts
+from collector.registry_types import PerfFile
+from collector.wideep.backend_contracts import contract_for
+from collector.wideep.distributed_lifecycle import StageAgreement, agree_stage, raise_for_stage
+from collector.wideep.sglang.collect_moe_a2a import (
+    MoeA2AShape as _MoeA2AGeometry,
+)
+from collector.wideep.sglang.collect_moe_a2a import (
+    _build_moe_a2a_row,
+    write_moe_a2a_sidecar,
+)
+
+__compat__ = "trtllm==1.3.0rc11"
+
+MODULE_NAME = "collector.wideep.trtllm.collect_moe_a2a"
+OP_NAME = "moe_a2a"
+FRAMEWORK = "TRTLLM"
+MANIFEST_FRAMEWORK = "trtllm_a2a"
+TARGET_SOURCE_COMMIT = "14efb6ac673c0cbe828e1206cc5c7d5748d05ffa"
+KERNEL_SOURCE = "deepep"
+SMS = 0
+
+COMM_BACKEND_HT = "trtllm_deepep_ht"
+COMM_BACKEND_LL = "trtllm_deepep_ll"
+FORMAL_SYSTEMS = frozenset({"gb200", "gb300", "b200_sxm", "b300_sxm", "h100_sxm", "h200_sxm"})
+HOPPER_SYSTEMS = frozenset({"h100_sxm", "h200_sxm"})
+FORCED_METHODS = {
+    COMM_BACKEND_HT: "DEEPEP",
+    COMM_BACKEND_LL: "DEEPEPLOWLATENCY",
+}
+INFERENCE_PHASES = {
+    COMM_BACKEND_HT: "context",
+    COMM_BACKEND_LL: "generation",
+}
+# TensorRT-LLM 14efb6a:
+# _torch/modules/fused_moe/communication/deep_ep_low_latency.py
+# DeepEPLowLatency.SUPPORTED_HIDDEN_SIZES. This constrains only which declared
+# case represents LL in a canary; the full plan remains unchanged.
+LL_CANARY_HIDDEN_SIZES = frozenset({2048, 2560, 3584, 4096, 5120, 6144, 7168})
+# DeepEP 5be51b2 csrc/kernels/internode_ll.cu:341-349.
+LL_CANARY_MAX_TOPK = 9
+PHASES = ("combine", "dispatch")
+ERRORS_FILENAME_TEMPLATE = "errors_moe_a2a_trtllm.rank{rank}.json"
+
+
+class MoeA2ADeclarationError(RuntimeError):
+    """A declared case, runtime identity, or persisted identity is invalid."""
+
+
+class MoeA2ABenchmarkError(RuntimeError):
+    """A queued benchmark case failed; it must become classified failure data."""
+
+
+class MoeA2AWriteError(RuntimeError):
+    """A row/finalization write failed; collection must not look successful."""
+
+
+class MoeA2APeerError(RuntimeError):
+    """Another distributed rank failed the same queued case."""
+
+
+@dataclass(frozen=True)
+class DistIdentity:
+    rank: int
+    world_size: int
+    local_rank: int
+    gpus_per_node: int
+    node_num: int
+
+    @property
+    def ep_size(self) -> int:
+        return self.world_size
+
+
+@dataclass(frozen=True)
+class QuantSpec:
+    """TensorRT-LLM quant recipe and truthful persisted communication identity."""
+
+    comm_dtype: str
+    quant_algo: str | None
+
+
+@dataclass(frozen=True, order=True)
+class RoutingSpec:
+    """Model-declared routing inputs mapped to pinned TensorRT-LLM routing."""
+
+    method: str = "Default"
+    num_expert_group: int = 1
+    topk_group: int = 1
+    routed_scaling_factor: float = 1.0
+
+
+@dataclass(frozen=True, order=True)
+class MoeA2AShape:
+    """Persisted geometry plus the non-persisted serving routing declaration."""
+
+    hidden_size: int
+    topk: int
+    num_experts: int
+    routing: RoutingSpec = RoutingSpec()
+
+
+# Source proof:
+# * DeepEP.supports_post_quant_dispatch: NVFP4 only.
+# * DeepEPLowLatency.supports_post_quant_dispatch: FP8 QDQ, NVFP4, W4AFP8.
+# BF16 is the pre-quant baseline.  ``fp4`` is not listed as an invocation:
+# TensorRT-LLM uses that identity only for a low-precision combine result.  It
+# must not be relabeled as a dispatch mode.
+QUANT_SPECS = {
+    COMM_BACKEND_HT: (
+        QuantSpec("bfloat16", None),
+        QuantSpec("nvfp4", "NVFP4"),
+    ),
+    COMM_BACKEND_LL: (
+        QuantSpec("bfloat16", None),
+        QuantSpec("fp8", "FP8"),
+        QuantSpec("nvfp4", "NVFP4"),
+    ),
+}
+
+
+def quant_specs_for_system(backend: str, system: str | None) -> tuple[QuantSpec, ...]:
+    """Return only invocations implemented by the pinned build architecture.
+
+    TensorRT-LLM's pinned DeepEP CMake contract states that its FP4 conversion
+    instructions require SM100a, SM110a, or SM120a.  Low-latency NVFP4 combine
+    therefore cannot execute in the SM90-real H100/H200 wheels.  HT NVFP4 does
+    not use that conversion path and remains declared (and was observed by the
+    H100 runtime canary).
+
+    W4AFP8 is absent from the LL declaration on every formal system.  The
+    pinned serving path creates and loads per-expert ``(local_experts,
+    hidden)`` pre-quant scales (quantization.py:1333-1339,1501-1578 at
+    TARGET_SOURCE_COMMIT), while DeepEPLowLatency requires a shared
+    ``(1, hidden)`` scale (deep_ep_low_latency.py:270-275).  The collector must
+    not reconstruct synthetic scale metadata to make this path run.
+    """
+
+    if backend not in QUANT_SPECS:
+        raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM DeepEP backend: {backend}")
+    if system is not None and system not in FORMAL_SYSTEMS:
+        raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM formal system: {system}")
+    specs = QUANT_SPECS[backend]
+    if backend == COMM_BACKEND_LL and system in HOPPER_SYSTEMS:
+        return tuple(spec for spec in specs if spec.comm_dtype != "nvfp4")
+    return specs
+
+
+def communication_dtype_for(
+    *,
+    system: str | None,
+    backend: str,
+    model_quantization: str,
+    communication_phase: str,
+) -> str:
+    """Map serving phase/quantization/system to the persisted wire dtype.
+
+    The pinned HT implementation only post-quantizes NVFP4; Hopper FP8 model
+    compute therefore communicates BF16 in HT. Low-latency FP8 communicates
+    FP8, while Blackwell low-precision NVFP4 combine returns FP4.
+    """
+    if system is not None and system not in FORMAL_SYSTEMS:
+        raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM formal system: {system}")
+    if backend not in FORCED_METHODS or communication_phase not in PHASES:
+        raise MoeA2ADeclarationError(
+            f"unsupported communication identity: backend={backend}, phase={communication_phase}"
+        )
+    try:
+        return _shared_communication_dtype_for(
+            system=system,
+            comm_backend=backend,
+            model_quantization=model_quantization,
+            communication_phase=communication_phase,
+            inference_phase="context" if backend == COMM_BACKEND_HT else "generation",
+        )
+    except ValueError as error:
+        raise MoeA2ADeclarationError(f"no pinned TensorRT-LLM communication dtype: {error}") from error
+
+
+@dataclass(frozen=True)
+class MoeA2ACase:
+    comm_backend: str
+    inference_phase: str
+    quant: QuantSpec
+    shape: MoeA2AShape
+    num_tokens: int
+    ep_size: int
+    node_num: int
+    system: str | None = None
+    sms: int = SMS
+
+    def physical_key(self, phase: str, comm_dtype: str | None = None) -> tuple[Any, ...]:
+        """Exact current consumer key for one emitted phase row."""
+        return (
+            self.comm_backend,
+            phase,
+            comm_dtype
+            or communication_dtype_for(
+                system=self.system,
+                backend=self.comm_backend,
+                model_quantization=self.quant.comm_dtype,
+                communication_phase=phase,
+            ),
+            self.ep_size,
+            self.node_num,
+            self.shape.hidden_size,
+            self.shape.topk,
+            self.shape.num_experts,
+            self.sms,
+            self.num_tokens,
+        )
+
+    def invocation_key(self) -> tuple[Any, ...]:
+        """Everything that changes the selected communication invocation."""
+        return (
+            self.comm_backend,
+            FORCED_METHODS[self.comm_backend],
+            self.inference_phase,
+            self.quant.comm_dtype,
+            self.quant.quant_algo,
+            self.shape.routing,
+            self.ep_size,
+            self.node_num,
+            self.shape.hidden_size,
+            self.shape.topk,
+            self.shape.num_experts,
+            self.num_tokens,
+        )
+
+    def sort_key(self) -> tuple[Any, ...]:
+        return (
+            self.comm_backend,
+            self.quant.comm_dtype,
+            self.shape.hidden_size,
+            self.shape.topk,
+            self.shape.num_experts,
+            self.num_tokens,
+        )
+
+
+@dataclass(frozen=True)
+class PhaseMeasurement:
+    phase: str
+    latency_us: float
+    comm_dtype: str
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    measurements: tuple[PhaseMeasurement, ...]
+
+
+class BenchmarkAdapter(Protocol):
+    """Injectable boundary around CUDA/MPI/TensorRT-LLM benchmark execution."""
+
+    def run(self, case: MoeA2ACase, all_rank_num_tokens: list[int]) -> BenchmarkResult: ...
+
+
+def derive_dist_identity(env: dict[str, str], *, gpus_per_node: int) -> DistIdentity:
+    if gpus_per_node <= 0:
+        raise MoeA2ADeclarationError(f"--gpus-per-node must be positive, got {gpus_per_node}")
+    rank = int(env.get("OMPI_COMM_WORLD_RANK", env.get("RANK", env.get("SLURM_PROCID", "0"))))
+    world_size = int(env.get("OMPI_COMM_WORLD_SIZE", env.get("WORLD_SIZE", env.get("SLURM_NTASKS", "1"))))
+    local_rank = int(
+        env.get(
+            "OMPI_COMM_WORLD_LOCAL_RANK",
+            env.get("LOCAL_RANK", env.get("SLURM_LOCALID", str(rank % gpus_per_node))),
+        )
+    )
+    if world_size < 2:
+        raise MoeA2ADeclarationError("DeepEP moe_a2a requires an MPI world of at least two ranks")
+    if world_size % gpus_per_node:
+        raise MoeA2ADeclarationError(
+            f"WORLD_SIZE={world_size} is not an integral number of nodes at "
+            f"gpus_per_node={gpus_per_node}; node_num is a persisted key"
+        )
+    return DistIdentity(rank, world_size, local_rank, gpus_per_node, world_size // gpus_per_node)
+
+
+def _routing_spec(recipe: Any) -> RoutingSpec:
+    # These are model routing declarations despite their historical prefix.
+    # Map them to the corresponding pinned TensorRT-LLM routing method.
+    return RoutingSpec(
+        method=recipe.sglang_moe_routing_method_type or "Default",
+        num_expert_group=recipe.sglang_moe_num_expert_group or 1,
+        topk_group=recipe.sglang_moe_topk_group or 1,
+        routed_scaling_factor=recipe.sglang_moe_routed_scaling_factor or 1.0,
+    )
+
+
+def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> list[MoeA2AShape]:
+    """Return declared TensorRT-LLM WideEP geometry and serving routing."""
+    from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
+
+    recipes = get_common_moe_test_cases(
+        backend="trtllm",
+        required_expert_parallel_size=required_expert_parallel_size,
+    )
+    shapes = {
+        MoeA2AShape(
+            int(recipe.hidden_size),
+            int(recipe.topk),
+            int(recipe.num_experts),
+            _routing_spec(recipe),
+        )
+        for recipe in recipes
+        if is_wideep_moe_model(recipe.model_name)
+    }
+    routing_by_geometry: dict[_MoeA2AGeometry, set[RoutingSpec]] = {}
+    for shape in shapes:
+        geometry = _MoeA2AGeometry(shape.hidden_size, shape.topk, shape.num_experts)
+        routing_by_geometry.setdefault(geometry, set()).add(shape.routing)
+    collisions = {geometry: specs for geometry, specs in routing_by_geometry.items() if len(specs) != 1}
+    if collisions:
+        raise MoeA2ADeclarationError(
+            f"declared TensorRT-LLM moe_a2a shapes collide on persisted geometry with different routing: {collisions}"
+        )
+    ordered = sorted(shapes)
+    print(
+        f"trtllm moe_a2a: {len(ordered)} physical shapes from {len(recipes)} declared backend='trtllm' recipes",
+        flush=True,
+    )
+    if not ordered:
+        raise MoeA2ADeclarationError("declared backend='trtllm' WideEP recipes expanded to zero moe_a2a shapes")
+    return ordered
+
+
+def get_moe_a2a_token_grid() -> dict[str, list[int]]:
+    """Read the shared declared context/generation token axes."""
+    from collector.case_generator import get_base_common_case_values
+
+    values = get_base_common_case_values("moe_a2a") or {}
+    grid: dict[str, list[int]] = {}
+    for key in ("ht_token_counts", "ll_token_counts"):
+        raw = values.get(key)
+        if not isinstance(raw, list) or not raw:
+            raise MoeA2ADeclarationError(f"common_case_values.moe_a2a.{key} must be non-empty")
+        grid[key] = sorted({int(value) for value in raw})
+    return grid
+
+
+def resolve_modes(raw_modes: str) -> tuple[str, ...]:
+    modes = tuple(part.strip() for part in raw_modes.split(",") if part.strip())
+    unknown = set(modes) - FORCED_METHODS.keys()
+    if not modes or unknown:
+        raise MoeA2ADeclarationError(
+            f"unsupported --modes value(s) {sorted(unknown) if unknown else modes}; expected {sorted(FORCED_METHODS)}"
+        )
+    return modes
+
+
+def build_case_plan(
+    *,
+    shapes: list[MoeA2AShape],
+    token_grid: dict[str, list[int]],
+    ep_size: int,
+    node_num: int,
+    modes: tuple[str, ...] = (COMM_BACKEND_HT, COMM_BACKEND_LL),
+    system: str | None = None,
+) -> list[MoeA2ACase]:
+    """Expand declared shapes/tokens and deduplicate on invocation + physical keys."""
+    if not shapes:
+        raise MoeA2ADeclarationError("moe_a2a cannot build a plan from zero shapes")
+    invalid_shapes = [shape for shape in shapes if shape.num_experts % ep_size != 0]
+    if invalid_shapes:
+        raise MoeA2ADeclarationError(
+            f"declared TensorRT-LLM moe_a2a shapes are not divisible by ep_size={ep_size}: "
+            f"{invalid_shapes}; request the EP constraint from get_moe_a2a_shapes instead of "
+            "filtering a generated plan"
+        )
+
+    candidates: list[MoeA2ACase] = []
+    for shape in shapes:
+        for backend in modes:
+            contract_for("trtllm", backend)
+            token_key = "ht_token_counts" if backend == COMM_BACKEND_HT else "ll_token_counts"
+            for quant in quant_specs_for_system(backend, system):
+                for num_tokens in token_grid[token_key]:
+                    candidates.append(
+                        MoeA2ACase(
+                            comm_backend=backend,
+                            inference_phase=INFERENCE_PHASES[backend],
+                            quant=quant,
+                            shape=shape,
+                            num_tokens=int(num_tokens),
+                            ep_size=ep_size,
+                            node_num=node_num,
+                            system=system,
+                        )
+                    )
+
+    by_invocation: dict[tuple[Any, ...], MoeA2ACase] = {}
+    physical_owners: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+    duplicates = 0
+    for case in candidates:
+        invocation = case.invocation_key()
+        physical_keys = tuple(case.physical_key(phase) for phase in PHASES)
+        previous = by_invocation.get(invocation)
+        if previous is not None:
+            duplicates += 1
+            continue
+        for physical_key in physical_keys:
+            owner = physical_owners.get(physical_key)
+            if owner is not None and owner != invocation:
+                raise MoeA2ADeclarationError(
+                    "distinct TensorRT-LLM invocations collide on a moe_a2a physical key: "
+                    f"key={physical_key}, first={owner}, second={invocation}"
+                )
+            physical_owners[physical_key] = invocation
+        by_invocation[invocation] = case
+
+    cases = sorted(by_invocation.values(), key=MoeA2ACase.sort_key)
+    print(
+        f"trtllm moe_a2a: {len(cases)} cases from {len(shapes)} shapes "
+        f"(deduplicated: {duplicates} identical invocation/physical keys)",
+        flush=True,
+    )
+    if not cases:
+        raise MoeA2ADeclarationError(f"trtllm moe_a2a expanded to zero cases for ep_size={ep_size}")
+    return cases
+
+
+def case_plan_ids(cases: list[MoeA2ACase]) -> list[str]:
+    if not cases:
+        raise MoeA2ADeclarationError("cannot attest an empty moe_a2a case plan")
+    return [
+        f"{MODULE_NAME}:run_case:"
+        + json.dumps(
+            {
+                "comm_backend": case.comm_backend,
+                "comm_dtype": case.quant.comm_dtype,
+                "ep_size": case.ep_size,
+                "hidden_size": case.shape.hidden_size,
+                "inference_phase": case.inference_phase,
+                "node_num": case.node_num,
+                "num_experts": case.shape.num_experts,
+                "num_tokens": case.num_tokens,
+                "quant_algo": case.quant.quant_algo,
+                "routing": {
+                    "method": case.shape.routing.method,
+                    "num_expert_group": case.shape.routing.num_expert_group,
+                    "topk_group": case.shape.routing.topk_group,
+                    "routed_scaling_factor": case.shape.routing.routed_scaling_factor,
+                },
+                "sms": case.sms,
+                "system": case.system,
+                "topk": case.shape.topk,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for case in cases
+    ]
+
+
+def select_canary_cases(cases: list[MoeA2ACase]) -> list[MoeA2ACase]:
+    """Keep one runnable invocation for every backend/communication dtype."""
+    required = {(case.comm_backend, case.quant.comm_dtype) for case in cases}
+    selected: dict[tuple[str, str], MoeA2ACase] = {}
+    for case in cases:
+        if case.comm_backend == COMM_BACKEND_LL and (
+            case.shape.hidden_size not in LL_CANARY_HIDDEN_SIZES or case.shape.topk > LL_CANARY_MAX_TOPK
+        ):
+            continue
+        selected.setdefault((case.comm_backend, case.quant.comm_dtype), case)
+    missing = required - selected.keys()
+    if missing:
+        raise MoeA2ADeclarationError(
+            f"canary plan has no source-supported representative for backend/dtype pairs: {sorted(missing)}"
+        )
+    return sorted(selected.values(), key=MoeA2ACase.sort_key)
+
+
+def create_forced_communication(
+    factory: Any,
+    *,
+    case: MoeA2ACase,
+    model_config: Any,
+    experts_per_rank: int,
+) -> Any:
+    """Call the pinned factory contract without entering its NVLink priority chain."""
+    method = FORCED_METHODS[case.comm_backend]
+    backend = factory._create_forced_method(
+        method,
+        model_config,
+        case.shape.num_experts,
+        case.shape.num_experts,
+        case.shape.topk,
+        experts_per_rank,
+        payload_in_workspace=False,
+        alltoall_result_do_sum=True,
+        use_flashinfer=False,
+    )
+    if backend is None:
+        raise MoeA2ABenchmarkError(
+            f"CommunicationFactory._create_forced_method({method!r}) returned None; "
+            "refusing to fall back or relabel another communication method"
+        )
+    return backend
+
+
+@dataclass(frozen=True)
+class _DummyPretrainedConfig:
+    hidden_size: int
+    torch_dtype: Any
+
+
+class TensorRTLLMBenchmarkAdapter:
+    """CUDA/MPI adapter mirroring the pinned ``bench_moe_comm`` call contract."""
+
+    def __init__(
+        self,
+        *,
+        warmup: int = 20,
+        iterations: int = 200,
+        max_num_tokens_per_rank: int | None = None,
+    ):
+        self.warmup = warmup
+        self.iterations = iterations
+        self.max_num_tokens_per_rank = max_num_tokens_per_rank
+        self._active_resource_key: tuple[Any, ...] | None = None
+        self._active_backend: Any | None = None
+        self._active_moe: Any | None = None
+
+    def _resource_key(self, case: MoeA2ACase) -> tuple[Any, ...]:
+        """Identity of one reusable rc11 communication/quantization setup.
+
+        The pinned framework benchmark constructs one backend before its local
+        token-count loop and reuses it for every token count
+        (tests/microbenchmarks/bench_moe_comm.py:1116-1167
+        @14efb6ac673c0cbe828e1206cc5c7d5748d05ffa). Recreating DeepEP for every
+        token leaks native NVSHMEM heap resources and eventually fails
+        ``cuMemCreate``. Keep every constructor input in this key; only the
+        runtime token axis is intentionally excluded.
+        """
+        return (
+            case.comm_backend,
+            case.quant.comm_dtype,
+            case.quant.quant_algo,
+            case.ep_size,
+            case.node_num,
+            case.shape.hidden_size,
+            case.shape.topk,
+            case.shape.num_experts,
+            case.shape.routing,
+            self.max_num_tokens_per_rank,
+        )
+
+    def _destroy_active_resources(self) -> None:
+        backend = self._active_backend
+        self._active_resource_key = None
+        self._active_backend = None
+        self._active_moe = None
+        if backend is not None:
+            destroy = getattr(backend, "destroy", None)
+            if destroy is not None:
+                destroy()
+
+    def reset_after_failure(self) -> None:
+        """Release a failed case's native state before another case runs."""
+        self._destroy_active_resources()
+
+    def close(self) -> None:
+        """Collectively release the final DeepEP backend on every rank."""
+        self._destroy_active_resources()
+
+    @staticmethod
+    def _routing_method(case: MoeA2ACase, *, torch: Any) -> Any:
+        """Construct the pinned serving router for this model declaration.
+
+        TensorRT-LLM commit 14efb6ac673c0cbe828e1206cc5c7d5748d05ffa
+        implements the invoked routers in
+        ``tensorrt_llm/_torch/modules/fused_moe/routing.py:190-217`` and
+        ``:224-378``.  DeepSeekV3 serving allocates and loads the correction
+        bias, then passes it to this same router, in
+        ``tensorrt_llm/_torch/models/modeling_deepseekv3.py:834-875``.
+        """
+        from tensorrt_llm._torch.modules.fused_moe.routing import (
+            DeepSeekV3MoeRoutingMethod,
+            DefaultMoeRoutingMethod,
+            Llama4RenormalizeMoeRoutingMethod,
+            RenormalizeMoeRoutingMethod,
+            RenormalizeNaiveMoeRoutingMethod,
+        )
+
+        spec = case.shape.routing
+        if spec.method == "DeepSeekV3":
+            # A collector has no checkpoint weights, so zero is the explicit
+            # neutral synthetic stand-in for the serving-populated parameter
+            # cited above; the framework's pinned router still performs all
+            # score, group, weight, and expert-ID population.
+            correction_bias = torch.zeros(
+                case.shape.num_experts,
+                dtype=torch.float32,
+                device=torch.device("cuda"),
+            )
+            return DeepSeekV3MoeRoutingMethod(
+                top_k=case.shape.topk,
+                n_group=spec.num_expert_group,
+                topk_group=spec.topk_group,
+                routed_scaling_factor=spec.routed_scaling_factor,
+                callable_e_score_correction_bias=lambda: correction_bias,
+            )
+        if spec.method == "Renormalize":
+            return RenormalizeMoeRoutingMethod(case.shape.topk)
+        if spec.method == "RenormalizeNaive":
+            return RenormalizeNaiveMoeRoutingMethod(case.shape.topk)
+        if spec.method == "Llama4":
+            return Llama4RenormalizeMoeRoutingMethod(case.shape.topk)
+        if spec.method == "Default":
+            return DefaultMoeRoutingMethod(case.shape.topk)
+        raise MoeA2ADeclarationError(f"unsupported pinned TensorRT-LLM routing method: {spec.method}")
+
+    @staticmethod
+    def _validate_unique_experts(token_selected_slots: Any, *, topk: int) -> None:
+        """Fail closed if one token routes to the same expert more than once."""
+        sorted_slots = token_selected_slots.sort(dim=-1).values
+        if topk > 1 and bool((sorted_slots[:, 1:] == sorted_slots[:, :-1]).any().item()):
+            raise MoeA2ABenchmarkError("pinned routing returned duplicate expert IDs for one token")
+
+    def run(self, case: MoeA2ACase, all_rank_num_tokens: list[int]) -> BenchmarkResult:
+        import torch
+        from tensorrt_llm._torch.model_config import ModelConfig
+        from tensorrt_llm._torch.modules.fused_moe import CutlassFusedMoE
+        from tensorrt_llm._torch.modules.fused_moe.communication import CommunicationFactory
+        from tensorrt_llm._utils import mpi_rank
+        from tensorrt_llm.mapping import Mapping
+        from tensorrt_llm.models.modeling_utils import QuantConfig
+        from tensorrt_llm.quantization.mode import QuantAlgo
+
+        if case.shape.num_experts % case.ep_size:
+            raise MoeA2ABenchmarkError("num_experts must be divisible by ep_size")
+        experts_per_rank = case.shape.num_experts // case.ep_size
+        mapping = Mapping(
+            rank=mpi_rank(),
+            tp_size=case.ep_size,
+            moe_ep_size=case.ep_size,
+            enable_attention_dp=True,
+            world_size=case.ep_size,
+        )
+        quant_algo = getattr(QuantAlgo, case.quant.quant_algo) if case.quant.quant_algo else QuantAlgo.NO_QUANT
+        quant_config = QuantConfig(quant_algo=None if quant_algo == QuantAlgo.NO_QUANT else quant_algo)
+        max_num_tokens = self.max_num_tokens_per_rank or case.num_tokens
+        if max_num_tokens < case.num_tokens:
+            raise MoeA2ADeclarationError(
+                f"max_num_tokens_per_rank={max_num_tokens} is below case tokens={case.num_tokens}"
+            )
+        resource_key = self._resource_key(case)
+        if resource_key != self._active_resource_key:
+            self._destroy_active_resources()
+            routing_method = self._routing_method(case, torch=torch)
+            model_config = ModelConfig(
+                pretrained_config=_DummyPretrainedConfig(
+                    hidden_size=case.shape.hidden_size, torch_dtype=torch.bfloat16
+                ),
+                mapping=mapping,
+                quant_config=quant_config,
+                max_num_tokens=max_num_tokens,
+                moe_max_num_tokens=max_num_tokens,
+                use_cuda_graph=False,
+                use_low_precision_moe_combine=(
+                    case.comm_backend == COMM_BACKEND_LL and case.quant.comm_dtype == "nvfp4"
+                ),
+            )
+            backend = create_forced_communication(
+                CommunicationFactory,
+                case=case,
+                model_config=model_config,
+                experts_per_rank=experts_per_rank,
+            )
+            try:
+                moe = None
+                if quant_algo != QuantAlgo.NO_QUANT and backend.supports_post_quant_dispatch():
+                    moe = CutlassFusedMoE(
+                        routing_method=routing_method,
+                        num_experts=case.shape.num_experts,
+                        hidden_size=case.shape.hidden_size,
+                        intermediate_size=case.shape.hidden_size * 4,
+                        dtype=torch.bfloat16,
+                        reduce_results=False,
+                        model_config=model_config,
+                        init_load_balancer=False,
+                        without_comm=True,
+                    ).to(torch.device("cuda"))
+                elif quant_algo != QuantAlgo.NO_QUANT:
+                    raise MoeA2ABenchmarkError(
+                        f"forced {FORCED_METHODS[case.comm_backend]} does not support truthful "
+                        f"post-quant identity {case.quant.comm_dtype!r}"
+                    )
+            except Exception:
+                destroy = getattr(backend, "destroy", None)
+                if destroy is not None:
+                    destroy()
+                raise
+            self._active_resource_key = resource_key
+            self._active_backend = backend
+            self._active_moe = moe
+        backend = self._active_backend
+        moe = self._active_moe
+        assert backend is not None
+        if len(all_rank_num_tokens) != case.ep_size or any(
+            not isinstance(tokens, int) or tokens <= 0 for tokens in all_rank_num_tokens
+        ):
+            raise MoeA2ABenchmarkError(f"invalid rank token vector for ep_size={case.ep_size}: {all_rank_num_tokens!r}")
+        if not backend.is_workload_feasible(all_rank_num_tokens, num_chunks=1):
+            raise MoeA2ABenchmarkError(
+                f"forced {FORCED_METHODS[case.comm_backend]} reports workload infeasible "
+                f"for tokens={all_rank_num_tokens}; refusing silent fallback"
+            )
+
+        device = torch.device("cuda")
+        hidden_states = torch.randn(case.num_tokens, case.shape.hidden_size, dtype=torch.bfloat16, device=device)
+        hidden_states_sf = None
+        # Use the pinned serving router instead of the microbenchmark's
+        # with-replacement randint. All supported TRT routers produce unique
+        # top-k experts, including grouped DeepSeek routing.
+        routing_method = self._routing_method(case, torch=torch)
+        router_logits = torch.randn(
+            case.num_tokens,
+            case.shape.num_experts,
+            dtype=torch.float32,
+            device=device,
+        )
+        token_selected_slots, token_final_scales = routing_method.apply(router_logits)
+        self._validate_unique_experts(token_selected_slots, topk=case.shape.topk)
+
+        # Serving order from ConfigurableMoE, mirrored by bench_moe_comm.py:
+        # Quantize -> Dispatch. Quantization is outside the timed comm region.
+        if moe is not None:
+            hidden_states, hidden_states_sf = moe.quantize_input(hidden_states, post_quant_comm=True)
+
+        # Post-quant dispatch consumes the activation scale that the
+        # quantization method attaches to the module
+        # (deep_ep_low_latency.py:271 @14efb6ac673c0cbe828e1206cc5c7d5748d05ffa).
+        # Forward the framework's own tensor exactly as ConfigurableMoE does
+        # (configurable_moe.py:774-776 @14efb6ac673c0cbe828e1206cc5c7d5748d05ffa)
+        # rather than reconstructing a scale here; backends that do not read it
+        # absorb it through **kwargs, matching serving.
+        dispatch_kwargs: dict[str, Any] = {}
+        quant_scales = getattr(moe, "quant_scales", None) if moe is not None else None
+        if quant_scales is not None and hasattr(quant_scales, "pre_quant_scale_1"):
+            dispatch_kwargs["pre_quant_scale"] = quant_scales.pre_quant_scale_1
+
+        def iteration() -> tuple[float, float]:
+            backend.prepare_dispatch(token_selected_slots, all_rank_num_tokens)
+            dispatch_start = torch.cuda.Event(enable_timing=True)
+            dispatch_end = torch.cuda.Event(enable_timing=True)
+            combine_start = torch.cuda.Event(enable_timing=True)
+            combine_end = torch.cuda.Event(enable_timing=True)
+            dispatch_start.record()
+            recv_hidden, _, _, _ = backend.dispatch(
+                hidden_states,
+                hidden_states_sf,
+                token_selected_slots,
+                token_final_scales,
+                all_rank_num_tokens,
+                **dispatch_kwargs,
+            )
+            dispatch_end.record()
+            output_shape = list(recv_hidden.shape)
+            output_shape[-1] = case.shape.hidden_size
+            moe_output = torch.empty(tuple(output_shape), dtype=torch.bfloat16, device=device)
+            combine_start.record()
+            backend.combine(moe_output, all_rank_max_num_tokens=max(all_rank_num_tokens))
+            combine_end.record()
+            torch.cuda.synchronize()
+            return (
+                dispatch_start.elapsed_time(dispatch_end) * 1000.0,
+                combine_start.elapsed_time(combine_end) * 1000.0,
+            )
+
+        for _ in range(self.warmup):
+            iteration()
+        samples = [iteration() for _ in range(self.iterations)]
+        if not samples:
+            raise MoeA2ABenchmarkError("benchmark produced zero timing samples")
+        dispatch_us = sum(sample[0] for sample in samples) / len(samples)
+        combine_us = sum(sample[1] for sample in samples) / len(samples)
+        return BenchmarkResult(
+            (
+                PhaseMeasurement(
+                    "combine",
+                    combine_us,
+                    communication_dtype_for(
+                        system=case.system,
+                        backend=case.comm_backend,
+                        model_quantization=case.quant.comm_dtype,
+                        communication_phase="combine",
+                    ),
+                ),
+                PhaseMeasurement(
+                    "dispatch",
+                    dispatch_us,
+                    communication_dtype_for(
+                        system=case.system,
+                        backend=case.comm_backend,
+                        model_quantization=case.quant.comm_dtype,
+                        communication_phase="dispatch",
+                    ),
+                ),
+            )
+        )
+
+
+def build_unified_rows(case: MoeA2ACase, result: BenchmarkResult) -> list[dict[str, Any]]:
+    """Validate and build the case's dispatch/combine rows; never emit prepare."""
+    phases = [measurement.phase for measurement in result.measurements]
+    if sorted(phases) != list(PHASES) or len(set(phases)) != len(PHASES):
+        raise MoeA2ABenchmarkError(f"benchmark must return exactly combine+dispatch (no prepare), got {phases}")
+    contract = contract_for("trtllm", case.comm_backend)
+    rows = []
+    for measurement in sorted(result.measurements, key=lambda item: item.phase):
+        if measurement.comm_dtype not in contract.comm_dtypes:
+            raise MoeA2ABenchmarkError(
+                f"{measurement.comm_dtype!r} is not a truthful dtype for {case.comm_backend}; "
+                "refusing to relabel an unsupported mode"
+            )
+        if measurement.latency_us <= 0:
+            raise MoeA2ABenchmarkError(f"{measurement.phase} returned non-positive latency {measurement.latency_us}")
+        rows.append(
+            _build_moe_a2a_row(
+                comm_backend=case.comm_backend,
+                phase=measurement.phase,
+                comm_dtype=measurement.comm_dtype,
+                ep_size=case.ep_size,
+                node_num=case.node_num,
+                shape=case.shape,
+                num_tokens=case.num_tokens,
+                sms=SMS,
+                transmit_us=measurement.latency_us,
+                notify_us=0.0,
+            )
+        )
+    return rows
+
+
+def resolve_runtime_meta(
+    installed_version: str,
+    *,
+    source_commit: str,
+    observed_abi: dict[str, str],
+    observed_image_digest: str,
+) -> dict[str, Any]:
+    """Fail closed unless version, source and DeepEP/NVSHMEM ABI match the pin."""
+    from packaging.version import InvalidVersion, Version
+
+    runtime = get_collector_runtime(MANIFEST_FRAMEWORK)
+    try:
+        version_matches = Version(installed_version).public == Version(runtime.version).public
+    except InvalidVersion as error:
+        raise MoeA2ADeclarationError(f"invalid installed tensorrt_llm version {installed_version!r}") from error
+    if not version_matches:
+        raise MoeA2ADeclarationError(
+            f"wideep_trtllm requires package version {runtime.version}, found {installed_version}"
+        )
+    if runtime.source_commit != TARGET_SOURCE_COMMIT or source_commit != runtime.source_commit:
+        raise MoeA2ADeclarationError(
+            f"wideep_trtllm requires source commit {runtime.source_commit}, found {source_commit}"
+        )
+    expected_abi = runtime.abi or {}
+    if observed_abi != expected_abi:
+        raise MoeA2ADeclarationError(f"wideep_trtllm ABI mismatch: expected {expected_abi}, found {observed_abi}")
+    image, separator, digest = runtime.image().partition("@")
+    if not separator or observed_image_digest != digest:
+        raise MoeA2ADeclarationError(
+            f"wideep_trtllm image digest mismatch: expected {digest!r}, found {observed_image_digest!r}"
+        )
+    meta: dict[str, Any] = {
+        "framework": runtime.framework,
+        "version": installed_version,
+        "image": image,
+        "source_commit": source_commit,
+        "abi": observed_abi,
+    }
+    if separator:
+        meta["image_digest"] = digest
+    return meta
+
+
+def record_failure(
+    output_dir: Path,
+    case: MoeA2ACase,
+    error: BaseException,
+    *,
+    rank: int,
+) -> None:
+    path = output_dir / ERRORS_FILENAME_TEMPLATE.format(rank=rank)
+    records = json.loads(path.read_text()) if path.exists() else []
+    records.append(
+        {
+            "module": MODULE_NAME,
+            "op": OP_NAME,
+            "classification": "unexpected",
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "rank": rank,
+            "case": {
+                "comm_backend": case.comm_backend,
+                "comm_dtype": case.quant.comm_dtype,
+                "inference_phase": case.inference_phase,
+                "ep_size": case.ep_size,
+                "node_num": case.node_num,
+                "hidden_size": case.shape.hidden_size,
+                "topk": case.shape.topk,
+                "num_experts": case.shape.num_experts,
+                "num_tokens": case.num_tokens,
+                "sms": case.sms,
+            },
+        }
+    )
+    path.write_text(json.dumps(records, indent=2))
+
+
+def _run_collection_body(
+    *,
+    cases: list[MoeA2ACase],
+    adapter: BenchmarkAdapter,
+    output_dir: Path,
+    rank: int,
+    version: str,
+    device_name: str,
+    runtime_meta: dict[str, Any],
+    finalize: Callable[..., list[Path]] = finalize_perf_files,
+    token_gather: Callable[[int], list[int]] | None = None,
+    failure_agreement: Callable[[bool], bool] = bool,
+    stage_agreement: StageAgreement | None = None,
+) -> Path | None:
+    """Execute, write, finalize and attest; zero/partial/write states fail closed."""
+    if not cases:
+        raise MoeA2ADeclarationError("refusing to run or attest a zero-case plan")
+    agreement = stage_agreement or (
+        lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
+    )
+    perf_path = str(output_dir / PerfFile.MOE_A2A.value)
+    preflight_error: BaseException | None = None
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if rank == 0:
+            stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
+            if stale:
+                raise MoeA2AWriteError(
+                    f"stale output artifacts exist in {output_dir}: {stale}; resume/merge must be explicit"
+                )
+    except BaseException as error:
+        preflight_error = error
+    raise_for_stage(
+        agree_stage(
+            "preflight",
+            preflight_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+
+    failures = 0
+    gather_tokens = token_gather or (lambda tokens: [tokens] * cases[0].ep_size)
+    for case_index, case in enumerate(cases):
+        result = None
+        local_error: BaseException | None = None
+        try:
+            # This is the only per-case MPI metadata collective. It happens in
+            # the outer lifecycle, before the adapter enters any DeepEP
+            # operation, so every rank follows the same collective ordering.
+            all_rank_num_tokens = list(gather_tokens(case.num_tokens))
+            result = adapter.run(case, all_rank_num_tokens)
+        except Exception as error:
+            local_error = error
+
+        # Every rank reaches this agreement point before any row is persisted.
+        # A failure observed only by a non-writer rank therefore cannot leave
+        # rank 0 with a falsely complete table.
+        benchmark_outcome = agree_stage(
+            f"case:{case_index}:benchmark",
+            local_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+        if benchmark_outcome.failed:
+            failures += 1
+            assert benchmark_outcome.error is not None
+            record_error: BaseException | None = None
+            try:
+                record_failure(output_dir, case, benchmark_outcome.error, rank=rank)
+            except BaseException as error:
+                record_error = error
+            record_outcome = agree_stage(
+                f"case:{case_index}:failure_record",
+                record_error,
+                agreement=agreement,
+                peer_error_type=MoeA2APeerError,
+            )
+
+            # A native benchmark exception may leave DeepEP's singleton-backed
+            # buffers unusable even when the next case has a different resource
+            # key.  Reset on every rank only after benchmark failure agreement,
+            # keeping teardown in the same distributed lifecycle order.  The
+            # hook is optional for injected CPU test adapters.
+            reset_error: BaseException | None = None
+            try:
+                reset_after_failure = getattr(adapter, "reset_after_failure", None)
+                if reset_after_failure is not None:
+                    reset_after_failure()
+            except BaseException as error:
+                reset_error = error
+            reset_outcome = agree_stage(
+                f"case:{case_index}:failure_reset",
+                reset_error,
+                agreement=agreement,
+                peer_error_type=MoeA2APeerError,
+            )
+            # All ranks participate in both stages before either error is
+            # raised, so record or reset failures cannot strand a peer in the
+            # next benchmark case.
+            raise_for_stage(record_outcome)
+            raise_for_stage(reset_outcome)
+            # Do not retain the adapter.run traceback (and its native backend
+            # locals) while constructing resources for the next case.
+            local_error = None
+            del benchmark_outcome
+            continue
+
+        assert result is not None
+        row_error: BaseException | None = None
+        try:
+            rows = build_unified_rows(case, result)
+            if rank == 0:
+                for row in rows:
+                    wrote = log_perf(
+                        item_list=[row],
+                        framework=FRAMEWORK,
+                        version=version,
+                        device_name=device_name,
+                        op_name=OP_NAME,
+                        kernel_source=KERNEL_SOURCE,
+                        perf_filename=perf_path,
+                    )
+                    if not wrote:
+                        raise MoeA2AWriteError(
+                            f"log_perf rejected {case.physical_key(row['phase'], row['comm_dtype'])}"
+                        )
+        except BaseException as error:
+            row_error = error
+        row_outcome = agree_stage(
+            f"case:{case_index}:row_write",
+            row_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+        if row_outcome.failed:
+            assert row_outcome.error is not None
+            record_error = None
+            try:
+                record_failure(output_dir, case, row_outcome.error, rank=rank)
+            except BaseException as error:
+                record_error = error
+            raise_for_stage(
+                agree_stage(
+                    f"case:{case_index}:row_write_failure_record",
+                    record_error,
+                    agreement=agreement,
+                    peer_error_type=MoeA2APeerError,
+                )
+            )
+            raise row_outcome.error
+
+    if failures == len(cases):
+        raise MoeA2ABenchmarkError(f"TensorRT-LLM DeepEP produced zero rows; {failures}/{len(cases)} cases failed")
+
+    parquet_path: Path | None = None
+    finalize_error: BaseException | None = None
+    if rank == 0:
+        try:
+            converted = finalize([perf_path], merge_existing=False)
+            if len(converted) != 1:
+                raise MoeA2AWriteError(f"expected one finalized moe_a2a parquet, got {len(converted)}")
+            parquet_path = Path(converted[0])
+        except BaseException as error:
+            finalize_error = error
+    raise_for_stage(
+        agree_stage(
+            "parquet_finalize",
+            finalize_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+
+    sidecar_error: BaseException | None = None
+    if rank == 0:
+        try:
+            assert parquet_path is not None
+            write_moe_a2a_sidecar(
+                output_dir,
+                runtime_meta=runtime_meta,
+                case_ids=case_plan_ids(cases),
+                parquet_path=parquet_path,
+                failure_count=failures,
+                module_name=MODULE_NAME,
+            )
+        except BaseException as error:
+            sidecar_error = error
+    raise_for_stage(
+        agree_stage(
+            "sidecar_write",
+            sidecar_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+
+    if failures:
+        raise MoeA2ABenchmarkError(
+            f"refusing clean completion for partial TensorRT-LLM DeepEP collection: "
+            f"{failures}/{len(cases)} cases failed"
+        )
+
+    return parquet_path
+
+
+def run_collection(
+    *,
+    cases: list[MoeA2ACase],
+    adapter: BenchmarkAdapter,
+    output_dir: Path,
+    rank: int,
+    version: str,
+    device_name: str,
+    runtime_meta: dict[str, Any],
+    finalize: Callable[..., list[Path]] = finalize_perf_files,
+    token_gather: Callable[[int], list[int]] | None = None,
+    failure_agreement: Callable[[bool], bool] = bool,
+    stage_agreement: StageAgreement | None = None,
+    final_barrier: Callable[[], None] = lambda: None,
+) -> Path | None:
+    """Run the campaign and collectively close native resources before exit."""
+    agreement = stage_agreement or (
+        lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
+    )
+    result: Path | None = None
+    body_error: BaseException | None = None
+    try:
+        result = _run_collection_body(
+            cases=cases,
+            adapter=adapter,
+            output_dir=output_dir,
+            rank=rank,
+            version=version,
+            device_name=device_name,
+            runtime_meta=runtime_meta,
+            finalize=finalize,
+            token_gather=token_gather,
+            failure_agreement=failure_agreement,
+            stage_agreement=stage_agreement,
+        )
+    except BaseException as error:
+        body_error = error
+
+    close_error: BaseException | None = None
+    try:
+        close = getattr(adapter, "close", None)
+        if close is not None:
+            close()
+    except BaseException as error:
+        close_error = error
+    close_outcome = agree_stage(
+        "adapter_close",
+        close_error,
+        agreement=agreement,
+        peer_error_type=MoeA2APeerError,
+    )
+    if body_error is not None:
+        raise body_error
+    raise_for_stage(close_outcome)
+    raise_for_stage(
+        agree_stage(
+            "final_ready",
+            None,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+    final_barrier()
+    return result
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Collect TensorRT-LLM serving-parity DeepEP moe_a2a rows under external MPI"
+    )
+    parser.add_argument("--gpus-per-node", type=int, required=True)
+    parser.add_argument("--system", choices=sorted(FORMAL_SYSTEMS), required=True)
+    parser.add_argument("--modes", default=f"{COMM_BACKEND_HT},{COMM_BACKEND_LL}")
+    parser.add_argument("--output-path", default=os.getcwd())
+    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--deep-ep-commit", required=True)
+    parser.add_argument("--nvshmem-version", required=True)
+    parser.add_argument("--nvshmem-archive-sha256", required=True)
+    parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument("--iterations", type=int, default=200)
+    parser.add_argument("--canary", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    import tensorrt_llm
+    import torch
+    from tensorrt_llm._utils import mpi_allgather, mpi_barrier
+
+    identity = derive_dist_identity(dict(os.environ), gpus_per_node=args.gpus_per_node)
+    torch.cuda.set_device(identity.local_rank)
+    observed_abi = {
+        "build_mode": "source-wheel-over-pinned-base",
+        "deep_ep": args.deep_ep_commit,
+        "nvshmem": args.nvshmem_version,
+        "nvshmem_archive_sha256": args.nvshmem_archive_sha256,
+    }
+    runtime_meta = resolve_runtime_meta(
+        tensorrt_llm.__version__,
+        source_commit=args.source_commit,
+        observed_abi=observed_abi,
+        observed_image_digest=args.image_digest,
+    )
+    cases = build_case_plan(
+        shapes=get_moe_a2a_shapes(required_expert_parallel_size=identity.ep_size),
+        token_grid=get_moe_a2a_token_grid(),
+        ep_size=identity.ep_size,
+        node_num=identity.node_num,
+        modes=resolve_modes(args.modes),
+        system=args.system,
+    )
+    if args.canary:
+        cases = select_canary_cases(cases)
+    run_collection(
+        cases=cases,
+        adapter=TensorRTLLMBenchmarkAdapter(
+            warmup=args.warmup,
+            iterations=args.iterations,
+            max_num_tokens_per_rank=max(case.num_tokens for case in cases),
+        ),
+        output_dir=Path(args.output_path),
+        rank=identity.rank,
+        version=tensorrt_llm.__version__,
+        device_name=torch.cuda.get_device_name(identity.local_rank),
+        runtime_meta=runtime_meta,
+        stage_agreement=lambda _stage, failed: any(mpi_allgather(bool(failed))),
+        token_gather=lambda tokens: list(mpi_allgather(tokens)),
+        final_barrier=mpi_barrier,
+    )
+
+
+if __name__ == "__main__":
+    main()

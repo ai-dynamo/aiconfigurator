@@ -162,7 +162,7 @@ class TestSupportMatrix:
             # Architecture-based support for a model not in the matrix
             ("Qwen/Qwen3-235B-A22B-Thinking-2507", "h200_sxm", None, None, "Qwen3ForCausalLM", True, True),
             # Specific backend and version that should pass
-            ("Qwen/Qwen3-32B", "h200_sxm", "trtllm", "1.2.0rc5", None, True, True),
+            ("Qwen/Qwen3-32B", "h200_sxm", "trtllm", "1.3.0rc20", None, True, True),
             # Unsupported model
             ("non-existent-model", "h100_sxm", None, None, None, False, False),
             # Unsupported system
@@ -282,15 +282,14 @@ class TestSupportMatrix:
     @pytest.mark.parametrize(
         "model,backend,version,expected_agg,expected_disagg",
         [
-            ("zai-org/GLM-5.2-FP8", "sglang", "0.5.10", False, False),
-            # sglang 0.5.9 on b200 has no dsa_context_module silicon data; the
-            # strict declared-reuse policy (#1374) no longer lets the row pass
-            # via undeclared sibling-version reuse, so the regenerated matrix
-            # records FAIL.
-            ("zai-org/GLM-5.2-FP8", "sglang", "0.5.9", False, False),
-            ("zai-org/GLM-5.2-FP8", "trtllm", "1.3.0rc10", True, True),
-            ("nvidia/GLM-5.2-NVFP4", "sglang", "0.5.10", False, False),
-            ("nvidia/GLM-5.2-NVFP4", "vllm", "0.19.0", True, True),
+            # Anchored on queryable-slot versions present in the committed
+            # matrix (the pre-slot 0.5.9/0.5.10/rc10/0.19.0 rows are gone);
+            # the essence is exact_match on the variant's own rows, not the
+            # architecture fallback.
+            ("zai-org/GLM-5.2-FP8", "sglang", "0.5.14", True, True),
+            ("zai-org/GLM-5.2-FP8", "trtllm", "1.3.0rc20", True, True),
+            ("nvidia/GLM-5.2-NVFP4", "sglang", "0.5.14", True, True),
+            ("nvidia/GLM-5.2-NVFP4", "vllm", "0.24.0", True, True),
         ],
     )
     def test_check_support_uses_exact_glm5_b200_variant_rows(

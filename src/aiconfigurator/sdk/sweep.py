@@ -41,6 +41,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aiconfigurator.deprecation import deprecated_sweeper_entry_point
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.factory import get_backend
@@ -447,6 +448,7 @@ def _language_only_config(model_config):
     return dataclasses.replace(model_config, language_only=True)
 
 
+@deprecated_sweeper_entry_point
 def sweep_agg(
     *,
     model_path: str,
@@ -1279,6 +1281,7 @@ def _find_best_disagg_under_constraint(
     return df
 
 
+@deprecated_sweeper_entry_point
 def sweep_disagg(
     *,
     model_path: str,
@@ -1589,6 +1592,7 @@ def sweep_disagg(
 # ---------------------------------------------------------------------------
 
 
+@deprecated_sweeper_entry_point
 def sweep_afd(
     *,
     model_path: str,

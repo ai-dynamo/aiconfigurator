@@ -22,9 +22,10 @@ engine (`perf_database/table_view.rs`).
   parity with the other ops.
 
 Cache key matches every other migrated op: ``(systems_root, system,
-backend, version, enable_shared_layer)``. ``_build_op_sources`` early-
-exits for ``nccl`` / ``oneccl`` (framework-agnostic dirs, no shared-layer
-inheritance), so HYBRID mode doesn't union sibling rows for those.
+backend, version, enable_shared_layer)``. The engine-owned source resolver
+keeps ``nccl`` / ``oneccl`` primary-only, while framework-versioned
+``comm/{sglang,trtllm,vllm}`` tables may fill from strictly earlier versions
+of the same storage backend.
 """
 
 from __future__ import annotations

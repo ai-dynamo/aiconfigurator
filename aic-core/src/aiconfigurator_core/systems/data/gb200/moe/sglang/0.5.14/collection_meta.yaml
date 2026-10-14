@@ -16,4 +16,10 @@ tables:
     # 3078 bf16 sglang_fused_moe_triton + 3078 nvidia/MiniMax-M3-NVFP4 nvfp4
     # sglang_flashinfer_trtllm_moe; model-filtered internal collection CI
     # runs, zero failures.
+    # 2026-08-13: appended 3159 nvfp4 rows at the Qwen3.5-397B shape
+    # (512 experts, 4096/1024, topk 10, sglang_flashinfer_trtllm_moe,
+    # TP 1-32 x EP 1-256 x 3 distributions x 27 token counts), AIC-1716.
+    # Auto-collector run on collector_ref 29a73949 (lmsysorg/sglang:v0.5.14,
+    # image digest sha256:5027e95bf6ec), zero failures, keys disjoint from
+    # prior rows.
     status: complete

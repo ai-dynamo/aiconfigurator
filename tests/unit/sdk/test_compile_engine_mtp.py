@@ -48,3 +48,24 @@ def test_compile_engine_rejects_removed_nextn_accepted_parameter():
             nextn=1,
             nextn_accepted=0.7,
         )
+
+
+def test_compile_engine_propagates_attention_backend_to_model_config(monkeypatch):
+    captured = {}
+
+    def _capture_spec(model, **_kwargs):
+        captured["model"] = model
+        return "{}"
+
+    monkeypatch.setattr(engine, "build_engine_spec_json", _capture_spec)
+    monkeypatch.setattr(engine, "_maybe_load_database", lambda *a, **k: None)
+    monkeypatch.setattr(engine.aiconfigurator_core, "engine_spec_bincode_from_json", lambda s: b"")
+
+    engine.compile_engine(
+        "Qwen/Qwen3-32B",
+        "h200_sxm",
+        "trtllm",
+        attention_backend="fa3",
+    )
+
+    assert captured["model"].config.attention_backend == "fa3"

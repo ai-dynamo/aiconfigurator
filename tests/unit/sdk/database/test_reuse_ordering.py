@@ -10,7 +10,10 @@ REQUESTED version dir's ``reuse.yaml`` (any direction, channel
 requested, nearest first (channel ``fallback`` — never admits a version newer
 than requested implicitly), (4) cross-backend kernel-source-gated fill
 (channel ``cross_backend``, mechanism unchanged from before this PR). The
-``comm`` family is hard-excluded from every non-primary channel. Every
+``comm`` tables under the validated framework-versioned storage backends
+(``sglang``, ``trtllm``, ``vllm``) use only primary plus the nearest-earlier
+same-storage-backend chain. Declared and cross-backend comm reuse stay
+disabled; NCCL, oneCCL, and unknown comm backends remain primary-only. Every
 admitted source is recorded into ``PerfDatabase.data_provenance``.
 
 These tests call ``PerfDatabase._build_op_sources`` directly against
@@ -515,46 +518,73 @@ def test_self_overlap_declared_donor_admitted_after_primary(systems_root: Path) 
 
 
 # ---------------------------------------------------------------------------
-# comm family hard exclusion (design §6.5 rule 5)
+# comm family: implicit framework reuse or primary-only (design §6.5 rule 5)
 # ---------------------------------------------------------------------------
 
 
-def test_comm_family_custom_allreduce_gets_primary_only(systems_root: Path) -> None:
-    """custom_allreduce lives under the comm family. Today it inherits
-    newest-first sibling rows via the kernel-source manifest (same mechanism
-    as any other op); this PR tightens that to primary-only, regardless of a
-    stray declaration or a matching cross-backend manifest entry."""
-    backend, requested, older = "trtllm", "1.3.0", "1.2.0"
+@pytest.mark.parametrize("backend", ["sglang", "trtllm", "vllm"])
+def test_framework_comm_uses_only_earlier_same_backend(systems_root: Path, backend: str) -> None:
+    """Folder policy admits the earlier same-backend table while ignoring a
+    declared newer donor and a cross-framework manifest decoy."""
+    requested, older, declared = "2.0.0", "1.0.0", "3.0.0"
+    cross_backend = "vllm" if backend != "vllm" else "sglang"
     _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/custom_allreduce_perf.parquet")
     _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{cross_backend}/0.5.14/custom_allreduce_perf.parquet")
     _write_yaml(
         systems_root,
         f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
-        {"reuse": [_reuse_entry("custom_allreduce_perf", older)]},
+        {"reuse": [_reuse_entry("custom_allreduce_perf", declared)]},
     )
-    _write_manifest(systems_root, [("custom_allreduce_perf.parquet", "TRTLLM", "shared", [backend])])
+    _write_manifest(
+        systems_root,
+        [("custom_allreduce_perf.parquet", "shared_comm", "shared", [backend, cross_backend])],
+    )
 
     db = _build_db(systems_root, backend=backend, version=requested)
     sources = _sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
 
-    assert len(sources) == 1
+    assert len(sources) == 2
     assert sources[0][0].endswith(f"comm/{backend}/{requested}/custom_allreduce_perf.parquet")
-    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+    assert sources[1][0].endswith(f"comm/{backend}/{older}/custom_allreduce_perf.parquet")
+    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary", "fallback"]
+    assert _versions(db, "custom_allreduce_perf.parquet") == [requested, older]
 
 
-def test_legacy_layout_comm_op_keeps_pre_v3_siblings(systems_root: Path) -> None:
-    """Pins the documented AIC-1503 PR4 task-1 FIX-2 exception
-    (``_op_file_family_from_path`` docstring): design §6.5 rule 5's comm
-    hard-exclusion is detected structurally off the primary path's family
-    component, which only exists in the family-first layout. A LEGACY-shaped
-    comm op (3-component path, no ``comm/`` family dir) therefore does NOT
-    get the exclusion applied — it keeps pre-V3 sibling-reuse behavior for
-    as long as its tree stays legacy-shaped. Contrast with
-    ``test_comm_family_custom_allreduce_gets_primary_only`` above, which
-    pins the family-shaped case (exclusion DOES apply, primary-only)."""
-    backend, requested, older = "trtllm", "1.3.0", "1.2.0"
+def test_missing_framework_comm_primary_reuses_earlier_table(systems_root: Path) -> None:
+    """A missing requested table inherits its family from existing copies,
+    preserving the TRT-LLM rc20 -> rc10 use case."""
+    backend, requested, older = "trtllm", "1.3.0rc20", "1.3.0rc10"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/trtllm_alltoall_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.trtllm_alltoall)
+
+    assert len(sources) == 2
+    assert not Path(sources[0][0]).exists()
+    assert sources[1][0].endswith(f"comm/{backend}/{older}/trtllm_alltoall_perf.parquet")
+    assert _channels(db, "trtllm_alltoall_perf.parquet") == ["primary", "fallback"]
+
+
+def test_legacy_primary_infers_comm_namespace_and_blocks_forbidden_channels(systems_root: Path) -> None:
+    """An existing legacy primary still gets the comm policy when canonical
+    family-first copies identify its namespace. This pins default-engine
+    parity for user-provided transition trees."""
+    backend, requested, older, declared = "trtllm", "2.0.0", "1.0.0", "3.0.0"
     _write(systems_root, f"data/h100_sxm/{backend}/{requested}/custom_allreduce_perf.parquet")
-    _write(systems_root, f"data/h100_sxm/{backend}/{older}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/custom_allreduce_perf.parquet")
+    _write(systems_root, "data/h100_sxm/comm/sglang/0.5.14/custom_allreduce_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("custom_allreduce_perf", declared)]},
+    )
+    _write_manifest(
+        systems_root,
+        [("custom_allreduce_perf.parquet", "shared_comm", "shared", [backend, "sglang"])],
+    )
 
     db = _build_db(systems_root, backend=backend, version=requested)
     sources = _sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
@@ -564,20 +594,75 @@ def test_legacy_layout_comm_op_keeps_pre_v3_siblings(systems_root: Path) -> None
     assert _versions(db, "custom_allreduce_perf.parquet") == [requested, older]
 
 
-def test_nccl_op_name_early_exit_still_applies(systems_root: Path) -> None:
-    """NCCL is comm-family too, but this proves the pre-existing op-name
-    early-exit (kept per the PR3 carry-in) independently still short-circuits,
-    not just the new family-based check."""
-    _write(systems_root, "data/h100_sxm/comm/nccl/2.26.2/nccl_perf.parquet")
-    _write(systems_root, "data/h100_sxm/comm/nccl/2.20.0/nccl_perf.parquet")  # older sibling, must be ignored
+def test_unknown_comm_storage_backend_fails_closed(systems_root: Path) -> None:
+    """The physical storage backend wins over the database backend, so a
+    future comm namespace cannot inherit from TRT-LLM by accident."""
+    requested, older = "2.0.0", "1.0.0"
+    _write(systems_root, f"data/h100_sxm/comm/futurelib/{requested}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/futurelib/{older}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/trtllm/{older}/custom_allreduce_perf.parquet")
 
-    db = _build_db(systems_root, backend="trtllm", version="2.26.2")
+    db = _build_db(systems_root, backend="trtllm", version=requested)
     system_data_root = str(systems_root / "data" / "h100_sxm")
-    primary_path = resolve_op_data_path(system_data_root, "nccl", "2.26.2", common.PerfDataFilename.nccl.value)
-    sources = db._build_op_sources(common.PerfDataFilename.nccl, primary_path, system_data_root)
+    primary_path = resolve_op_data_path(
+        system_data_root,
+        "futurelib",
+        requested,
+        common.PerfDataFilename.custom_allreduce.value,
+    )
+    sources = db._build_op_sources(common.PerfDataFilename.custom_allreduce, primary_path, system_data_root)
 
     assert len(sources) == 1
-    assert _channels(db, "nccl_perf.parquet") == ["primary"]
+    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+
+
+@pytest.mark.parametrize("storage_backend", ["vllm", "futurelib"])
+def test_legacy_comm_override_preserves_physical_backend(systems_root: Path, storage_backend: str) -> None:
+    """Family inference must not replace a legacy path's physical backend.
+
+    Both a validated-but-mismatched framework and an unknown backend are
+    primary-only for a TRT-LLM request.
+    """
+    requested, older = "2.0.0", "1.0.0"
+    primary = systems_root / f"data/h100_sxm/{storage_backend}/{requested}/custom_allreduce_perf.parquet"
+    _write(systems_root, str(primary.relative_to(systems_root)))
+    _write(systems_root, f"data/h100_sxm/comm/trtllm/{older}/custom_allreduce_perf.parquet")
+
+    db = _build_db(systems_root, backend="trtllm", version=requested)
+    system_data_root = str(systems_root / "data" / "h100_sxm")
+    sources = db._build_op_sources(
+        common.PerfDataFilename.custom_allreduce,
+        str(primary),
+        system_data_root,
+    )
+
+    assert sources == [(str(primary), None)]
+    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+
+
+@pytest.mark.parametrize(
+    ("storage_backend", "op"),
+    [
+        ("nccl", common.PerfDataFilename.nccl),
+        ("oneccl", common.PerfDataFilename.oneccl),
+    ],
+)
+def test_library_communication_stays_primary_only(
+    systems_root: Path,
+    storage_backend: str,
+    op: common.PerfDataFilename,
+) -> None:
+    requested, older = "2.26.2", "2.20.0"
+    _write(systems_root, f"data/h100_sxm/comm/{storage_backend}/{requested}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{storage_backend}/{older}/{op.value}")
+
+    db = _build_db(systems_root, backend="trtllm", version=requested)
+    system_data_root = str(systems_root / "data" / "h100_sxm")
+    primary_path = resolve_op_data_path(system_data_root, storage_backend, requested, op.value)
+    sources = db._build_op_sources(op, primary_path, system_data_root)
+
+    assert len(sources) == 1
+    assert _channels(db, op.value) == ["primary"]
 
 
 # ---------------------------------------------------------------------------

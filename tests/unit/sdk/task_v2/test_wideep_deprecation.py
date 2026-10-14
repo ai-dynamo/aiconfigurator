@@ -235,10 +235,10 @@ def _agg_task(**overrides) -> Task:
 
 
 def _model_config_outcome(task: Task, role: str, parallel: tuple) -> tuple:
-    """Comparable result for tuples that may hit the cross-node data gate."""
+    """Comparable result for tuples that may hit a strict cross-node gate."""
     try:
         model_config = task.build_model_config(role=role, parallel=parallel)
-    except PerfDataNotAvailableError as exc:
+    except (PerfDataNotAvailableError, ValueError) as exc:
         return ("error", type(exc), str(exc))
     return ("ok", model_config.moe_comm_backend, model_config.moe_backend)
 

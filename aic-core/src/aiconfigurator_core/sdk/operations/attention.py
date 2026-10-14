@@ -20,16 +20,203 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.attention_lanes import (
+    UnsupportedAttentionBackendError,
+    resolve_attention_lane_order,
+    resolve_attention_override_lanes,
+    split_attention_lane_tiers,
+)
 from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=256)
+def _lane_order_cached(backend, version, sm_version, override, systems_root) -> tuple[str, ...]:
+    """Memoized :func:`resolve_attention_lane_order`.
+
+    The resolution reads a YAML map and builds a list; the engine-spec build
+    needs it per attention op, so memoize on the full input tuple. One entry
+    per (database identity x override) — a sweep resolves each order exactly
+    once.
+    """
+    return resolve_attention_lane_order(backend, version, sm_version, override, systems_root)
+
+
+def resolve_lane_order(database, override: str | None = None) -> tuple[str, ...]:
+    """Attention lane precedence for *database* under an optional *override*.
+
+    The override is the user-facing ``attention_backend`` knob carried by the
+    op; everything else comes off the database handle (backend, version,
+    ``sm_version``, systems root). ``"default"`` is always the last element.
+    """
+    sm_version = database.system_spec["gpu"].get("sm_version") or -1
+    return _lane_order_cached(database.backend, database.version, sm_version, override, database.systems_root)
+
+
+def lane_walk_order(density: dict[str, tuple[int, int]], lane_order: tuple[str, ...]) -> tuple[str, ...]:
+    """The concrete walk order given each lane's ``(slice_count, row_count)``
+    density: pinned lanes, then donors by density.
+
+    ``density`` is ``{kernel_source: (slice_count, row_count)}`` for the
+    REAL query-path table — fetched from the compiled engine via
+    ``engine_table_view.fetch_attention_lane_density``
+    (``perf_database/attention.rs::AttentionTable::context_lanes``/
+    ``generation_lanes``), never the lane-blind Python enumeration view
+    (``engine_table_view.fetch_table_view`` / ``table_view.rs``), which
+    folds every kernel_source into one first-wins table for
+    charts/support-matrix and cannot answer a density question at all.
+
+    Three tiers, in order:
+
+    1. **Pinned** — the override and the framework-default map lane, in the
+       precedence the resolver produced. Never re-ordered: explicit intent wins.
+       The boundary comes from the resolver itself (``LaneOrder.pinned_count``,
+       read by ``split_attention_lane_tiers``) — a lane order that is not
+       resolver-produced (hand-specified, or an already-expanded walk) is pinned
+       in full and replayed verbatim.
+    2. **Donor tier** — the remaining known lanes (plus ``"default"`` last, per
+       the resolver's contract), ranked by measured coverage in THIS table
+       (slices, then rows, then name) instead of alphabetically. Gap-fill should
+       come from the data-richest lane: on gb200/sglang, plain ``sorted()`` let
+       ``flashinfer`` (10 slices / 2 584 rows) preempt ``trtllm_mha`` (64 /
+       31 141) on 5 context + 10 generation slices for no reason but its name.
+    3. **Table leftovers** — lanes present in the table but outside the resolver
+       vocabulary, same density ranking. The collected ``kernel_source`` labels
+       are richer than the map (trtllm ships ``torch_flow*``, vllm ``vllm_*``,
+       sglang also ``flash_attention``) and those backends have no ``"default"``
+       lane at all, so without this tier none of their rows would be reachable.
+
+    The ranking is a pure function of ``density``, so it is stable for a data
+    set and identical at spec-build time — the ENGINE SPEC carries this
+    extended order and the Rust twin replays it verbatim rather than
+    re-deriving it.
+    """
+    if not density:
+        return tuple(lane_order)
+    pinned, donors = split_attention_lane_tiers(lane_order)
+
+    def _rank(lane: str) -> tuple[int, int, str]:
+        slices, rows = density.get(lane, (0, 0))
+        return (-slices, -rows, lane)
+
+    known = sorted((lane for lane in donors if lane != "default"), key=_rank)
+    tail = ("default",) if "default" in donors else ()
+    leftovers = sorted((lane for lane in density if lane not in lane_order), key=_rank)
+    return pinned + tuple(known) + tail + tuple(leftovers)
+
+
+def _source_tiered_lane_walk_order(
+    density: dict[str, tuple[int, int]],
+    primary_density: dict[str, tuple[int, int]],
+    lane_order: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Rank requested-version lanes before shared donor-version lanes.
+
+    ``AttentionTable::by_lane`` merges sources under their bare lane labels,
+    so the shared density alone cannot distinguish a requested-version lane
+    from a denser inherited lane. Preserve the resolver's pinned intent first,
+    then build requested-version and shared-only tiers with the same density
+    ranking. Within a lane, Rust's existing first-source-wins fold still
+    preserves requested-version rows when the same label also appears in a
+    donor. A pinned lane remains first even when it exists only in a donor.
+    """
+    shared_order = lane_walk_order(density, lane_order)
+    if not primary_density:
+        return shared_order
+    pinned, _ = split_attention_lane_tiers(lane_order)
+    primary_order = tuple(
+        lane for lane in lane_walk_order(primary_density, lane_order) if lane in primary_density and lane not in pinned
+    )
+    shared_only_order = tuple(lane for lane in shared_order if lane not in primary_density and lane not in pinned)
+    return pinned + primary_order + shared_only_order
+
+
+def resolved_lane_order_for_op(database, table_attr: str, override: str | None = None) -> list[str]:
+    """Kernel-lane precedence for an attention op, RESOLVED python-side.
+
+    Since the pyo3 op unification, ``ContextAttention``/``GenerationAttention``
+    are constructed by the model layer WITHOUT a database handle (models are
+    pure shape graphs; the database is only bound later, when
+    ``engine.py::build_engine_spec_json`` walks a built model's op lists
+    against a specific database — same place ``_wideep_moe`` pre-bakes its
+    kernel_source). This is called from there, once the database is
+    available, to set each attention op's ``_lane_order`` before
+    serialization; it is NOT reachable from the op's own ``__init__``.
+
+    ``table_attr`` is ``"_context_attention_data"`` or
+    ``"_generation_attention_data"``. With no database, an unset or literal
+    ``"default"`` override returns the always-valid ``["default"]``; a named
+    override raises because it cannot be verified without database metadata.
+    The engine spec must never carry an empty lane list.
+
+    Table-aware extension (donor/leftover-lane density ranking) fires ONLY
+    when there is EVIDENCE of intent — an explicit *override* (a non-empty
+    pinned head), or a framework-default map entry for this exact (backend,
+    floor-matched version, sm_version), including an entry whose lane is
+    ``"default"`` (it pins nothing, yet it is a sourced statement about the
+    framework default — e.g. vllm 0.24.0 on Blackwell). With NEITHER — no
+    override and no map entry (unknown backend, unmapped shipped versions
+    such as vllm 0.22.0/0.19.0, or a missing sm row) — donor density is no
+    evidence of the framework default at all, so this FAILS CLOSED to the
+    plain ``["default"]`` the pyo3 constructor already carries, relying only
+    on the Rust-side ``lane_slice`` fallback (any other table lane, BTreeMap
+    order) — unchanged from this op's behavior before AIC-1715/1716. Do not
+    "fix" the unmapped case by extending the density walk to it; map the
+    version with a verifiable source instead (PR #1519 review).
+
+    An explicit named *override* is user intent: unsupported pairs and
+    unexpected resolver/density failures both propagate rather than silently
+    discarding it. Unset and literal ``"default"`` paths may safely degrade to
+    ``["default"]``, with a WARNING so the fallback remains observable.
+    """
+    if database is None:
+        if override not in (None, "default"):
+            raise UnsupportedAttentionBackendError(
+                f"attention_backend={override!r} cannot be resolved without an attention performance database"
+            )
+        return ["default"]
+    try:
+        order = resolve_lane_order(database, override)
+        if getattr(order, "pinned_count", 0) == 0 and not getattr(order, "framework_default_matched", False):
+            # No override, no framework-default map entry: fail closed (see
+            # docstring) instead of density-ranking the whole vocabulary.
+            return ["default"]
+        from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
+
+        density = fetch_attention_lane_density(database, table_attr)
+        if override not in (None, "default"):
+            override_lanes = resolve_attention_override_lanes(database.backend, override)
+            if not any(lane in density for lane in override_lanes):
+                phase = "context" if table_attr == "_context_attention_data" else "generation"
+                raise UnsupportedAttentionBackendError(
+                    f"attention_backend={override!r} has no {phase} attention measurements for "
+                    f"system {database.system!r}, backend {database.backend!r}, version {database.version!r}; "
+                    f"expected at least one stored kernel_source lane from {list(override_lanes)!r}, "
+                    f"available lanes: {sorted(density)!r}."
+                )
+        primary_density = fetch_attention_lane_density(database, table_attr, shared_layer=False)
+        return list(_source_tiered_lane_walk_order(density, primary_density, order))
+    except UnsupportedAttentionBackendError:
+        raise
+    except Exception:
+        if override not in (None, "default"):
+            raise
+        logger.warning(
+            "attention lane order unresolvable for %s; serializing the default-only order",
+            table_attr,
+            exc_info=True,
+        )
+        return ["default"]
+
 
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.

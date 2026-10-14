@@ -26,7 +26,7 @@ def test_epd_rows_skip_generator_artifacts(tmp_path, caplog):
         total_gpus=1,
         system="gb200",
         backend="vllm",
-        backend_version="0.11.0",
+        backend_version="current",
         database_mode="SOL",
     )
 
@@ -52,7 +52,7 @@ def test_epd_rows_skip_generator_artifacts(tmp_path, caplog):
     with (
         patch(
             "aiconfigurator.cli.report_and_save.get_default_dynamo_version_mapping",
-            return_value=("1.0.0", {"vllm": "0.11.0"}),
+            return_value=("1.0.0", {"vllm": "current"}),
         ),
         patch(
             "aiconfigurator.cli.report_and_save.task_config_to_generator_config",

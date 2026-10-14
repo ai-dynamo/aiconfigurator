@@ -25,9 +25,10 @@ must remain explicitly classified rather than reported as passing.
 ## Current NVIDIA NVFP4 additions
 
 The current expansion covers Qwen3.5 and Qwen3.6, Gemma 4, Kimi K2.6 and K2.7
-Code, DeepSeek V4 Flash and Pro, Nemotron-3 Nano, and MiniMax M3. Their bundled
-Hugging Face configs and quantization metadata remain the source of truth for
-architecture and precision selection, including mixed-precision checkpoints.
+Code, DeepSeek V4 Flash and Pro, Nemotron-3 Nano, Nemotron-3.5 Lightning, and
+MiniMax M3. Their bundled Hugging Face configs and quantization metadata remain
+the source of truth for architecture and precision selection, including
+mixed-precision checkpoints.
 
 ## Retired from default generation
 

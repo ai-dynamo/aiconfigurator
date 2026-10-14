@@ -124,6 +124,7 @@ def task_config_to_generator_config(
         and (_num_images is None or _num_images > 0)
     ):
         encoder_dp = bool(getattr(task_config, "enable_encoder_dp", True))
+    attention_backend = getattr(task_config, "attention_backend", None)
 
     def _build_worker_params(prefix: str, extra_overrides: dict | None) -> tuple[dict, int]:
         workers = _safe_int(_series_val(result_df, f"{prefix}workers", 1), 1)
@@ -160,8 +161,18 @@ def task_config_to_generator_config(
             worker_payload["kv_cache_dtype"] = quant["kvcache_quant_mode"]
         if encoder_dp is not None:
             worker_payload["enable_encoder_dp"] = encoder_dp
+        if attention_backend is not None:
+            worker_payload["attention_backend"] = attention_backend
 
         worker_payload = _deep_merge(worker_payload, extra_overrides)
+        effective_attention_backend = worker_payload.get("attention_backend")
+        if effective_attention_backend == "default":
+            worker_payload.pop("attention_backend")
+        elif task_config.primary_backend_name == "sglang" and effective_attention_backend == "fla":
+            raise ValueError(
+                f"SGLang {task_config.primary_backend_version} rejects attention_backend='fla'; "
+                "use 'default' to let SGLang choose its attention backend or select a supported named backend."
+            )
         return worker_payload, max(workers, 1)
 
     backend_name = task_config.primary_backend_name

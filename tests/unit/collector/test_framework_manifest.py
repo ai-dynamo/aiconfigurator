@@ -85,11 +85,25 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
     assert "deepseek-v4" in wideep_sglang.image()
 
 
+def test_wideep_vllm_runtime_has_backend_specific_deepep_abis():
+    runtime = get_collector_runtime("vllm", workload="wideep")
+
+    assert runtime.images == {
+        "default": "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
+    }
+    assert runtime.abi_for_backend("deepep_ht")["deep_ep"] == "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
+    assert runtime.abi_for_backend("deepep_ht")["deep_ep_api"] == "Buffer"
+    assert runtime.abi_for_backend("deepep_ll")["deep_ep_api"] == "Buffer"
+    v2 = runtime.abi_for_backend("deepep_v2")
+    assert v2["deep_ep"] == "b306af06afd412c88e51e71802951606e40b7358"
+    assert v2["deep_ep_api"] == "ElasticBuffer"
+    assert v2["nccl"] == "2.30.4"
+
+
 def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
     # The `comm` family override retargets exactly the two DeepEP ops; moe_ep
-    # (the retired wideep_moe's successor) is family `moe` and stays on the
-    # DeepSeek-V4 runtime its 0.5.10 dataset was collected with, where DSv4
-    # module support is verified.
+    # is family `moe` and stays on the DeepSeek-V4 runtime its 0.5.10 dataset
+    # was collected with.
     moe = resolve_op_runtime("wideep_sglang", "moe_ep")
     assert (moe.family, moe.version) == ("moe", "0.5.10")
     assert "deepseek-v4" in moe.image()
@@ -145,6 +159,65 @@ frameworks:
     )
     with pytest.raises(ValueError, match="digest-pinned"):
         get_collector_runtime("sglang", path=manifest)
+
+
+def test_runtime_source_commit_and_abi_are_pinned_and_exposed(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    source_commit = "1" * 40
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  vllm:
+    source_repo: "https://github.com/vllm-project/vllm.git"
+    default:
+      version: "0.26.1.dev587"
+      source_commit: "{source_commit}"
+      abi:
+        deep_ep: "d4f41e4e93"
+        nvshmem: "3.3.24"
+      images:
+        default: "vllm/vllm-openai:nightly{digest}"
+""",
+        encoding="utf-8",
+    )
+
+    runtime = get_collector_runtime("vllm", path=manifest)
+    assert runtime.source_commit == source_commit
+    assert runtime.abi == {"deep_ep": "d4f41e4e93", "nvshmem": "3.3.24"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_commit", "abc123", "full 40-character"),
+        ("abi", "not-a-map", "must map"),
+        ("abi", {}, "must map"),
+    ],
+)
+def test_runtime_source_and_abi_reject_unpinned_values(tmp_path, field, value, message):
+    digest = "@sha256:" + "0" * 64
+    runtime_extra = yaml.safe_dump({field: value}, default_flow_style=False).rstrip()
+    indented_extra = "\n".join(f"      {line}" for line in runtime_extra.splitlines())
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  vllm:
+    source_repo: "https://github.com/vllm-project/vllm.git"
+    default:
+{indented_extra}
+      version: "0.26.1.dev587"
+      images:
+        default: "vllm/vllm-openai:nightly{digest}"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        get_collector_runtime("vllm", path=manifest)
 
 
 def test_wideep_entry_missing_base_framework_is_rejected(tmp_path):

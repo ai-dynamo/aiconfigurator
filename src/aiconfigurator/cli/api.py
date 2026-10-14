@@ -44,7 +44,7 @@ from aiconfigurator.sdk.speculative import (
 from aiconfigurator.sdk.speculative import (
     normalize_speculative_decoding as _normalize_nextn,
 )
-from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator.sdk.task_v2 import TASK_REBUILD_FIELDS, Task
 
 # Default per-phase latency-correction scales for single-point disagg estimates.
 # (Migrated from the legacy V1 task module; same values as Task's field defaults.)
@@ -195,6 +195,7 @@ def cli_default(
     generator_set: list[str] | None = None,
     generator_config: str | None = None,
     generator_dynamo_version: str | None = None,
+    attention_backend: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
 ) -> CLIResult:
@@ -255,6 +256,9 @@ def cli_default(
             Equivalent to repeating ``--generator-set`` on the CLI.
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). None uses the
+            framework default for the target system/backend version.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
@@ -328,6 +332,7 @@ def cli_default(
         nextn_accepted=nextn_accepted,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
+        attention_backend=attention_backend,
         engine_step_backend=engine_step_backend,
         forward_model=forward_model,
     )
@@ -376,32 +381,23 @@ def cli_default(
 
 _MAX_GPUS_PER_WORKER = 64
 
-# Conservative nextn_accepted fraction used when recommend auto-enables DSPARK.
-# nextn_accepted has no backend equivalent — it is AIC's throughput modeling
-# assumption (accepted tokens per step as a fraction of the block size).
-# Users who have empirical acceptance data can override via cli_recommend's
-# nextn_accepted parameter. 0.8 is conservative for a well-aligned draft model.
-_DSPARK_DEFAULT_ACCEPTANCE = 0.8
-
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
-    """Scale GPU candidates for recommend mode."""
-    import dataclasses
+    """Rebuild recommend tasks at a new GPU budget.
 
-    num_gpu_candidates = [1 << i for i in range(total_gpus.bit_length()) if (1 << i) <= total_gpus]
+    Resets every field listed in ``TASK_REBUILD_FIELDS`` to None, then
+    replaces ``total_gpus``.  This causes Task's ``__post_init__`` →
+    ``_resolve_agg_search`` / ``_resolve_disagg_search`` to recompute every
+    parallelism dimension at the new budget, preserving all backend-specific
+    and topology-specific caps (e.g. deepep_moe intra-node EP limits,
+    non-MoE pinned-to-1 dims) without any manual extension logic.
+    """
+    import dataclasses
 
     rebuilt = {}
     for name, task in base_tasks.items():
-        overrides = {
-            "total_gpus": total_gpus,
-            "agg_num_gpu_candidates": num_gpu_candidates,
-        }
-        if task.serving_mode == "disagg":
-            overrides.update(
-                prefill_num_gpu_candidates=num_gpu_candidates,
-                decode_num_gpu_candidates=num_gpu_candidates,
-            )
-        rebuilt[name] = dataclasses.replace(task, **overrides)
+        reset = {f.name: None for f in dataclasses.fields(task) if f.name in TASK_REBUILD_FIELDS}
+        rebuilt[name] = dataclasses.replace(task, total_gpus=total_gpus, **reset)
     return rebuilt
 
 
@@ -425,7 +421,7 @@ def cli_recommend(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int | str = 0,
+    nextn: int | str | None = None,
     nextn_accepted: float | None = None,
     strict_sla: bool = False,
     enable_chunked_prefill: bool = False,
@@ -433,6 +429,7 @@ def cli_recommend(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    attention_backend: str | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
     engine_step_backend: str | None = None,
@@ -473,8 +470,10 @@ def cli_recommend(
         tpot: Time per output token SLA target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: MTP draft length, or 'auto' to use the checkpoint's
-            num_nextn_predict_layers. Default is 0 (disabled).
+        nextn: MTP draft length, or 'auto' to resolve the depth from the
+            checkpoint, falling back to DSPARK architecture metadata. Omitted
+            or 0 keeps speculative decoding disabled unless a DSPARK model is
+            paired with an explicit ``nextn_accepted`` workload measurement.
         nextn_accepted: Average accepted draft tokens per decode step
             (0 <= nextn_accepted <= nextn). Required when the draft depth
             resolves to > 0.
@@ -484,6 +483,12 @@ def cli_recommend(
         max_seq_len: TRT-LLM max_seq_len setting.
         enable_wideep: Enable Wide Expert Parallelism for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). Supported values
+            depend on the backend's collected tables (e.g. vllm supports
+            'triton', 'flashinfer', and 'default'); an unsupported
+            (backend, value) pair raises. None (default) uses the framework
+            default for the target system/backend version.
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
@@ -521,19 +526,16 @@ def cli_recommend(
     gpus_per_node = spec["node"]["num_gpus_per_node"]
 
     # Fail fast on inconsistent MTP inputs (same early check as cli_default).
-    # nextn="auto" resolves the draft depth from the checkpoint first.
+    # Explicit "auto" resolves the checkpoint depth first and falls back to
+    # DSPARK's architectural block size. An omitted nextn may use that DSPARK
+    # depth only when the caller supplied an explicit workload acceptance
+    # measurement. Explicit nextn=0 always remains the opt-out.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
-
-    # DSPARK architectures (e.g. Kimi-K3) always run with a standalone draft
-    # model in production. Their block size is an architectural constant absent
-    # from the checkpoint, so nextn="auto" returns 0. Auto-enable here so that
-    # recommend produces accurate throughput estimates without requiring callers
-    # to know about DSPARK internals.
-    if nextn == 0 and (dspark := _resolve_dspark_nextn(model_path)):
-        nextn, dspark_accepted = dspark
-        if nextn_accepted is None:
-            nextn_accepted = dspark_accepted
+        if nextn == 0:
+            nextn = _resolve_dspark_nextn(model_path) or 0
+    elif nextn is None:
+        nextn = _resolve_dspark_nextn(model_path) if nextn_accepted is not None else 0
 
     nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
@@ -564,17 +566,39 @@ def cli_recommend(
         forward_model=forward_model,
         enable_wideep=enable_wideep,
         moe_backend=moe_backend,
+        attention_backend=attention_backend,
     )
 
-    # Build escalation sequence: gpus_per_node, *2, *4, *8, capped at _MAX_GPUS_PER_WORKER.
-    budgets = [gpus_per_node]
+    # Build escalation sequence: *2, *4, *8 from gpus_per_node, capped at _MAX_GPUS_PER_WORKER.
+    # Attempt 0 uses base_tasks directly (already built at gpus_per_node — no rebuild needed).
+    escalation_budgets = []
     budget = gpus_per_node * 2
     while budget <= _MAX_GPUS_PER_WORKER:
-        budgets.append(budget)
+        escalation_budgets.append(budget)
         budget *= 2
 
-    result = None
-    for attempt, gpu_budget in enumerate(budgets):
+    result = _execute_and_wrap_result(
+        base_tasks,
+        mode="default",
+        top_n=top_n,
+        strict_sla=strict_sla,
+        target_request_rate=target_request_rate,
+        target_concurrency=target_concurrency,
+        parallel_experiments=True,
+    )
+    retriable = [
+        name
+        for name, outcome in result.outcomes.items()
+        if outcome.error is not None and is_gpu_retriable(outcome.error)
+    ]
+    for attempt, gpu_budget in enumerate(escalation_budgets):
+        if not retriable:
+            break
+        logger.info(
+            "Recommend: %s may fit at larger budget; escalating to %d GPUs.",
+            ", ".join(retriable),
+            gpu_budget,
+        )
         tasks = _build_recommend_tasks(base_tasks, gpu_budget)
         result = _execute_and_wrap_result(
             tasks,
@@ -590,13 +614,6 @@ def cli_recommend(
             for name, outcome in result.outcomes.items()
             if outcome.error is not None and is_gpu_retriable(outcome.error)
         ]
-        if not retriable or attempt == len(budgets) - 1:
-            break
-        logger.info(
-            "Recommend: %s may fit at larger budget; escalating to %d.",
-            ", ".join(retriable),
-            budgets[attempt + 1],
-        )
 
     if not result.best_configs:
         raise NoFeasibleConfigError("No feasible GPU configuration found for the given load target.")
@@ -643,6 +660,7 @@ def cli_exp(
     *,
     yaml_path: str | None = None,
     config: dict[str, dict] | None = None,
+    attention_backend: str | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
@@ -658,6 +676,10 @@ def cli_exp(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        attention_backend: Optional global attention kernel-lane override
+            ('fa3', 'triton', 'trtllm_mha', 'flashinfer', 'fla', or 'default'),
+            applied to every experiment. Per-experiment ``attention_backend``
+            entries in the YAML/config take precedence.
         top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
@@ -719,6 +741,7 @@ def cli_exp(
     tasks = build_experiment_tasks(
         yaml_path=yaml_path,
         config=config,
+        attention_backend=attention_backend,
     )
 
     if not tasks:
@@ -1036,6 +1059,7 @@ def cli_estimate(
     decode_max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    attention_backend: str | None = None,
     # Static-mode (and shared) extras
     prefix: int = 0,
     nextn: int | str = 0,
@@ -1136,6 +1160,13 @@ def cli_estimate(
             disagg. Overrides ``max_seq_len`` for the decode worker.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). Supported values
+            depend on the backend's collected tables (e.g. vllm supports
+            'triton', 'flashinfer', and 'default'); an unsupported
+            (backend_name, value) pair raises. None (default) uses the
+            framework default for the target system/backend version. Applied
+            to agg, disagg, afd, and all static modes.
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's
@@ -1300,6 +1331,7 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            attention_backend=attention_backend,
         )
 
     if mode == "agg":
@@ -1334,6 +1366,7 @@ def cli_estimate(
             max_seq_len=max_seq_len,
             engine_step_backend=engine_step_backend,
             forward_model=forward_model,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1406,6 +1439,7 @@ def cli_estimate(
             get_model=get_model,
             engine_step_backend=engine_step_backend,
             forward_model=forward_model,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1468,6 +1502,7 @@ def cli_estimate(
             get_model=get_model,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1513,6 +1548,7 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            attention_backend=attention_backend,
         )
         if static_result.summary is not None and static_result.summary.check_oom():
             phase_label = "decode" if static_mode == "static_gen" else "prefill"
@@ -1562,6 +1598,7 @@ def _run_agg_estimate(
     max_seq_len=None,
     engine_step_backend=None,
     forward_model=None,
+    attention_backend: str | None = None,
     # Common (also accepted by disagg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1588,6 +1625,7 @@ def _run_agg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     _apply_nextn(model_config, nextn)
     # Agg workers run context attention → resolve fmha against the perf data
@@ -1596,7 +1634,7 @@ def _run_agg_estimate(
         model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1701,6 +1739,7 @@ def _run_static_estimate(
     get_backend,
     get_model,
     forward_model=None,
+    attention_backend: str | None = None,
 ) -> EstimateResult:
     """Run a single-pass static-batching estimation.
 
@@ -1732,6 +1771,7 @@ def _run_static_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     _apply_nextn(model_config, nextn)
     database = load_database(system_name)
@@ -1762,7 +1802,7 @@ def _run_static_estimate(
         )
 
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name)
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1865,6 +1905,7 @@ def _run_disagg_estimate(
     get_model,
     engine_step_backend=None,
     forward_model=None,
+    attention_backend: str | None = None,
     # Common (also accepted by agg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1909,6 +1950,7 @@ def _run_disagg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     decode_model_config = _build_model_config(
         decode_tp_size,
@@ -1923,25 +1965,57 @@ def _run_disagg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
     _apply_nextn(prefill_model_config, nextn)
     _apply_nextn(decode_model_config, nextn)
+
+    prefill_database = load_database(system_name)
+    decode_database = load_database(decode_system_name)
+    if check_is_moe(model_path):
+        resolve_model_config_moe_comm(
+            prefill_model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=prefill_database,
+            required_phases=("context",),
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+        resolve_model_config_moe_comm(
+            decode_model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=decode_database,
+            required_phases=("generation",),
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+
     # Prefill runs context attention → resolve fmha against the perf data. Decode
-    # is generation-only and keeps fp8, so it needs no adjustment.
-    resolve_context_fmha_by_data(
-        prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
-    )
+    # is generation-only and keeps fp8, so it needs no adjustment. A resolved
+    # large-EP tuple owns its WideEP attention labels and must not be rewritten
+    # by the generic narrow-attention fallback.
+    if prefill_model_config.moe_comm_backend is None:
+        resolve_context_fmha_by_data(
+            prefill_model_config, model_path, prefill_database, backend_name, is_context_role=True
+        )
     resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path, backend_name=backend_name)
     resolve_dsv4_moe_arch(
         decode_model_config,
         model_path,
         system_name=decode_system_name or system_name,
         backend_name=backend_name,
     )
-    resolve_nvfp4_for_system(decode_model_config, decode_system_name or system_name, model_path)
+    resolve_nvfp4_for_system(
+        decode_model_config,
+        decode_system_name or system_name,
+        model_path,
+        backend_name=backend_name,
+    )
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -1953,8 +2027,6 @@ def _run_disagg_estimate(
         engine_step_backend=engine_step_backend,
     )
 
-    prefill_database = load_database(system_name)
-    decode_database = load_database(decode_system_name)
     prefill_backend = get_backend(backend_name)
     decode_backend = get_backend(backend_name)
 
@@ -2176,6 +2248,7 @@ def _run_afd_estimate(
     get_model,
     free_gpu_memory_fraction,
     max_seq_len,
+    attention_backend: str | None = None,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accepted: float | None = None,
@@ -2231,6 +2304,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        attention_backend=attention_backend,
     )
     f_model_config = _build_model_config(
         f_tp_size,
@@ -2243,6 +2317,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        attention_backend=attention_backend,
     )
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
@@ -2257,9 +2332,9 @@ def _run_afd_estimate(
         a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
     )
     resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(a_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(a_model_config, system_name, model_path, backend_name=backend_name)
     resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(f_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(f_model_config, system_name, model_path, backend_name=backend_name)
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

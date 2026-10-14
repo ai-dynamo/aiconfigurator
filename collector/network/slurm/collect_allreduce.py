@@ -43,14 +43,31 @@ class NCCLProfiler:
             f.write(self._prefix + f",{self._layer_name},{self._latency}\n")
 
 
+def _resolve_rank(env):
+    """Resolve a Slurm task rank without silently aliasing tasks to rank 0."""
+    return int(env.get("RANK") or env["SLURM_PROCID"])
+
+
 world_size = int(os.environ["SLURM_NTASKS"])
-rank = int(os.environ["RANK"])
+# srun exports the per-task rank as SLURM_PROCID, not RANK; honor an explicit
+# RANK (torchrun-style launch) and otherwise fall back to the Slurm variable.
+rank = _resolve_rank(os.environ)
 gpus_per_node = int(os.environ["SLURM_NTASKS_PER_NODE"])
 local_rank = int(os.environ["SLURM_LOCALID"])
 
 # print(world_size, rank, gpus_per_node, local_rank)
-torch.cuda.set_device(local_rank)
-cudart.cudaSetDevice(local_rank)
+# The launchers bind exactly one GPU to each task. CUDA renumbers that task's
+# visible allocation to device 0; SLURM_LOCALID remains topology metadata and
+# is not a CUDA ordinal in this process-local namespace.
+visible_device_count = torch.cuda.device_count()
+if visible_device_count != 1:
+    raise RuntimeError(
+        "The Slurm custom-allreduce worker requires exactly one visible GPU per task; "
+        f"found {visible_device_count} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r})"
+    )
+device_index = 0
+torch.cuda.set_device(device_index)
+cudart.cudaSetDevice(device_index)
 mapping = Mapping(world_size=world_size, rank=rank, gpus_per_node=gpus_per_node, tp_size=world_size)
 
 all_reduce_params = AllReduceParams(
@@ -88,7 +105,9 @@ while min_size < max_size:
     # to reduce impact of L2 cache hit
     op_list = []
     for i in range(repeat_n):
-        allreduce = AllReduce(mapping=mapping).cuda()
+        # dtype enables MNNVL for multi-node TP (issue #1416):
+        # _torch/distributed/ops.py @v1.3.0rc20 builds `MNNVLAllReduce(mapping, dtype) if dtype else None`.
+        allreduce = AllReduce(mapping=mapping, dtype=torch.bfloat16).cuda()
         output = allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
         op_list.append(allreduce)
         # print(output)

@@ -493,7 +493,18 @@ def test_dsv4_sparse_kernel_view_key_order(systems_root: Path) -> None:
 
 
 def test_dsv4_sparse_kernel_view_missing_returns_none(systems_root: Path) -> None:
-    assert _fetch(_build_db(systems_root), "_dsv4_sparse_kernel_data.csa_attn") is None
+    # paged_mqa_logits is the sole surviving sparse sidecar view; with no
+    # parquet written it must report absent (None), not raise.
+    assert _fetch(_build_db(systems_root), "_dsv4_sparse_kernel_data.paged_mqa_logits") is None
+
+
+def test_dsv4_retired_sparse_kernel_views_are_unknown_attributes(systems_root: Path) -> None:
+    # hca_attn/csa_attn sidecars were retired (loaded-but-never-queried);
+    # their attributes are gone from the registry and fail loudly.
+    from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+
+    with pytest.raises(PerfDataNotAvailableError, match="unknown table-view attribute"):
+        _fetch(_build_db(systems_root), "_dsv4_sparse_kernel_data.csa_attn")
 
 
 # ---------------------------------------------------------------------------

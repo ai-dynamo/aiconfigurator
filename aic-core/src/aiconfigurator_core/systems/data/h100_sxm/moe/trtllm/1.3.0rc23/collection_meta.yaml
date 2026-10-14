@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: trtllm
+  version: 1.3.0rc23
+  image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23
+  image_digest: sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007
+tables:
+  moe_perf:
+    # 2026-08-24: union of two model-filtered stock-rc23 collections on the
+    # 2026-08 recollection campaign (aic-auto-collector, AIC revision below):
+    #   - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8, 4374 rows,
+    #     case_plan sha256:8189ee3c1d371c7755d069c9a981cbc543c9e820cb8202bf861bcf7ed8df72d6
+    #   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8, 6318 rows,
+    #     case_plan sha256:c3f692f177956572f2f53574d0fafe57ba9938d6d360f2892554eddf72f67a92
+    # Keys are disjoint (asserted at merge time). Supersedes the 1.3.0rc10
+    # bridging dirs as the trtllm-native Nemotron-3 MoE source once the
+    # current slot moves to rc23.
+    collector_ref: 1982d8d4b011cbfd85d84388fc2c8c0f5ef9dee9
+    collector_hash: sha256:98f836a296d76d084856edf02f0a89348ddf926b2ddd5f8d10f9551efb683b1a
+    collected_at: '2026-08-24'
+    rows: 10692
+    status: complete

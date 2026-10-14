@@ -8,11 +8,14 @@ import sys
 from aiconfigurator import __version__
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
+from aiconfigurator.deprecation import warn_legacy_cli
 from aiconfigurator.generator.api import generator_cli_helper
 from aiconfigurator.logging_utils import setup_logging
 
 
 def _run_cli(extra_args: list[str]) -> None:
+    mode = extra_args[0] if extra_args and not extra_args[0].startswith("-") else None
+    warn_legacy_cli(mode)
     if generator_cli_helper(extra_args):
         return
     cli_parser = argparse.ArgumentParser(description="AIConfigurator for disaggregated serving deployment.")

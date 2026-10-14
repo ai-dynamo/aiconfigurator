@@ -16,6 +16,7 @@ pytestmark = pytest.mark.unit
 
 CORE_SDK_LEAF_MODULES = [
     "afd_partition",
+    "attention_lanes",
     "backends.base_backend",
     "backends.factory",
     "backends.sglang_backend",

@@ -110,7 +110,7 @@ def _exact_token_probes(token_keys):
     reason="shipped h200_sxm sglang 0.5.6.post2 wideep MoE parquets not present",
 )
 def test_l1_sglang_wideep_moe_query_equivalence():
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     # Legacy tables: [quant][dist][topk][experts][hidden][inter][tp][ep] -> {tokens: leaf (ms)}.
@@ -159,7 +159,7 @@ def test_l1_sglang_wideep_moe_query_equivalence():
     reason="shipped gb200 trtllm 1.3.0rc10 wideep_moe parquet not present",
 )
 def test_l1_trtllm_wideep_moe_compute_query_equivalence():
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     # Legacy table: [kernel][quant][dist][topk][experts][hidden][inter][slots][tp][ep] -> {tokens: leaf (ms)}.
@@ -239,7 +239,7 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
     # (the retired moe.py); the unified query must reproduce it. Probed
     # raw-derivably: pick a collected token t0 (t0 % 4 == 0) and query
     # tok = t0 * 5 / 4, so the corrected walk lands EXACTLY on the raw t0 row.
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     legacy_table = fetch_table_view(db, "_wideep_context_moe_data")
     comparisons = 0
     for (quant, dist, topk, experts, hidden, inter, tp, ep), tokens in itertools.islice(
@@ -312,7 +312,7 @@ def test_moe_expert_compute_quant_mode_is_a_constructor_fact():
     from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
     from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     legacy_table = fetch_table_view(db, "_wideep_context_moe_data")
     (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
 

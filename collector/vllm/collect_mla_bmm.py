@@ -19,7 +19,9 @@ vLLM MLA-BMM queries fell back to the trtllm tables (the SDK's
 "low-fidelity fallback rows for mla_bmm_perf" warning).
 """
 
-__compat__ = "vllm==0.24.0"
+# 0.27.0 audit: same preflight as collect_mla_module.py (module surface and
+# MLA bmm call site unchanged in-image on GB300).
+__compat__ = "vllm==0.27.0"
 
 import pkg_resources
 import torch

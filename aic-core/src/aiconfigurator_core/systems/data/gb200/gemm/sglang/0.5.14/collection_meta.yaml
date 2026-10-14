@@ -1,11 +1,62 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: 1
-provenance: legacy
+schema_version: 2
+provenance: collected
 runtime:
   framework: sglang
   version: 0.5.14
+  image: lmsysorg/sglang:v0.5.14
+  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gemm_perf:
+    # 2026-08-13: REPLACED all 29526 fp8_block rows (AIC-1744) — the prior
+    # rows billed load-time UE8M0 weight-scale packing inside every timed
+    # call (~9 us on a ~7 us gemm); the collector now pre-packs at setup
+    # exactly as serving's process_weights_after_loading does, and the
+    # timed op is act-quant + gemm only (so these rows now legitimately
+    # include the per-token-group quant serving pays each step).
+    # This gb200 run is noisier than its gb300/b200_sxm siblings: 19 (n,k)
+    # shapes show m=32 rows >1.5x their m-neighbors (12 of them >15us),
+    # ~360 small-m interior spikes, and 1203 keys (4.1%) sit >1.3x above
+    # the replaced rows (vs 4 on gb300, 142 on b200_sxm). Median new/old
+    # is 0.673, the same overall win as the sibling systems, so the
+    # corrected rows still strictly improve on the packing-biased ones;
+    # 2026-08-14 (AIC-1759): re-collected once more and landed the per-key
+    # MIN of the two independent runs (one-sided spike contamination: the
+    # runs agree at median 1.000 while ~6% of keys spike >1.3x in each,
+    # mostly at different keys). m=32 spike shapes drop 24 -> 7; the ~6
+    # surviving shapes (e.g. n5120xk4096, n4096xk2048) spike in BOTH runs
+    # at the same keys — reproduced platform behavior, kept as measured.
+    # Per-key MIN attribution is deterministic: the first campaign owns ties,
+    # and the second owns only strict improvements. This accounts for all
+    # 29526 shipped fp8_block rows once: 14824 first + 14702 second.
+    # Same key grid;
+    # values-only replacement, deliberate append-only exception.
+    # First auto-collector run: parent pipeline 62505363, child 62505550,
+    # job 395795386, ops gemm,gdn. Independent redo: parent pipeline
+    # 62701543, child 62701570, job 397340617, op gemm. Both used the exact
+    # model filter Qwen/Qwen3.5-397B-A17B.
+    rows: 130536
     status: complete
+    collections:
+      # Exact sidecar from the first full campaign; 14759 strict minima plus
+      # 65 exact ties are attributed to this first event.
+      - collector_ref: 24a0d97479d63062af49f3cb41981e4c55f421ab
+        collector_hash: sha256:f7221785c44f83fde369369f1240f74f66a626851c8f92ab19e08ff6557bfdca
+        case_plan_hash: sha256:5e12321dc5ba7b83638bcb17922ec0d3f6739a75b44f5a063cadbb89807642b2
+        collected_at: '2026-08-13'
+        rows: 14824
+        status: partial
+        source_campaign_rows: 130906
+        source_campaign_status: partial
+      # Exact sidecar from the independent full redo; only its 14702 strict
+      # per-key improvements contribute to the shipped table.
+      - collector_ref: d5b00867b21b46dc98014f149189a7722f06f8e0
+        collector_hash: sha256:f7221785c44f83fde369369f1240f74f66a626851c8f92ab19e08ff6557bfdca
+        case_plan_hash: sha256:5e12321dc5ba7b83638bcb17922ec0d3f6739a75b44f5a063cadbb89807642b2
+        collected_at: '2026-08-14'
+        rows: 14702
+        status: partial
+        source_campaign_rows: 130906
+        source_campaign_status: partial

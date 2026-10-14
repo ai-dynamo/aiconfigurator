@@ -24,7 +24,7 @@ def _dump_exp_config(tasks, tmp_path):
     args = argparse.Namespace(inclusive_tpot=False, deployment_target="dynamo-j2")
     with patch(
         "aiconfigurator.cli.report_and_save.get_default_dynamo_version_mapping",
-        return_value=("1.0.0", {"vllm": "0.11.0"}),
+        return_value=("1.0.0", {"vllm": "current"}),
     ):
         save_results(
             args=args,
@@ -46,7 +46,7 @@ def test_mtp_checkpoint_stays_off_in_dumped_exp_config(tmp_path):
         total_gpus=1,
         system="gb200",
         backend="vllm",
-        backend_version="0.11.0",
+        backend_version="current",
         database_mode="SOL",
     )
     assert tasks["agg"].nextn == 0
@@ -61,7 +61,7 @@ def test_explicit_nextn_is_preserved_in_dumped_exp_config(tmp_path):
         total_gpus=1,
         system="gb200",
         backend="vllm",
-        backend_version="0.11.0",
+        backend_version="current",
         database_mode="SOL",
         nextn=1,
         nextn_accepted=0.7,

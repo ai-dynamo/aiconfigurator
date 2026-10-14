@@ -33,6 +33,7 @@ the surviving legacy query methods) is covered by
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 import pytest
@@ -208,6 +209,16 @@ class TestDeepSeekSglangLargeEP:
         # stream, so its token count scales by tp (deepseek.py:1109-1121).
         assert model.context_ops[0]._scale_num_tokens == 1
         assert model.generation_ops[0]._scale_num_tokens == 1
+
+    @pytest.mark.parametrize("override", [None, "default"], ids=["unset", "default"])
+    def test_framework_default_attention_backend_resolves_to_flashinfer(self, override):
+        """``default`` and unset share WideEP's established framework default."""
+        model = _deepseek_sglang(attention_backend=override)
+        context = json.loads(model.context_ops[4]._spec_json())["WideEpContextMla"]
+        generation = json.loads(model.generation_ops[4]._spec_json())["WideEpGenerationMla"]
+
+        assert context["attn_backend"] == "flashinfer"
+        assert generation["attn_backend"] == "flashinfer"
 
     def test_moe_block_ops_and_scales(self):
         model = _deepseek_sglang()

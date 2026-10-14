@@ -12,6 +12,8 @@ here on a real shipped database through the single-op plumbing and the
 SOL-decomposition FFI.
 """
 
+import json
+
 import pytest
 
 from aiconfigurator.sdk import common
@@ -20,14 +22,22 @@ from aiconfigurator.sdk.perf_database import get_database
 pytestmark = pytest.mark.unit
 
 
-def _context_attention_value(db) -> float:
-    """One ContextAttention twin evaluated under the database's LIVE mode
-    through the single-op plumbing (the b200 sglang 0.5.14 case the retired
-    shim test probed)."""
-    from aiconfigurator_core.sdk.engine import _evaluate_single_op
+class _CapturingEngineHandle:
+    def __init__(self, error=None):
+        self.ops = None
+        self.error = error
+
+    def evaluate_ops_json(self, ops_json, **_kwargs):
+        self.ops = json.loads(ops_json)
+        if self.error is not None:
+            raise self.error
+        return [("context_attention_query", 1.0, 0.0, "test")]
+
+
+def _context_attention_op():
     from aiconfigurator_core.sdk.operations.attention import ContextAttention
 
-    op = ContextAttention(
+    return ContextAttention(
         "context_attention_query",
         1.0,
         8,
@@ -35,7 +45,62 @@ def _context_attention_value(db) -> float:
         common.KVCacheQuantMode.bfloat16,
         common.FMHAQuantMode.bfloat16,
     )
+
+
+def _context_attention_value(db) -> float:
+    """One ContextAttention twin evaluated under the database's LIVE mode
+    through the single-op plumbing (the b200 sglang 0.5.14 case the retired
+    shim test probed)."""
+    from aiconfigurator_core.sdk.engine import _evaluate_single_op
+
+    op = _context_attention_op()
     return float(_evaluate_single_op(db, op, is_context=True, batch_size=1, s=32, prefix=0))
+
+
+def test_single_op_evaluation_preserves_pinned_attention_lane_order(monkeypatch):
+    from aiconfigurator_core.sdk import engine
+
+    db = get_database("b200_sxm", "sglang", "0.5.14")
+    op = _context_attention_op()
+    pinned_order = ["fa3", "default"]
+    op._lane_order = pinned_order
+    handle = _CapturingEngineHandle()
+    monkeypatch.setattr(engine, "_probe_handle_for", lambda *_args: handle)
+
+    engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=32)
+
+    assert handle.ops[0]["ContextAttention"]["lane_order"] == pinned_order
+    assert op._lane_order == pinned_order
+
+
+def test_single_op_evaluation_temporarily_resolves_default_attention_lane_order(monkeypatch):
+    from aiconfigurator_core.sdk import engine
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = get_database("b200_sxm", "sglang", "0.5.14")
+    op = _context_attention_op()
+    expected_order = resolved_lane_order_for_op(db, "_context_attention_data")
+    handle = _CapturingEngineHandle()
+    monkeypatch.setattr(engine, "_probe_handle_for", lambda *_args: handle)
+
+    engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=32)
+
+    assert handle.ops[0]["ContextAttention"]["lane_order"] == expected_order
+    assert op._lane_order == ["default"]
+
+
+def test_single_op_evaluation_restores_default_lane_order_after_engine_error(monkeypatch):
+    from aiconfigurator_core.sdk import engine
+
+    db = get_database("b200_sxm", "sglang", "0.5.14")
+    op = _context_attention_op()
+    handle = _CapturingEngineHandle(RuntimeError("evaluation failed"))
+    monkeypatch.setattr(engine, "_probe_handle_for", lambda *_args: handle)
+
+    with pytest.raises(RuntimeError, match="evaluation failed"):
+        engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=32)
+
+    assert op._lane_order == ["default"]
 
 
 def test_default_database_mode():

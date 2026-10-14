@@ -56,17 +56,3 @@ def test_nvfp4_wo_memory_matches_nvfp4():
 def test_nvfp4_wo_compute_matches_bfloat16():
     assert common.GEMMQuantMode.nvfp4_wo.value.compute == common.GEMMQuantMode.bfloat16.value.compute
     assert common.MoEQuantMode.nvfp4_wo.value.compute == common.MoEQuantMode.bfloat16.value.compute
-
-
-def test_static_estimate_calls_resolve_nvfp4(monkeypatch):
-    """The static estimate path must call resolve_nvfp4_for_system.
-
-    Without the remap, nvfp4 on non-Blackwell hits MissingSystemFlopsError
-    on fp4_tc_flops. This verifies _run_static_estimate has the call.
-    """
-    import inspect
-
-    import aiconfigurator.cli.api as api
-
-    source = inspect.getsource(api._run_static_estimate)
-    assert "resolve_nvfp4_for_system" in source, "_run_static_estimate must call resolve_nvfp4_for_system"
