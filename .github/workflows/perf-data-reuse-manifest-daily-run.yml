@@ -24,7 +24,7 @@ on:
 jobs:
   update-manifest:
     name: Regenerate perf_data_reuse_manifest.yaml
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write

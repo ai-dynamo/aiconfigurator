@@ -30,7 +30,7 @@ jobs:
       - update-support-matrix-release
       - update-support-matrix-main
     permissions: {}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Trigger support matrix autofix workflow
         env:

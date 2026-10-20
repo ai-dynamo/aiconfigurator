@@ -33,7 +33,7 @@ concurrency:
 jobs:
   refs:
     name: Resolve revisions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -57,7 +57,7 @@ jobs:
   collect:
     name: Collect snapshot (${{ matrix.side }})
     needs: refs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -134,7 +134,7 @@ jobs:
     # as passing in branch protection — the gate would silently pass on exactly
     # the PRs that break collection.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
