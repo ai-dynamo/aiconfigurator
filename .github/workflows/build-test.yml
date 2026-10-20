@@ -20,7 +20,7 @@ concurrency:
 jobs:
   cargo-deny:
     name: Cargo Deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
@@ -38,7 +38,7 @@ jobs:
 
   core-public-api-contract:
     name: aic-core public API contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -83,7 +83,7 @@ jobs:
 
   python-compatibility:
     name: Python ${{ matrix.python-version }} compatibility
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -118,7 +118,7 @@ jobs:
 
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -228,7 +228,7 @@ jobs:
 
   rust-engine-step-parity:
     name: Rust/Python engine-step parity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout repository

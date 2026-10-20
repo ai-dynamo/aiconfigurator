@@ -25,7 +25,7 @@ on:
 jobs:
   check:
     name: Check collector data
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -108,7 +108,7 @@ jobs:
   # NOT enabled until the existing finding backlog is triaged.
   cross-backend-consistency:
     name: Perf data sanity (informational)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     continue-on-error: true
     permissions:
