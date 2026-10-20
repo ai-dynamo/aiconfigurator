@@ -267,6 +267,58 @@ def test_worker_setup_table_keeps_rows_when_sla_disabled():
     assert "No configurations for agg met the TPOT constraint" not in table
 
 
+@pytest.mark.parametrize(
+    ("is_moe", "gpus_worker", "parallel"),
+    [
+        (False, "2 (=1x1x2)", "tp1pp1cp2"),
+        (True, "2 (=1x1x1x2)", "tp1pp1dp1cp2etp1ep2"),
+    ],
+)
+def test_agg_worker_setup_table_includes_cp(monkeypatch, is_moe, gpus_worker, parallel):
+    """A cp2 agg worker uses tp*pp*dp*cp = 2 GPUs; the table must not show 1."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    config_df = pd.DataFrame(
+        [
+            {
+                "backend": "sglang",
+                "tokens/s/gpu": 500.0,
+                "tokens/s/user": 100.0,
+                "request_rate": 3.0,
+                "ttft": 100.0,
+                "tpot": 10.0,
+                "request_latency": 250.0,
+                "concurrency": 20,
+                "num_total_gpus": 2,
+                "tp": 1,
+                "pp": 1,
+                "dp": 1,
+                "cp": 2,
+                "moe_tp": 1,
+                "moe_ep": 2,
+                "bs": 20,
+            }
+        ]
+    )
+
+    table = _plot_worker_setup_table(
+        "agg",
+        config_df,
+        total_gpus=8,
+        tpot_target=30.0,
+        top=1,
+        is_moe=is_moe,
+        request_latency_target=None,
+        show_power=False,
+    )
+
+    header, row = (
+        [cell.strip() for cell in line.strip("|").split("|")] for line in table.splitlines() if line.startswith("|")
+    )
+    cells = dict(zip(header, row, strict=True))
+    assert cells["gpus/worker"] == gpus_worker
+    assert cells["parallel"] == parallel
+
+
 def test_draw_pareto_plain_output_is_pure_ascii():
     """Ensure piped Pareto chart output is pure ASCII (no mojibake under `cat -v`).
 

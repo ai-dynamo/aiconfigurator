@@ -372,23 +372,30 @@ def _plot_worker_setup_table(
         for i, row in enumerate(top_configs.to_dict("records")):
             display_total_gpus = row["total_gpus_used"] if "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] * row["replicas"]
+            # Same cp handling as the disagg (p) columns: the worker GPU total
+            # comes from the shared dims list, and cp is shown only when > 1.
+            worker_gpus = _composed_worker_gpus(row)
+            cp = parallel_dim(row.get("cp"))
+            cp_label = f"cp{_cli_underline(str(cp))}" if cp > 1 else ""
+            cp_factor = f"x{_cli_underline(str(cp))}" if cp > 1 else ""
             if is_moe:
                 parallel = (
                     f"tp{_cli_underline(str(row['tp']))}"
                     f"pp{_cli_underline(str(row['pp']))}"
                     f"dp{_cli_underline(str(row['dp']))}"
+                    f"{cp_label}"
                     f"etp{row['moe_tp']}ep{row['moe_ep']}"
                 )
                 gpus_worker = (
-                    f"{row['pp'] * row['tp'] * row['dp']} "
+                    f"{worker_gpus} "
                     f"(={_cli_underline(str(row['tp']))}x"
                     f"{_cli_underline(str(row['pp']))}x"
-                    f"{_cli_underline(str(row['dp']))})"
+                    f"{_cli_underline(str(row['dp']))}{cp_factor})"
                 )
             else:
-                parallel = f"tp{_cli_underline(str(row['tp']))}pp{_cli_underline(str(row['pp']))}"
+                parallel = f"tp{_cli_underline(str(row['tp']))}pp{_cli_underline(str(row['pp']))}{cp_label}"
                 gpus_worker = (
-                    f"{row['pp'] * row['tp']} (={_cli_underline(str(row['tp']))}x{_cli_underline(str(row['pp']))})"
+                    f"{worker_gpus} (={_cli_underline(str(row['tp']))}x{_cli_underline(str(row['pp']))}{cp_factor})"
                 )
             row_data = [
                 i + 1,
@@ -398,7 +405,6 @@ def _plot_worker_setup_table(
             e_workers = int(row.get("(e)workers", 0) or 0)
             if e_workers:
                 # E+agg cell: (a)workers language-only agg workers + encode pool.
-                worker_gpus = _composed_worker_gpus(row)
                 gpus_replica = (
                     f"{row['num_total_gpus']} "
                     f"(={a_workers}x{worker_gpus}+{e_workers}x{int(row.get('(e)tp', 0) or 0)}(e))"
