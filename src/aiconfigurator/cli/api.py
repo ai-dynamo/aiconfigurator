@@ -11,7 +11,7 @@ This module provides simple function interfaces to the CLI's "default", "exp",
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 
 import pandas as pd
 
@@ -392,12 +392,10 @@ def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
     and topology-specific caps (e.g. deepep_moe intra-node EP limits,
     non-MoE pinned-to-1 dims) without any manual extension logic.
     """
-    import dataclasses
-
     rebuilt = {}
     for name, task in base_tasks.items():
-        reset = {f.name: None for f in dataclasses.fields(task) if f.name in TASK_REBUILD_FIELDS}
-        rebuilt[name] = dataclasses.replace(task, total_gpus=total_gpus, **reset)
+        reset = {f.name: None for f in fields(task) if f.name in TASK_REBUILD_FIELDS}
+        rebuilt[name] = replace(task, total_gpus=total_gpus, **reset)
     return rebuilt
 
 
@@ -577,6 +575,9 @@ def cli_recommend(
         escalation_budgets.append(budget)
         budget *= 2
 
+    # Initial attempt: interim (False) if escalation budgets exist, final (True) if none
+    is_final = len(escalation_budgets) == 0
+    base_tasks = {name: replace(task, recommend_done=is_final) for name, task in base_tasks.items()}
     result = _execute_and_wrap_result(
         base_tasks,
         mode="default",
@@ -591,6 +592,11 @@ def cli_recommend(
         for name, outcome in result.outcomes.items()
         if outcome.error is not None and is_gpu_retriable(outcome.error)
     ]
+    # If initial attempt has no retriable errors, mark tasks as final for correct diagnostics
+    if not retriable and not is_final:
+        for name in result.tasks:
+            result.tasks[name] = replace(result.tasks[name], recommend_done=True)
+
     for attempt, gpu_budget in enumerate(escalation_budgets):
         if not retriable:
             break
@@ -600,6 +606,9 @@ def cli_recommend(
             gpu_budget,
         )
         tasks = _build_recommend_tasks(base_tasks, gpu_budget)
+        # Mark as final if this is the last escalation budget
+        is_final_attempt = attempt == len(escalation_budgets) - 1
+        tasks = {name: replace(task, recommend_done=is_final_attempt) for name, task in tasks.items()}
         result = _execute_and_wrap_result(
             tasks,
             mode="default",
@@ -614,6 +623,10 @@ def cli_recommend(
             for name, outcome in result.outcomes.items()
             if outcome.error is not None and is_gpu_retriable(outcome.error)
         ]
+        # Early termination: if no more retriable, mark tasks as final
+        if not retriable and not is_final_attempt:
+            for name in result.tasks:
+                result.tasks[name] = replace(result.tasks[name], recommend_done=True)
 
     if not result.best_configs:
         raise NoFeasibleConfigError("No feasible GPU configuration found for the given load target.")

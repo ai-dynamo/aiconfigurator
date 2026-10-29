@@ -473,6 +473,7 @@ def sweep_agg(
     num_gpu_list: list[int] | None = None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    recommend_done: bool | None = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
@@ -677,10 +678,14 @@ def sweep_agg(
                 "model identity/quant modes). Check the collected cells against the resolved quant "
                 "configuration, or use forward_model='op_level'."
             )
-        raise InsufficientMemoryError(
-            "sweep_agg: no results — model does not fit in GPU memory for any parallel config. "
-            "Try increasing --total-gpus, using a quantized model, or a system with more VRAM per GPU."
-        )
+        msg = "sweep_agg: no results — model does not fit in GPU memory for any parallel config."
+        if recommend_done is False:  # Interim: more budgets to try
+            msg += " Trying with more GPUs and different parallelism combinations..."
+        elif recommend_done is True:  # Complete: no more budgets
+            msg += " No viable configuration found. Try a quantized model or a system with more VRAM per GPU."
+        else:  # None: default mode
+            msg += " Try increasing --total-gpus, using a quantized model, or a system with more VRAM per GPU."
+        raise InsufficientMemoryError(msg)
     if not saw_memory_fit:
         raise KVCacheCapacityError(
             "sweep_agg: no results — requested batch_size exceeds KV cache capacity for all configs. "
@@ -711,6 +716,7 @@ def _get_disagg_worker_candidates(
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
     free_gpu_memory_fraction: float | None = None,
+    recommend_done: bool | None = None,
 ) -> pd.DataFrame:
     """Enumerate (parallel, batch_size) worker candidates for a disagg role.
 
@@ -812,10 +818,14 @@ def _get_disagg_worker_candidates(
                     "matches the model identity/quant modes). Check the collected cells against the "
                     "resolved quant configuration, or use forward_model='op_level'."
                 )
-            raise InsufficientMemoryError(
-                f"sweep_disagg/{role}: no results — model does not fit in GPU memory for any parallel config. "
-                "Try increasing GPU budget, using a quantized model, or a system with more VRAM per GPU."
-            )
+            msg = f"sweep_disagg/{role}: no results — model does not fit in GPU memory for any parallel config."
+            if recommend_done is False:  # Interim: more budgets to try
+                msg += " Trying with more GPUs and different parallelism combinations..."
+            elif recommend_done is True:  # Complete: no more budgets
+                msg += " No viable configuration found. Try a quantized model or a system with more VRAM per GPU."
+            else:  # None: default mode
+                msg += " Try increasing GPU budget, using a quantized model, or a system with more VRAM per GPU."
+            raise InsufficientMemoryError(msg)
         raise NoFeasibleConfigError(
             f"sweep_disagg/{role}: no parallel configuration met TTFT/TPOT or request-latency constraints."
         )
@@ -1319,6 +1329,7 @@ def sweep_disagg(
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
     free_gpu_memory_fraction: float | None = None,
+    recommend_done: bool | None = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
 
@@ -1432,6 +1443,7 @@ def sweep_disagg(
         predictor=predictor,
         speculative_profile=speculative_profile,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
+        recommend_done=recommend_done,
     )
     decode_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
@@ -1446,6 +1458,7 @@ def sweep_disagg(
         predictor=predictor,
         speculative_profile=speculative_profile,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
+        recommend_done=recommend_done,
     )
 
     if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:

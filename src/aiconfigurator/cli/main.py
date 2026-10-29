@@ -2141,6 +2141,7 @@ def _execute_tasks(
     results: dict[str, dict[str, pd.DataFrame]] = {}
     outcomes: dict[str, ExperimentOutcome] = {}
     start_time = time.time()
+    recommend_mode = target_request_rate is not None or target_concurrency is not None
 
     def _run_one(exp_name: str, task) -> tuple[str, dict | None, ExperimentOutcome]:
         """Run a single experiment and return (name, result_or_None, outcome)."""
@@ -2161,7 +2162,7 @@ def _execute_tasks(
             # internally, so --total-gpus advice would point at an ignored flag.
             gpu_hint = (
                 "(2) the model does not fit — try a quantized model; "
-                if target_request_rate is not None or target_concurrency is not None
+                if recommend_mode
                 else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
             )
             msg = (
@@ -2178,7 +2179,7 @@ def _execute_tasks(
             return exp_name, None, ExperimentOutcome(exp_name, error=exc)
         except Exception as exc:
             if is_expected_cli_error(exc):
-                logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
+                logger.log(logging.INFO, "Experiment %s: %s", exp_name, exc)
                 logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
             else:
                 logger.exception("Error running experiment %s", exp_name)
@@ -2202,17 +2203,27 @@ def _execute_tasks(
     if len(results) < 1:
         first_config = next(iter(tasks.values()), None)
         db_mode = getattr(first_config, "database_mode", None) if first_config else None
-        if db_mode == common.DatabaseMode.SILICON.name:
-            logger.error(
-                "No successful experiment runs to compare. "
-                "If this is a frontier or newly-released model, retry with --database-mode HYBRID "
-                "to extend coverage beyond the silicon database."
-            )
-        else:
-            logger.error("No successful experiment runs to compare.")
+        is_recommend_done = recommend_mode and getattr(first_config, "recommend_done", None) is True
+
+        # Log errors at ERROR level for final attempts, DEBUG for interim escalation
+        if is_recommend_done or not recommend_mode:
+            if db_mode == common.DatabaseMode.SILICON.name:
+                logger.error(
+                    "No successful experiment runs to compare. "
+                    "If this is a frontier or newly-released model, retry with --database-mode HYBRID "
+                    "to extend coverage beyond the silicon database."
+                )
+            elif not recommend_mode:
+                logger.error("No successful experiment runs to compare.")
+
         for outcome in outcomes.values():
             if outcome.error is not None:
-                logger.error("  -> Experiment %s failed: %s", outcome.experiment, outcome.error)
+                logger.log(
+                    logging.INFO if recommend_mode else logging.ERROR,
+                    "  -> Experiment %s: %s",
+                    outcome.experiment,
+                    outcome.error,
+                )
         return "none", {}, {}, {}, {}, outcomes
 
     best_configs: dict[str, pd.DataFrame] = {}
