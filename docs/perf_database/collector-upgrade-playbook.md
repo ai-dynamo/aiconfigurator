@@ -213,6 +213,11 @@ For each operation, compare:
 - duplicates, malformed rows, and partial writes;
 - task-owned container exit and final GPU state.
 
+Optional `power` and `power_limit` columns use non-null `float64` values.
+Measurements must be finite and non-negative; `0.0` marks an unavailable
+measurement. The shipped-data invariant and parquet-diff gate enforce this same
+contract.
+
 Do not describe a staged collection as one globally green run when an accepted
 stage exited nonzero. Preserve the per-stage summaries and disclose accepted
 capacity failures precisely.

@@ -189,7 +189,7 @@ def _patch_get_model(monkeypatch):
         return m
 
     monkeypatch.setattr(
-        "aiconfigurator.sdk.inference_session.models.get_model",
+        "aiconfigurator_core.sdk.models.get_model",
         _fake_get_model,
     )
 

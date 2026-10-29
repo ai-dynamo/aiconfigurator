@@ -6,8 +6,9 @@
 Policy (2026-08): power/energy tests pin no values and bind to no specific
 backend version. They assert query-surface invariants over WHATEVER power
 data is currently shipped: every parquet that carries power columns must
-satisfy the energy model's input contract (finite, non-negative power;
-positive power limit). The energy MATH is anchored by the rust synthetic
+satisfy the committed-data contract (non-null float64, finite, non-negative
+metrics; zero denotes an unavailable measurement). The energy MATH is anchored
+by the rust synthetic
 oracles on power-carrying fixtures (``energy_test_fixtures`` tests in
 ``operators/{gemm,attention}.rs``); this test guards the shipped data plane
 those models consume. If no power-carrying parquet is shipped at all, the
@@ -20,6 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import aiconfigurator_core
+from tools.perf_database.parquet_diff import _power_metric_issues
 
 pytestmark = pytest.mark.unit
 
@@ -44,13 +46,5 @@ def test_power_columns_satisfy_energy_model_input_contract():
     for path in files:
         rel = path.relative_to(_DATA_ROOT)
         table = pq.read_table(path, columns=[c for c in _POWER_COLUMNS if c in pq.read_schema(path).names])
-        frame = table.to_pandas()
-        if "power" in frame:
-            bad = frame["power"].isna() | (frame["power"] < 0)
-            if bad.any():
-                problems.append(f"{rel}: {int(bad.sum())} rows with NaN/negative power")
-        if "power_limit" in frame:
-            bad = frame["power_limit"].isna() | (frame["power_limit"] <= 0)
-            if bad.any():
-                problems.append(f"{rel}: {int(bad.sum())} rows with NaN/non-positive power_limit")
+        problems.extend(f"{rel}: {issue}" for issue in _power_metric_issues(table))
     assert not problems, "power data violates the energy-model input contract:\n" + "\n".join(problems)

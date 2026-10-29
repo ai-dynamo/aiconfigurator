@@ -318,7 +318,7 @@ def test_agg_estimate_responds_to_common_nextn():
 
 def test_agg_estimate_resolves_lightning_nvfp4_for_hopper_before_model_construction(monkeypatch):
     """Hopper must use the weight-only MoE lane before its ops are built."""
-    import aiconfigurator.sdk.models as models
+    import aiconfigurator_core.sdk.models as models
 
     class ModelConstructionObservedError(Exception):
         pass

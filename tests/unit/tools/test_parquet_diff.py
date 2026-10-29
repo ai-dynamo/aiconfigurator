@@ -167,6 +167,12 @@ def test_power_limit_is_a_measurement_not_an_identity_column(parquet_diff_module
     assert parquet_diff_module._select_key_columns(columns, columns) == ["framework", "shape"]
 
 
+def test_power_metric_contract_accepts_unmeasured_zero_sentinels(parquet_diff_module):
+    table = pa.table({"power": [250.0, 0.0], "power_limit": [1000.0, 0.0]})
+
+    assert parquet_diff_module._power_metric_issues(table) == []
+
+
 def test_power_metric_contract_rejects_null_non_double_and_invalid_values(parquet_diff_module):
     table = pa.table(
         {

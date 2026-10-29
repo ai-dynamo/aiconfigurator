@@ -1593,7 +1593,7 @@ def test_run_single_agg_calls_predict_agg_worker_with_fixed_point(monkeypatch):
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
-    monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
+    monkeypatch.setattr("aiconfigurator_core.sdk.models.get_model", fake_get_model)
     monkeypatch.setattr(predict, "predict_agg_worker", fake_predict_agg_worker)
 
     t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
@@ -1644,7 +1644,7 @@ def test_run_single_agg_raises_on_oom(monkeypatch):
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
-    monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
+    monkeypatch.setattr("aiconfigurator_core.sdk.models.get_model", fake_get_model)
     monkeypatch.setattr(predict, "predict_agg_worker", fake_predict_agg_worker)
 
     t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
@@ -1716,7 +1716,7 @@ def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
-    monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
+    monkeypatch.setattr("aiconfigurator_core.sdk.models.get_model", fake_get_model)
     monkeypatch.setattr(predict, "predict_disagg_worker", fake_predict_disagg_worker)
 
     t = Task(

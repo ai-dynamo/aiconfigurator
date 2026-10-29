@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 .git
-.github
+.github/*
+!.github/pull_request_template.md
+!.github/AIC_MIGRATION_CHECKLIST.md
+!.github/ISSUE_TEMPLATE/
 .claude
 .claude-config
 .codex

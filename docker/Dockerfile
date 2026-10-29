@@ -141,7 +141,11 @@ RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
     uv pip install --find-links /wheelhouse "${AIC_WHL}[dev]" && \
     rm -rf /wheelhouse
 
-COPY pytest.ini /workspace/
+# Repository-policy tests read the contributor docs and package metadata.
+COPY pytest.ini pyproject.toml README.md CONTRIBUTING.md /workspace/
+COPY docs/index.html docs/aisimulate_migration.md /workspace/docs/
+COPY .github/pull_request_template.md .github/AIC_MIGRATION_CHECKLIST.md /workspace/.github/
+COPY .github/ISSUE_TEMPLATE/ /workspace/.github/ISSUE_TEMPLATE/
 COPY tests/ /workspace/tests/
 COPY src/ /workspace/src/
 COPY aic-core/ /workspace/aic-core/
