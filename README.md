@@ -550,7 +550,9 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 #### Detailed Support Matrix
 
-For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
+For current model and hardware coverage, use the **[AISimulate FPE Support Matrix](https://ai-dynamo.org/aisimulate/fpe-support-matrix/)**.
+
+The **[legacy AIConfigurator Support Matrix](https://ai-dynamo.org/aiconfigurator/support-matrix/)** retains AIC compatibility coverage and displays a prominent warning linking to the current matrix. It fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
 
 The raw data is also available as [per-system CSV files](aic-core/src/aiconfigurator_core/systems/support_matrix).
 
