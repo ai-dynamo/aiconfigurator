@@ -401,7 +401,10 @@ def test_full_encoder_attention_profiles_combine_defaults_and_model_deltas(monke
         }
 
         assert default_keys <= keys
-        assert keys - default_keys == {(1, 64), (1, 72)}
+        # (1,64)/(1,72): TP=full shards of Qwen3-VL/Kimi ViTs down to one head.
+        # (*,104): Mistral-Medium-3.5 Pixtral ViT (head_dim=104 is absent from the
+        # base 64/72/80 grid), TP-sharded to num_heads {16,8,4,2,1}.
+        assert keys - default_keys == {(1, 64), (1, 72), (1, 104), (2, 104), (4, 104), (8, 104), (16, 104)}
 
 
 def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
