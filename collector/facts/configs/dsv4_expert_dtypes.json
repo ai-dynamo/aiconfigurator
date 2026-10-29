@@ -1,0 +1,34 @@
+{
+ "deepseek-ai/DeepSeek-V4-Flash-0731": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "I8"
+ },
+ "deepseek-ai/DeepSeek-V4-Pro-0813": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "I8"
+ },
+ "deepseek-ai/DeepSeek-V4-Flash": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "I8"
+ },
+ "deepseek-ai/DeepSeek-V4-Pro": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "I8"
+ },
+ "sgl-project/DeepSeek-V4-Flash-FP8": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "F8_E4M3"
+ },
+ "sgl-project/DeepSeek-V4-Pro-FP8": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "F8_E4M3"
+ },
+ "nvidia/DeepSeek-V4-Flash-NVFP4": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "U8"
+ },
+ "nvidia/DeepSeek-V4-Pro-NVFP4": {
+  "key": "layers.0.ffn.experts.0.w1.weight",
+  "dtype": "U8"
+ }
+}
