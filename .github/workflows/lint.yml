@@ -13,7 +13,7 @@ on:
 jobs:
   ruff:
     name: Lint and Format (Ruff)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -34,7 +34,7 @@ jobs:
 
   eslint:
     name: Lint and Format (ESLint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

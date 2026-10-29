@@ -23,7 +23,7 @@ on:
 jobs:
   accuracy-regression-testing:
     name: AIC Accuracy Regression Testing
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
