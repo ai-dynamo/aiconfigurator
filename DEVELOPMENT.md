@@ -107,6 +107,13 @@ pytest tests/e2e
 pytest -m "unit or build"
 ```
 
+When monkeypatching attributes exposed by a legacy SDK package facade, target
+the owning `aiconfigurator_core.sdk` package, for example
+`aiconfigurator_core.sdk.models.get_model`. Pytest 9.2 restores attributes from
+the target's own namespace; a delegated attribute is absent from the facade's
+namespace and can be deleted from the core package during teardown. Patching
+the core package keeps both import paths consistent and restores the original.
+
 ## Data Collection (Advanced)
 
 Data collection is typically not required for development. The repository includes pre-collected performance databases for supported systems.
