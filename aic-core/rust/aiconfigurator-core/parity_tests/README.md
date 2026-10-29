@@ -62,6 +62,11 @@ uv run pytest -q aic-core/rust/aiconfigurator-core/parity_tests/test_compile_eng
 - `goldens/per_op.json` — the summary per-op dicts (latency + energy +
   source) for the compile-engine subset; the per-op op-list FFI anchor.
 
+The B200 TRT-LLM 1.3.0rc20 GPT-OSS-20B and Nemotron cases include measured
+energy from the matched power collection in #1584. Their per-op goldens
+retain the existing latencies and sources, and the tests require nonzero
+energy coverage for both cases.
+
 The FPM parity class (`TestRustEngineStepFpmParity`) follows the same
 freeze-then-delete pattern with INLINE frozen references (`_FPM_*_FROZEN`):
 its dataset is generated per-run from `_FPM_ROWS`, so it sits outside

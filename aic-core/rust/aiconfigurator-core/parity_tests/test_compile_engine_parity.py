@@ -80,9 +80,10 @@ pytestmark = pytest.mark.integration
 #            Fallback-MLA path and the sglang perf tables.
 #   trtllm : gpt-oss-20b (MoE -> exercises the `TrtllmAlltoall` flavor +
 #            trtllm comm quant + trtllm MoE) and Nemotron-Super-49B (dense,
-#            CustomAllReduce-heavy), both b200_sxm/trtllm/1.3.0rc10. The MoE
-#            case is the load-bearing one: it is the only subset member that
-#            hits the trtllm dispatch-flavor branch.
+#            CustomAllReduce-heavy), both b200_sxm/trtllm/1.3.0rc20 with
+#            matched power measurements. The MoE case is the load-bearing
+#            one: it is the only subset member that hits the trtllm
+#            dispatch-flavor branch.
 _SUBSET_IDS_BY_BACKEND = {
     "vllm": [
         "minimax-m25-b200-vllm-isl1024-osl2",
@@ -103,10 +104,12 @@ _SUBSET_IDS_BY_BACKEND = {
 
 # Subset members on power-carrying database identities: their per-op goldens
 # must carry nonzero energy_wms, so the energy comparison branch is proven to
-# execute (anti-vacuous guard in TestCompileEnginePerOpParity). EMPTY since
-# the 2026-08 prune removed the last engine-step-complete power identity —
-# repopulate when a current-slot power collection lands.
-_POWER_SUBSET_IDS: set[str] = set()
+# execute (anti-vacuous guard in TestCompileEnginePerOpParity). The matched
+# B200 TRT-LLM 1.3.0rc20 power collection restored this coverage in #1584.
+_POWER_SUBSET_IDS = {
+    "gpt-oss-20b-b200-trtllm-isl1024-osl2",
+    "nemotron-nas-b200-trtllm-isl1024-osl2",
+}
 
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.
@@ -444,7 +447,7 @@ class TestCompileEnginePerOpParity:
                         f"golden={golden_source!r} rust={source!r} "
                         f"(not in _ACCEPTED_SOURCE_TAG_DIVERGENCES)"
                     )
-        # Anti-vacuous guard: the power-identity subset member exists so the
+        # Anti-vacuous guard: the power-identity subset members exist so the
         # energy comparison above actually executes (every other subset case
         # sits on a latency-only identity where all golden energy_wms are 0).
         if case_id in _POWER_SUBSET_IDS:
