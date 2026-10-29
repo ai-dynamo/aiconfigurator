@@ -183,6 +183,9 @@ class VisionEncoderConfig:
             rotated fraction — the 2-axis vision RoPE always rotates the full
             head_dim (vLLM ApplyRotaryEmb / SGLang cat([cos, cos])). Only gates
             the encoder_rope_apply op; 0.0 means no RoPE.
+        gated_mlp (bool): ViT FFN is a gated (SwiGLU-style) MLP with separate
+            gate and up projections (e.g. Pixtral, hidden_act="silu"). False
+            (default) models a plain up/down MLP (e.g. Qwen3-VL, GELU).
     """
 
     depth: int
@@ -197,6 +200,7 @@ class VisionEncoderConfig:
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
     partial_rotary_factor: float = 0.0
+    gated_mlp: bool = False
 
 
 @dataclass(frozen=True)
@@ -638,6 +642,8 @@ DefaultHFModels = {
     "stepfun-ai/Step-3.7-Flash-FP8",
     "nvidia/Gemma-4-26B-A4B-NVFP4",
     "nvidia/Gemma-4-31B-IT-NVFP4",
+    # Mistral Medium 3.5 Models
+    "mistralai/Mistral-Medium-3.5-128B",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
@@ -703,6 +709,7 @@ ModelFamily = {
     "GEMMA4MIX",
     "MINIMAXM3",
     "STEP3P7",
+    "MISTRAL3",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -741,6 +748,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
     "Gemma4ForConditionalGeneration": "GEMMA4MIX",
+    "Mistral3ForConditionalGeneration": "MISTRAL3",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
@@ -760,6 +768,7 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Qwen3VLForConditionalGeneration": "text_config",
     "Qwen3VLMoeForConditionalGeneration": "text_config",
     "MiniMaxM3SparseForConditionalGeneration": "text_config",
+    "Mistral3ForConditionalGeneration": "text_config",
 }
 
 # Architectures whose speculative decoding is DSPARK-style: ``nextn`` is the
