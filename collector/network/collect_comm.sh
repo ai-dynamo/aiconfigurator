@@ -93,7 +93,16 @@ echo "================================================"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 if [[ "$device" == "cuda" ]]; then
-    GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+    if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
+        # nvidia-smi ignores CUDA_VISIBLE_DEVICES; count the visible entries instead.
+        IFS=',' read -ra _visible_gpus <<< "$CUDA_VISIBLE_DEVICES"
+        GPU_COUNT=0
+        for _gpu in "${_visible_gpus[@]}"; do
+            [[ -n "${_gpu// /}" ]] && GPU_COUNT=$((GPU_COUNT + 1))
+        done
+    else
+        GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+    fi
 elif [[ "$device" == "xpu" ]]; then
     GPU_COUNT=$(sycl-ls | grep '\[level_zero:gpu\]' | wc -l)
 fi

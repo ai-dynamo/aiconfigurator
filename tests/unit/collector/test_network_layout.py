@@ -158,3 +158,41 @@ def test_advertised_default_worlds_expand_to_at_least_one_case(monkeypatch):
 
     for world in _default_gpu_list(SUBMIT_TRTLLM_ALLTOALL):
         assert ata.get_default_test_cases(world), f"trtllm alltoall default world {world} expanded to zero cases"
+
+
+def _run_collect_comm_with_fake_tools(tmp_path: Path, cuda_visible_devices: str | None) -> tuple[str, list[str]]:
+    """Run collect_comm.sh against a fake 8-GPU nvidia-smi and a recording torchrun."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "torchrun_calls.txt"
+    (bin_dir / "nvidia-smi").write_text("#!/bin/bash\nfor i in $(seq 8); do echo 'NVIDIA B300'; done\n")
+    (bin_dir / "torchrun").write_text(f'#!/bin/bash\necho "$1" >> "{calls}"\n')
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin"}
+    if cuda_visible_devices is not None:
+        env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+    result = subprocess.run(
+        ["bash", str(NETWORK_ROOT / "collect_comm.sh"), "--skip-nccl", "--all_reduce_backend", "vllm"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout, calls.read_text().split()
+
+
+def test_collect_comm_counts_all_gpus_without_cuda_visible_devices(tmp_path):
+    stdout, calls = _run_collect_comm_with_fake_tools(tmp_path, None)
+    # BSD wc pads its count with spaces.
+    assert re.search(r"Found\s+8 GPUs\.", stdout)
+    assert calls == ["--nproc_per_node=2", "--nproc_per_node=4", "--nproc_per_node=8"]
+
+
+def test_collect_comm_honors_cuda_visible_devices(tmp_path):
+    # nvidia-smi lists every GPU on the node regardless of CUDA_VISIBLE_DEVICES;
+    # on a node shared with other jobs the collector must stay on its own GPUs.
+    stdout, calls = _run_collect_comm_with_fake_tools(tmp_path, "4,5,6,7")
+    assert re.search(r"Found\s+4 GPUs\.", stdout)
+    assert calls == ["--nproc_per_node=2", "--nproc_per_node=4"]
